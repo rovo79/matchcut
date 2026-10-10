@@ -1,0 +1,7 @@
+# Runtime dependencies of matchcut.pipeline (plus an ffmpeg/ffprobe binary on PATH).
+numpy>=1.24
+pillow>=10
+pydantic>=2
+anthropic>=1.13
+# tests
+pytest>=8

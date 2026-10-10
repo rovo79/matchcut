@@ -5,6 +5,18 @@
 - Want a high level overview? Read [this blog post](https://netflixtechblog.com/match-cutting-at-netflix-finding-cuts-with-smooth-visual-transitions-31c3fc14ae59?gi=8873f373fd1d)
 - Want all the details? Read [the preprint](https://arxiv.org/abs/2210.05766)
 
+### AI editing pipeline
+
+`matchcut.pipeline` is an end-to-end editing pipeline built on the ideas in this repo: it samples the footage, has Claude find the visual narrative and assemble a rough cut, then runs refinement passes (match cuts, continuity, pacing, transitions, model polish) to produce a final cut, an EDL and a render.
+
+```shell
+pip install -r requirements-pipeline.txt   # needs ffmpeg on PATH
+python -m matchcut.pipeline run footage.mp4 --brief "..." --target-duration 60
+python -m matchcut.pipeline run footage.mp4 --backend mock   # offline dry run
+```
+
+See [docs/PIPELINE.md](docs/PIPELINE.md) for the stages, passes, outputs and how to iterate.
+
 ### Getting started
 1. Create and activate the conda environment.
 ```shell

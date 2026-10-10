@@ -3,3 +3,5 @@ results/
 .pyc
 .DS_Store
 __pycache__/
+*_edit/
+.pytest_cache/
