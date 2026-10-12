@@ -56,13 +56,18 @@ class MatchScorer:
 
     # -- feature access ----------------------------------------------------
     def _cell(self, t: float, before: bool) -> int:
-        """Cell representing the frame just before (tail) or at (head) time t."""
-        i = self.cells.nearest(t)
-        if before and self.cells.times[i] > t and i > 0:
-            i -= 1
-        if not before and self.cells.times[i] < t and i + 1 < len(self.cells):
-            i += 1
-        return i
+        """Cell representing the frame just before (tail) or at (head) time t.
+
+        Out-points are exclusive, so the tail cell is the last cell whose centre is
+        strictly before ``t``; in-points are inclusive, so the head cell is the first
+        cell whose centre is at or after ``t``.
+        """
+        times = self.cells.times
+        if len(times) == 0:
+            raise ValueError("no cells")
+        pos = int(np.searchsorted(times, t - 1e-4, side="left"))
+        i = pos - 1 if before else pos
+        return int(np.clip(i, 0, len(times) - 1))
 
     def tail_cell(self, out_time: float) -> int:
         return self._cell(out_time, before=True)
