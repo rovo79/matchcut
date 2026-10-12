@@ -125,6 +125,7 @@ class FrameSeries:
     hist_dist: np.ndarray  # chi-square distance to previous frame
     pixel_dist: np.ndarray  # mean abs gray diff to previous frame (0..1)
     brightness: np.ndarray  # mean luminance (0..1)
+    struct_sim: np.ndarray  # correlation of coarse layout with previous frame (fades ~1, cuts ~0)
 
     @property
     def n_frames(self) -> int:
@@ -187,6 +188,7 @@ class Analysis:
             hist_dist=self.series.hist_dist,
             pixel_dist=self.series.pixel_dist,
             brightness=self.series.brightness,
+            struct_sim=self.series.struct_sim,
             times=self.cells.times,
             structure=self.cells.structure,
             color=self.cells.color,
@@ -208,6 +210,7 @@ class Analysis:
                 hist_dist=z["hist_dist"],
                 pixel_dist=z["pixel_dist"],
                 brightness=z["brightness"],
+                struct_sim=z["struct_sim"] if "struct_sim" in z else np.zeros_like(z["hist_dist"]),
             )
             cells = CellFeatures(
                 times=z["times"],
@@ -306,6 +309,7 @@ def analyse_frames(frames: Iterable[np.ndarray], cfg: AnalysisConfig) -> Tuple[F
     hist_dist: List[float] = []
     pixel_dist: List[float] = []
     brightness: List[float] = []
+    struct_sim: List[float] = []
     cells = _CellAccumulator()
 
     stride = max(1, int(round(cfg.cell_seconds * cfg.fps)))
@@ -314,6 +318,7 @@ def analyse_frames(frames: Iterable[np.ndarray], cfg: AnalysisConfig) -> Tuple[F
     jump_threshold = 0.3  # a histogram jump this large between neighbours is treated as a cut
     prev_hist: Optional[np.ndarray] = None
     prev_gray: Optional[np.ndarray] = None
+    prev_thumb: Optional[np.ndarray] = None
     pending: List[int] = []  # cell centre indices waiting for their window
 
     def flush(force: bool) -> None:
@@ -332,14 +337,19 @@ def analyse_frames(frames: Iterable[np.ndarray], cfg: AnalysisConfig) -> Tuple[F
     for idx, frame in enumerate(frames):
         gray = to_gray(frame)
         hist = color_histogram(frame)
+        thumb = block_mean(gray, 16, 9).ravel()
+        thumb = thumb - thumb.mean()
         if prev_hist is None:
             hist_dist.append(0.0)
             pixel_dist.append(0.0)
+            struct_sim.append(1.0)
         else:
             hist_dist.append(chi_square(hist, prev_hist))
             pixel_dist.append(float(np.mean(np.abs(gray - prev_gray)) / 255.0))
+            norms = float(np.linalg.norm(thumb) * np.linalg.norm(prev_thumb))
+            struct_sim.append(float(np.dot(thumb, prev_thumb) / norms) if norms > 1e-6 else 0.0)
         brightness.append(float(gray.mean() / 255.0))
-        prev_hist, prev_gray = hist, gray
+        prev_hist, prev_gray, prev_thumb = hist, gray, thumb
 
         buffer.append((idx, frame, gray, hist_dist[-1]))
         if idx % stride == stride // 2:
@@ -354,6 +364,7 @@ def analyse_frames(frames: Iterable[np.ndarray], cfg: AnalysisConfig) -> Tuple[F
         hist_dist=np.array(hist_dist, dtype=np.float32),
         pixel_dist=np.array(pixel_dist, dtype=np.float32),
         brightness=np.array(brightness, dtype=np.float32),
+        struct_sim=np.array(struct_sim, dtype=np.float32),
     )
     return series, cells.build()
 

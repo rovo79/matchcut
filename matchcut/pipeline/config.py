@@ -37,8 +37,9 @@ class AnalysisConfig:
 class ShotConfig:
     """Shot boundary detection."""
 
-    hist_threshold: float = 0.35  # absolute chi-square threshold on colour hists
+    hist_threshold: float = 0.25  # absolute chi-square threshold on colour hists
     pixel_threshold: float = 0.45  # absolute mean-abs-diff threshold (0..1)
+    max_structure_similarity: float = 0.85  # above this the layout is unchanged => fade, not a cut
     adaptive_k: float = 6.0  # boundary must exceed local median + k * MAD
     adaptive_window: int = 24  # frames on each side for the local statistics
     min_shot_seconds: float = 0.5

@@ -53,6 +53,7 @@ def detect_boundaries(series: FrameSeries, cfg: ShotConfig) -> List[int]:
     """Return frame indices where a new shot starts (never includes 0)."""
     d = series.hist_dist
     p = series.pixel_dist
+    sim = series.struct_sim
     n = len(d)
     if n < 2:
         return []
@@ -65,6 +66,8 @@ def detect_boundaries(series: FrameSeries, cfg: ShotConfig) -> List[int]:
         strong = d[i] >= cfg.hist_threshold or p[i] >= cfg.pixel_threshold
         if not strong or d[i] < adaptive[i]:
             continue
+        if sim[i] >= cfg.max_structure_similarity:
+            continue  # same layout on both sides: a fade, flash or exposure change, not a cut
         lo, hi = max(1, i - 2), min(n, i + 3)
         if d[i] < d[lo:hi].max():
             continue  # not a local peak

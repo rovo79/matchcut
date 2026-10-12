@@ -57,10 +57,11 @@ python -m matchcut.pipeline run demo.mp4 --backend mock -t 10 --proxy
 The footage is decoded once by ffmpeg at 160x90 / 8 fps and streamed through
 numpy. Two outputs:
 
-* **Frame series** - colour-histogram chi-square distance and mean pixel
-  difference between consecutive frames. Shot boundaries are local peaks that
-  exceed both an absolute threshold and a rolling median + k·MAD, with a
-  minimum shot length.
+* **Frame series** - colour-histogram chi-square distance, mean pixel
+  difference and coarse-layout correlation between consecutive frames. Shot
+  boundaries are local peaks that exceed both an absolute threshold and a
+  rolling median + k·MAD, with a minimum shot length. A peak whose layout
+  correlation stays high is a fade, flash or exposure change and is ignored.
 * **Cell features** every 0.25 s - a zero-mean 32x18 luminance thumbnail
   (structure), a 3x3 grid of gradient-orientation histograms (composition),
   a 4x4x4 RGB histogram (colour), a 3x3 luminance grid, and motion: energy,
@@ -146,7 +147,8 @@ request. Every call is logged to `workspace/llm_calls.jsonl` with usage.
 
 ## Limitations
 
-* Shot detection handles hard cuts; long dissolves may be split or merged.
+* Shot detection handles hard cuts and ignores fades to/from black; long
+  dissolves between two bright shots are not split.
 * The match-cut scorer is intentionally cheap. It finds compositional and
   motion rhymes; semantic matches (e.g. a bone cut to a spaceship) rely on the
   model's verdict on the side-by-side sheets, so keep `matchcut.verify_with_llm`
