@@ -44,6 +44,7 @@ def describe_shots(ctx: Context) -> Dict[int, Dict[str, Any]]:
         text = prompts.DESCRIBE.format(
             shot_ids=shot_ids,
             machine_notes=json.dumps(stats, indent=0),
+            notes=ctx.notes_text("describe"),
         )
         response = ctx.llm.structured(
             LLMRequest(
@@ -93,6 +94,7 @@ def find_narrative(ctx: Context) -> Dict[str, Any]:
         brief=ctx.cfg.brief or "(none)",
         target=ctx.target_text(),
         music=ctx.music_text(),
+        notes=ctx.notes_text("narrative"),
         n_shots=len(ctx.shots),
         total_duration=ctx.media.duration,
         catalog=json.dumps(catalog, indent=0),
@@ -139,6 +141,7 @@ def rough_cut(ctx: Context) -> Timeline:
         brief=ctx.cfg.brief or "(none)",
         target=ctx.target_text(),
         music=ctx.music_text(),
+        notes=ctx.notes_text("roughcut"),
         narrative=ctx.narrative_text(),
         catalog=json.dumps(catalog, indent=0),
         min_clip=pacing.min_clip_seconds,

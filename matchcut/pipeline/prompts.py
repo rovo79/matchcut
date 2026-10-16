@@ -14,13 +14,16 @@ its placement in the frame, the dominant shapes and lines, how the camera and su
 and the single key action. Mark a shot unusable only if it is black, hopelessly blurred, or
 clearly a slate/junk. Machine notes per shot (duration, brightness, motion energy and
 dominant motion direction from optical analysis) are:
-{machine_notes}"""
+{machine_notes}
+
+{notes}"""
 
 NARRATIVE = """Find the visual narrative in this footage and propose a beat structure for a cut.
 
 Creative brief from the director (may be empty): {brief}
 Target running time: {target}
 {music}
+{notes}
 Footage summary: {n_shots} shots, {total_duration:.1f}s of source material, in source order.
 
 Shot catalog (JSON, one entry per shot in source order):
@@ -40,6 +43,7 @@ ROUGH_CUT = """Make the rough cut: an ordered list of clips following the beat s
 Creative brief: {brief}
 Target running time: {target}
 {music}
+{notes}
 Narrative:
 {narrative}
 
@@ -77,6 +81,7 @@ POLISH = """Review the current cut and propose final polish edits.
 
 Creative brief: {brief}
 Target running time: {target}
+{notes}
 Narrative:
 {narrative}
 

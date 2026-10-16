@@ -7,8 +7,21 @@ from pathlib import Path
 import pytest
 
 from matchcut.pipeline.demo import make_click_track, make_demo_footage
+from matchcut.pipeline.llm import MockBackend
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+
+
+class RecordingMock(MockBackend):
+    """Mock backend that keeps the prompt text of every call, keyed by request name."""
+
+    def __init__(self, cfg, log=None):
+        super().__init__(cfg, log)
+        self.texts = {}
+
+    def structured(self, request):
+        self.texts.setdefault(request.name, []).append(request.text)
+        return super().structured(request)
 
 
 def moving_box(bg: tuple, x_expr: str, y: int = 60, size: int = 50) -> str:

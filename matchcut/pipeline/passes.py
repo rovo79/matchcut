@@ -535,6 +535,7 @@ class PolishPass(Pass):
         text = prompts.POLISH.format(
             brief=ctx.cfg.brief or "(none)",
             target=ctx.target_text(),
+            notes=ctx.notes_text("pass:polish"),
             narrative=ctx.narrative_text(),
             cut_list=json.dumps(cut_list, indent=0),
             max_edits=cfg.max_edits,

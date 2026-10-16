@@ -10,6 +10,7 @@ from matchcut.pipeline.media import MediaInfo, probe
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.render import build_filter_graph
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
+from tests.pipeline.conftest import RecordingMock
 
 
 def test_full_run_with_mock_backend(demo_video, tmp_path):
@@ -61,21 +62,6 @@ def test_filter_graph_shapes():
     assert "acrossfade=d=0.500" in graph
     assert graph.endswith("[aout]") and "[vout]" in graph
     assert "fade=t=out:st=4.600:d=0.500" in graph
-
-
-from matchcut.pipeline.llm import MockBackend
-
-
-class RecordingMock(MockBackend):
-    """Mock backend that keeps the prompt text of every call."""
-
-    def __init__(self, cfg, log=None):
-        super().__init__(cfg, log)
-        self.texts = {}
-
-    def structured(self, request):
-        self.texts.setdefault(request.name, []).append(request.text)
-        return super().structured(request)
 
 
 def test_music_is_analysed_once_and_reaches_the_prompts(demo_video, click_track, tmp_path):
