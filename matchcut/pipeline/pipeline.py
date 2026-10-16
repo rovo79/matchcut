@@ -8,6 +8,7 @@
       frames/              cached keyframes
       sheets/              contact sheets sent to the model
       descriptions.json    model's per-shot descriptions
+      music.json           music analysis (only when a track is given)
       narrative.json       beats / arc
       roughcut.json        first assembly
       passes/NN_name.json  timeline after each pass
@@ -26,6 +27,7 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from . import stages
+from .audio import MusicAnalysis, analyse_music
 from .config import PipelineConfig
 from .context import Context
 from .features import Analysis, analyse_footage
@@ -58,6 +60,24 @@ class Pipeline:
 
     def _json(self, path: Path, data) -> None:
         path.write_text(json.dumps(data, indent=2))
+
+    # ------------------------------------------------------------ music
+    def music(self) -> Optional[MusicAnalysis]:
+        """Analyse the music track once (cached in music.json). None when no track is configured."""
+        mcfg = self.cfg.music
+        if not mcfg.path:
+            return None
+        path = self.ws / "music.json"
+        if self._fresh(path):
+            cached = MusicAnalysis.load(path)
+            if cached.path == str(mcfg.path):
+                log.info("music: cached (%.0f bpm)", cached.tempo_bpm)
+                return cached
+        log.info("music: analysing %s", mcfg.path)
+        analysis = analyse_music(str(mcfg.path), mcfg)
+        analysis.save(path)
+        log.info("music: %.0f bpm, %d beats, %.1fs", analysis.tempo_bpm, len(analysis.beats), analysis.duration)
+        return analysis
 
     # ------------------------------------------------------------ stage 1
     def ingest(self) -> Context:
@@ -92,6 +112,7 @@ class Pipeline:
             log.info("ingest: %d shots detected", len(shots))
         frames = FrameCache(media.path, self.ws / "frames", self.cfg.sampling)
         self._ctx = Context(cfg=self.cfg, workspace=self.ws, media=media, analysis=analysis, shots=shots, frames=frames, llm=self.llm)
+        self._ctx.music = self.music()
         return self._ctx
 
     # ------------------------------------------------------------ stage 2

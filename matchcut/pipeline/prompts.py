@@ -20,6 +20,7 @@ NARRATIVE = """Find the visual narrative in this footage and propose a beat stru
 
 Creative brief from the director (may be empty): {brief}
 Target running time: {target}
+{music}
 Footage summary: {n_shots} shots, {total_duration:.1f}s of source material, in source order.
 
 Shot catalog (JSON, one entry per shot in source order):
@@ -38,6 +39,7 @@ ROUGH_CUT = """Make the rough cut: an ordered list of clips following the beat s
 
 Creative brief: {brief}
 Target running time: {target}
+{music}
 Narrative:
 {narrative}
 

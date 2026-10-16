@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .audio import MusicAnalysis
 from .config import PipelineConfig
 from .features import Analysis
 from .llm import LLMBackend
@@ -28,6 +29,7 @@ class Context:
     llm: LLMBackend
     descriptions: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     narrative: Dict[str, Any] = field(default_factory=dict)
+    music: Optional[MusicAnalysis] = None
 
     @property
     def scorer(self) -> MatchScorer:
@@ -93,6 +95,19 @@ class Context:
 
     def narrative_text(self) -> str:
         return json.dumps(self.narrative, indent=1) if self.narrative else "(none)"
+
+    def music_text(self) -> str:
+        """Prompt paragraph describing the music track, or a plain 'none'."""
+        if self.music is None:
+            return "Music track: none."
+        s = self.music.summary(every=5.0)
+        return (
+            "Music track (the cut plays over it; the cut starts "
+            f"{self.cfg.music.start:.1f}s into the track): {json.dumps(s)}\n"
+            "Energy is 0..1 per 5 s. Let the beat structure follow the music: calm beats on low "
+            "energy, the climax beat on the biggest rise, and beat durations that land beat changes "
+            "near rises or drops. Cuts will be snapped to the beat grid afterwards."
+        )
 
 
 def direction_label(v: np.ndarray) -> str:

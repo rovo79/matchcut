@@ -58,3 +58,51 @@ def test_filter_graph_shapes():
     assert "acrossfade=d=0.500" in graph
     assert graph.endswith("[aout]") and "[vout]" in graph
     assert "fade=t=out:st=4.600:d=0.500" in graph
+
+
+from matchcut.pipeline.llm import MockBackend
+
+
+class RecordingMock(MockBackend):
+    """Mock backend that keeps the prompt text of every call."""
+
+    def __init__(self, cfg, log=None):
+        super().__init__(cfg, log)
+        self.texts = {}
+
+    def structured(self, request):
+        self.texts.setdefault(request.name, []).append(request.text)
+        return super().structured(request)
+
+
+def test_music_is_analysed_once_and_reaches_the_prompts(demo_video, click_track, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.music.path = str(click_track)
+    cfg.music.start = 2.0
+    pipe = Pipeline(cfg)
+    pipe.llm = RecordingMock(cfg.llm)
+    ctx = pipe.narrative()
+    assert ctx.music is not None
+    assert abs(ctx.music.tempo_bpm - 120.0) <= 10.0
+    assert (tmp_path / "ws" / "music.json").exists()
+    narrative_prompt = pipe.llm.texts["narrative"][0]
+    assert "tempo_bpm" in narrative_prompt and "energy_curve" in narrative_prompt
+    assert "starts 2.0s into the track" in narrative_prompt
+    pipe.rough_cut()
+    assert "tempo_bpm" in pipe.llm.texts["rough_cut"][0]
+    # a second pipeline on the same workspace loads the cached analysis instead of recomputing
+    mtime = (tmp_path / "ws" / "music.json").stat().st_mtime
+    pipe2 = Pipeline(PipelineConfig.load(tmp_path / "ws" / "config.json"))
+    assert pipe2.ingest().music is not None
+    assert (tmp_path / "ws" / "music.json").stat().st_mtime == mtime
+
+
+def test_no_music_means_no_music_text(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"))
+    cfg.llm.backend = "mock"
+    pipe = Pipeline(cfg)
+    pipe.llm = RecordingMock(cfg.llm)
+    ctx = pipe.narrative()
+    assert ctx.music is None
+    assert "Music track: none" in pipe.llm.texts["narrative"][0]

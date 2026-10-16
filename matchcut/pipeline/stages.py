@@ -92,6 +92,7 @@ def find_narrative(ctx: Context) -> Dict[str, Any]:
     text = prompts.NARRATIVE.format(
         brief=ctx.cfg.brief or "(none)",
         target=ctx.target_text(),
+        music=ctx.music_text(),
         n_shots=len(ctx.shots),
         total_duration=ctx.media.duration,
         catalog=json.dumps(catalog, indent=0),
@@ -137,6 +138,7 @@ def rough_cut(ctx: Context) -> Timeline:
     text = prompts.ROUGH_CUT.format(
         brief=ctx.cfg.brief or "(none)",
         target=ctx.target_text(),
+        music=ctx.music_text(),
         narrative=ctx.narrative_text(),
         catalog=json.dumps(catalog, indent=0),
         min_clip=pacing.min_clip_seconds,
