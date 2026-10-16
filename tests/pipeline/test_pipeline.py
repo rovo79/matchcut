@@ -170,3 +170,25 @@ def test_render_with_music_track(demo_video, click_track, tmp_path):
     core = y[22050 : 22050 * 5]  # 4 s from the middle, clear of fades
     rms = np.sqrt(np.mean(core[: len(core) // win * win].reshape(-1, win) ** 2, axis=1))
     assert float(rms.max()) > 5.0 * float(np.median(rms)), (float(rms.max()), float(np.median(rms)))
+
+
+def test_full_run_with_music(demo_video, click_track, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.proxy = True
+    cfg.music.path = str(click_track)
+    pipe = Pipeline(cfg)
+    final = pipe.run()
+    assert (tmp_path / "ws" / "passes" / "06_beatsync.json").exists()
+    synced = {tuple(d.clip_ids) for d in final.history if d.pass_name == "beatsync" and d.action in ("snap", "on_beat")}
+    assert synced  # at 120 BPM every cut is within 0.25 s of a beat, so only locked/no-room junctions stay off
+    for i in range(1, len(final.clips)):
+        if (final.clips[i - 1].id, final.clips[i].id) in synced:
+            t = final.record_start(i)
+            assert abs(t - round(t * 2) / 2) < 0.1, t  # on the grid (frame snapping adds up to 1/25 s)
+    report = (tmp_path / "ws" / "report.md").read_text()
+    assert "## Music" in report
+    assert "click.wav" in report and "BPM" in report
+    assert "cuts snapped" in report
+    rendered = probe(str(tmp_path / "ws" / "final_proxy.mp4"))
+    assert rendered.has_audio and abs(rendered.duration - final.duration) < 0.35

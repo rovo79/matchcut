@@ -43,6 +43,17 @@ def build_report(ctx: Context, final: Timeline, rough: Optional[Timeline] = None
             )
         lines.append("")
 
+    if ctx.music is not None:
+        snaps = [d for d in final.history if d.pass_name == "beatsync" and d.action == "snap"]
+        on_beat = sum(1 for d in final.history if d.pass_name == "beatsync" and d.action == "on_beat")
+        avg = (sum(abs(d.data.get("delta", 0.0)) for d in snaps) / len(snaps)) if snaps else 0.0
+        lines.append("## Music")
+        lines.append("")
+        lines.append(f"- Track: {ctx.music.path} ({_fmt(ctx.music.duration)}, {ctx.music.tempo_bpm:.0f} BPM, {ctx.music.beats_per_bar}/4), cut starts {cfg.music.start:.1f}s in")
+        lines.append(f"- Mix: {cfg.music.gain_db:+.0f} dB, {'ducked under source audio' if cfg.music.duck and not cfg.music.only else 'no ducking'}{', music only' if cfg.music.only else ''}{', loudness normalised to %.0f LUFS' % cfg.music.target_lufs if cfg.music.loudnorm else ''}")
+        lines.append(f"- Beat sync: {len(snaps)} cuts snapped (average move {avg:.2f}s), {on_beat} already on the beat")
+        lines.append("")
+
     lines.append("## Final cut list")
     lines.append("")
     lines.append("| # | Record in | Clip | Shot | Beat | Source in-out | Dur | Transition | Match | Subject |")

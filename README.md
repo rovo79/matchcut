@@ -13,6 +13,7 @@
 pip install -r requirements-pipeline.txt   # needs ffmpeg on PATH
 python -m matchcut.pipeline run footage.mp4 --brief "..." --target-duration 60
 python -m matchcut.pipeline run footage.mp4 --backend mock   # offline dry run
+python -m matchcut.pipeline run footage.mp4 --music track.mp3 -t 60   # cut to the music
 ```
 
 See [docs/PIPELINE.md](docs/PIPELINE.md) for the stages, passes, outputs and how to iterate.

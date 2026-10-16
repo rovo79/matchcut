@@ -35,8 +35,11 @@ export ANTHROPIC_API_KEY=...                   # or `ant auth login`
 
 python -m matchcut.pipeline run footage.mp4 \
     --brief "a quiet morning in the workshop; end on the finished chair" \
-    --target-duration 60
+    --target-duration 60 \
+    --music track.mp3 --music-start 12
 ```
+
+With `--music`, the track is analysed for tempo and beats, the narrative stage is told about its energy curve, the `beatsync` pass moves cuts onto beats, and the render mixes it under the source audio (ducked, loudness-normalised).
 
 Outputs land in `footage_edit/` (override with `-w`). Run `--backend mock` to
 exercise the whole pipeline without a model (deterministic heuristics stand in
@@ -105,6 +108,7 @@ pass is saved to `passes/NN_name.json` so you can diff them.
 | `pacing` | Applies each beat's pace (`slow`/`medium`/`fast` → typical clip length), fits each beat and the whole cut to the target durations by trimming unlocked ends toward the motion peak, extending into unused footage, or dropping the lowest-value clips. |
 | `transitions` | Beat changes get the transition the narrative asked for (cut / dissolve / dip to black), clamped to a fraction of the neighbouring clips; a beat change that lands on a verified match cut stays a hard cut. Adds fade in/out. |
 | `polish` | Claude reviews a storyboard sheet (first frame of every clip) plus the cut list and proposes up to N small edits: trim/extend by seconds, drop, move before, set transition. Edits are validated; anything touching a locked match-cut point is rejected and reported. |
+| `beatsync` | With a music track: moves each cut onto the nearest beat (a downbeat at beat changes when one is within `music.snap_window`) by adjusting the outgoing clip's unlocked end. Locked match-cut points never move. Runs last so later passes cannot push cuts off the grid. No-op without music. |
 
 Add your own pass by subclassing `passes.Pass`, implementing `apply`, and
 registering it in `passes.PASSES`.
@@ -117,6 +121,28 @@ Resolve / Premiere / Avid (cuts and dissolves against a single reel `AX`);
 ffmpeg filter graph (trim → concat / xfade / acrossfade → fades); `--proxy`
 renders a quick 640 px preview. `report.md` has the narrative, the cut list
 and every decision each pass made.
+
+## Music
+
+`--music track.mp3` (config section `music`) adds a prerecorded track:
+
+* **Analysis** (`audio.py`): librosa beat tracking on an ffmpeg-decoded mono
+  signal gives tempo, beat times and downbeats (every `beats_per_bar` beats,
+  phase chosen by onset strength); an RMS curve every `hop_seconds` gives the
+  energy. Cached in `music.json`.
+* **Narrative**: the prompt gets tempo, length and the energy curve sampled
+  every 5 s with the rises and drops, so the model can put the climax on the
+  swell. Beat durations then decide where in the track each beat lands.
+* **Beat sync**: see the `beatsync` pass above. `--music-start` offsets the
+  grid; `music.snap_window` caps how far a cut may move.
+* **Mix** (`render.py`): the track is trimmed to the cut, faded out over
+  `music.fade_out`, set to `music.gain_db`, ducked under the source audio with
+  `sidechaincompress` (`music.duck`), mixed with `amix`, and normalised with
+  `loudnorm` to `music.target_lufs`. `music.only=true` drops the source audio.
+* The report gains a "Music" section with the track, tempo and snap stats.
+
+Dissolves end on the beat (the render starts a dissolve `duration` seconds
+before the junction), and tempo is assumed constant across the track.
 
 ## Working iteratively
 
@@ -153,5 +179,4 @@ request. Every call is logged to `workspace/llm_calls.jsonl` with usage.
   motion rhymes; semantic matches (e.g. a bone cut to a spaceship) rely on the
   model's verdict on the side-by-side sheets, so keep `matchcut.verify_with_llm`
   on for real work.
-* Audio is used only as a per-shot energy hint; there is no dialogue-aware
-  editing (J/L cuts) yet.
+* Audio: a music track can be mixed and cut to; dialogue is not transcribed, so there are no J/L cuts and a cut may land mid-sentence. Sound effects and generated music are future work (see docs/superpowers/specs/2026-10-15-audio-music.md).
