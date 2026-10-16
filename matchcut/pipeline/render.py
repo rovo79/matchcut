@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from .config import RenderConfig
+from .config import MusicConfig, RenderConfig
 from .media import MediaInfo, _require, run
 from .timeline import Timeline
 
@@ -24,13 +24,14 @@ def snap_to_frames(tl: Timeline) -> Timeline:
     return out
 
 
-def build_filter_graph(tl: Timeline, media: MediaInfo, cfg: RenderConfig) -> str:
-    """ffmpeg -filter_complex graph that assembles the timeline from input 0."""
+def build_filter_graph(tl: Timeline, media: MediaInfo, cfg: RenderConfig, music: Optional[MusicConfig] = None) -> str:
+    """ffmpeg -filter_complex graph assembling the timeline from input 0 (and music from input 1)."""
     fps = media.fps
     width = cfg.proxy_width if cfg.proxy else cfg.width
     scale = f",scale={width}:-2:flags=bicubic" if width else ""
     parts: List[str] = []
-    audio = media.has_audio
+    has_music = bool(music is not None and music.path)
+    audio = media.has_audio and not (has_music and music.only)
     for i, c in enumerate(tl.clips):
         parts.append(
             f"[0:v]trim=start={c.source_in:.4f}:end={c.source_out:.4f},setpts=PTS-STARTPTS,"
@@ -69,18 +70,57 @@ def build_filter_graph(tl: Timeline, media: MediaInfo, cfg: RenderConfig) -> str
         afilters.append(f"afade=t=out:st={st:.3f}:d={tl.fade_out:.3f}")
     parts.append(f"{cur_v}{','.join(vfilters) if vfilters else 'null'}[vout]")
     if audio:
-        parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}[aout]")
+        label = "[asrc]" if has_music else "[aout]"
+        parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}{label}")
+    if has_music:
+        parts += _music_chain(music, total=cur_dur, source_audio=audio)
     return ";".join(parts)
 
 
-def render(tl: Timeline, media: MediaInfo, cfg: RenderConfig, output: Path, overwrite: bool = True) -> Path:
+def _music_chain(music: MusicConfig, total: float, source_audio: bool) -> List[str]:
+    """Trim, fade, gain, duck (optional), mix and normalise the music (input 1) under [asrc]."""
+    parts: List[str] = []
+    fade = min(music.fade_out, total / 2)
+    start = max(0.0, music.start)
+    parts.append(
+        f"[1:a]atrim=start={start:.3f}:end={start + total:.3f},asetpts=PTS-STARTPTS,"
+        f"afade=t=out:st={max(0.0, total - fade):.3f}:d={fade:.3f},volume={music.gain_db:.1f}dB[music]"
+    )
+    if source_audio:
+        if music.duck:
+            parts.append("[asrc]asplit[asrc0][asrc1]")
+            parts.append(
+                f"[music][asrc1]sidechaincompress=threshold={music.duck_threshold}:ratio={music.duck_ratio}:attack=20:release=300[ducked]"
+            )
+            parts.append("[asrc0][ducked]amix=inputs=2:duration=first:normalize=0[amixed]")
+        else:
+            parts.append("[asrc][music]amix=inputs=2:duration=first:normalize=0[amixed]")
+    else:
+        parts.append("[music]anull[amixed]")
+    final = f"loudnorm=I={music.target_lufs:.1f}:TP=-1.5:LRA=11" if music.loudnorm else "anull"
+    parts.append(f"[amixed]{final}[aout]")
+    return parts
+
+
+def render(
+    tl: Timeline,
+    media: MediaInfo,
+    cfg: RenderConfig,
+    output: Path,
+    overwrite: bool = True,
+    music: Optional[MusicConfig] = None,
+) -> Path:
     if not tl.clips:
         raise ValueError("cannot render an empty timeline")
     ffmpeg = _require("ffmpeg")
-    graph = build_filter_graph(tl, media, cfg)
+    has_music = bool(music is not None and music.path)
+    graph = build_filter_graph(tl, media, cfg, music=music)
     output.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n", "-i", media.path, "-filter_complex", graph, "-map", "[vout]"]
-    if media.has_audio:
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n", "-i", media.path]
+    if has_music:
+        cmd += ["-i", str(music.path)]
+    cmd += ["-filter_complex", graph, "-map", "[vout]"]
+    if media.has_audio or has_music:
         cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
     cmd += [
         "-c:v",
@@ -95,6 +135,6 @@ def render(tl: Timeline, media: MediaInfo, cfg: RenderConfig, output: Path, over
         "+faststart",
         str(output),
     ]
-    log.info("rendering %d clips (%.1fs) -> %s", len(tl.clips), tl.duration, output)
+    log.info("rendering %d clips (%.1fs)%s -> %s", len(tl.clips), tl.duration, " with music" if has_music else "", output)
     run(cmd, capture=False)
     return output

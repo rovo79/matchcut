@@ -179,7 +179,8 @@ class Pipeline:
         ctx = self.ingest()
         tl = timeline or Timeline.load(self.ws / "final.json")
         out = output or self.ws / ("final_proxy.mp4" if self.cfg.render.proxy else "final.mp4")
-        return render(tl, ctx.media, self.cfg.render, out)
+        music = self.cfg.music if self.cfg.music.path else None
+        return render(tl, ctx.media, self.cfg.render, out, music=music)
 
     # ------------------------------------------------------------ report
     def report(self, final: Optional[Timeline] = None) -> str:
