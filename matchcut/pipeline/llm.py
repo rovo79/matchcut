@@ -14,12 +14,13 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Type, TypeVar
+from typing import Any, Callable, Dict, List, Optional, Sequence, Type, TypeVar
 
 from PIL import Image
 from pydantic import BaseModel, ValidationError
 
 from .config import LLMConfig
+from .events import ModelCall
 from .sampling import encode_jpeg_b64
 from . import schemas
 
@@ -61,9 +62,26 @@ class LLMBackend:
         self.log = log or CallLog(None)
         self.calls = 0
         self.usage: Dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+        self.on_call: Optional[Callable[[ModelCall], None]] = None  # set by the pipeline to emit events
 
     def structured(self, request: LLMRequest) -> BaseModel:
         raise NotImplementedError
+
+    def _record_call(self, name: str, images: int, seconds: float, input_tokens: int, output_tokens: int) -> None:
+        self.calls += 1
+        self.usage["input_tokens"] += int(input_tokens)
+        self.usage["output_tokens"] += int(output_tokens)
+        if self.on_call is not None:
+            self.on_call(
+                ModelCall(
+                    name=name,
+                    images=images,
+                    seconds=round(seconds, 3),
+                    input_tokens=int(input_tokens),
+                    output_tokens=int(output_tokens),
+                    model=self.cfg.model,
+                )
+            )
 
 
 # --------------------------------------------------------------------------
@@ -119,12 +137,11 @@ class AnthropicBackend(LLMBackend):
                 raise LLMError(f"model declined request {request.name!r}: {details}")
             text = next((b.text for b in response.content if b.type == "text"), "")
             usage = getattr(response, "usage", None)
-            if usage is not None:
-                self.usage["input_tokens"] += int(getattr(usage, "input_tokens", 0) or 0)
-                self.usage["output_tokens"] += int(getattr(usage, "output_tokens", 0) or 0)
-            self.calls += 1
+            in_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
+            out_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
             try:
                 parsed = request.schema.model_validate_json(text)
+                self._record_call(request.name, len(request.images), time.time() - started, in_tok, out_tok)
                 self.log.write(
                     {
                         "name": request.name,
@@ -175,11 +192,11 @@ class MockBackend(LLMBackend):
     """Deterministic stand-in that reasons only from the machine payload."""
 
     def structured(self, request: LLMRequest) -> BaseModel:
-        self.calls += 1
         handler = getattr(self, f"_{request.name}", None)
         if handler is None:
             raise LLMError(f"mock backend has no handler for {request.name!r}")
         result = handler(request.payload)
+        self._record_call(request.name, len(request.images), 0.0, 0, 0)
         self.log.write({"name": request.name, "mock": True, "images": len(request.images), "prompt": request.text})
         return request.schema.model_validate(result)
 
