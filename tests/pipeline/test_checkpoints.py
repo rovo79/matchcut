@@ -65,7 +65,9 @@ def test_after_pass_redo_reruns_the_pass_with_a_note(ctx, tmp_path):
         return next(answers)
 
     seen = []
-    final = run_passes(base_timeline(ctx), ctx, ["pacing", "transitions"], save_dir=tmp_path, on_event=seen.append, after_pass=after_pass)
+    original = base_timeline(ctx)
+    final = run_passes(original, ctx, ["pacing", "transitions"], save_dir=tmp_path, on_event=seen.append, after_pass=after_pass)
+    assert all(d.action != "note" for d in original.history)  # the caller's timeline is not mutated
     assert calls == ["pacing", "pacing", "transitions"]
     assert [e.stage for e in seen if isinstance(e, events.StageStarted)] == ["pass:pacing", "pass:pacing", "pass:transitions"]
     assert ctx.notes["pass:pacing"] == ["let the opening breathe"]
@@ -121,6 +123,7 @@ def test_redo_at_narrative_reruns_with_the_note(demo_video, tmp_path):
     assert "- end on the bird" in pipe.llm.texts["narrative"][1]
     assert "- end on the bird" not in pipe.llm.texts["rough_cut"][0]  # notes are per stage
     assert len(pipe.llm.texts["describe"]) == 1  # upstream stage not re-run
+    assert any(isinstance(e, events.Decision) and e.action == "note" and e.pass_name == "narrative" and e.detail == "end on the bird" for e in seen)
     assert (tmp_path / "ws" / "final.json").exists()
     # the stage was re-run on a cleared cache: narrative.json exists and the roughcut after it was computed once
     assert len(pipe.llm.texts["rough_cut"]) == 1
@@ -184,3 +187,17 @@ def test_cli_style_run_without_handlers_is_unchanged(demo_video, tmp_path):
     cfg.render.enabled = False
     final = Pipeline(cfg).run()
     assert final.clips and (tmp_path / "ws" / "report.md").exists()
+
+
+def test_redo_at_roughcut_through_the_loop(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    answers = {"roughcut": iter([events.Redo("start on the sky"), events.Continue()])}
+    seen = []
+    pipe = Pipeline(cfg, on_event=seen.append, on_checkpoint=lambda stage, summary: next(answers.get(stage, iter([])), events.Continue()))
+    pipe.llm = RecordingMock(cfg.llm)
+    pipe.run()
+    assert [e.stage for e in seen if isinstance(e, events.StageStarted) and e.stage == "roughcut"] == ["roughcut", "roughcut"]
+    assert len(pipe.llm.texts["rough_cut"]) == 2 and "- start on the sky" in pipe.llm.texts["rough_cut"][1]
+    assert len(pipe.llm.texts["narrative"]) == 1

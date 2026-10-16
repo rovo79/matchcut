@@ -152,20 +152,25 @@ drive a run. Every callback runs on the pipeline's thread.
 
 * **Events** (`matchcut.pipeline.events`): `RunStarted`, `StageStarted`,
   `StageCached`, `StageFinished`, `Decision` (one per pass decision),
-  `ModelCall` (one per Claude call, with tokens), `Log` (the pipeline's log
+  `ModelCall` (one per Claude API attempt, with tokens), `Log` (the pipeline's log
   lines), `Checkpoint`, `RunFinished`, `RunFailed`. Each has `to_dict()`.
   Stage names: `ingest`, `describe`, `narrative`, `roughcut`, `pass:<name>`,
   `render`, `report`.
 * **Checkpoints**: after `describe`, `narrative`, `roughcut` and every pass,
   `on_checkpoint(stage, summary)` is called and the run waits for its answer:
-  `Continue()`, `Redo(note)` or `Abort()`. `Redo` deletes that stage's cached
-  output and everything downstream (`Pipeline.invalidate_from(stage)`),
-  appends the note to the stage's director's notes and re-runs it. Notes are
+  `Continue()`, `Redo(note)` or `Abort()`. `Redo` at describe, narrative or
+  roughcut deletes that stage's cached output and everything downstream
+  (`Pipeline.invalidate_from(stage)`), appends the note to the stage's
+  director's notes and re-runs it; `Redo` at a pass re-runs that pass on the
+  same input and overwrites its file. Notes are
   rendered into the describe, narrative, rough-cut and polish prompts; the
   deterministic passes record the note in the timeline history and simply
   re-run. `Abort` raises `RunAborted` after emitting `RunFailed(error="aborted")`.
 * **Cancel**: a `threading.Event`; the run stops at the next stage or pass
   boundary with `RunAborted`.
+* Callbacks must not raise: an exception from `on_event` or `on_checkpoint`
+  aborts the run as a `RunFailed`. `Log` events are produced through the
+  `matchcut.pipeline` logger only while a listener is attached.
 
 Without handlers (the CLI) every checkpoint continues and nothing changes.
 

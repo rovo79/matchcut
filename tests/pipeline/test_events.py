@@ -111,4 +111,69 @@ def test_failure_emits_run_failed_and_reraises(demo_video, tmp_path):
         Pipeline(cfg, on_event=seen.append).run()
     failed = seen[-1]
     assert isinstance(failed, events.RunFailed)
-    assert failed.stage == "refine" and "nosuchpass" in failed.error and "Traceback" in failed.traceback
+    assert failed.stage == "pass:nosuchpass" and "nosuchpass" in failed.error and "Traceback" in failed.traceback
+    assert not any(isinstance(e, events.StageStarted) and e.stage == "pass:matchcut" for e in seen)
+
+
+def test_failure_inside_a_pass_names_the_pass(demo_video, tmp_path, monkeypatch):
+    from matchcut.pipeline import passes as passes_mod
+
+    class Boom(passes_mod.Pass):
+        name = "boom"
+
+        def apply(self, timeline, ctx):
+            raise RuntimeError("kaboom")
+
+    monkeypatch.setitem(passes_mod.PASSES, "boom", Boom)
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.passes = ("matchcut", "boom")
+    seen = []
+    with pytest.raises(RuntimeError):
+        Pipeline(cfg, on_event=seen.append).run()
+    failed = seen[-1]
+    assert isinstance(failed, events.RunFailed) and failed.stage == "pass:boom" and "kaboom" in failed.error
+
+
+def test_log_handler_is_removed_and_level_restored_even_when_a_callback_raises(demo_video, tmp_path):
+    import logging
+
+    plog = logging.getLogger("matchcut.pipeline")
+    before_handlers, before_level = list(plog.handlers), plog.level
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+
+    def explode(event):
+        raise RuntimeError("listener broke")
+
+    with pytest.raises(RuntimeError):
+        Pipeline(cfg, on_event=explode).run()
+    assert plog.handlers == before_handlers and plog.level == before_level
+    # and a run with no listener adds no handler at all
+    Pipeline(cfg).run()
+    assert plog.handlers == before_handlers and plog.level == before_level
+
+
+def test_anthropic_backend_records_every_attempt(monkeypatch):
+    from types import SimpleNamespace
+    from matchcut.pipeline import schemas
+    from matchcut.pipeline.config import LLMConfig
+    from matchcut.pipeline.llm import AnthropicBackend, LLMRequest
+
+    cfg = LLMConfig(backend="anthropic", refusal_fallbacks=False, max_retries=1)
+    backend = AnthropicBackend.__new__(AnthropicBackend)
+    backend.cfg, backend.log, backend.calls, backend.usage, backend.on_call = cfg, type("L", (), {"write": lambda self, r: None})(), 0, {"input_tokens": 0, "output_tokens": 0}, None
+    import anthropic as _anthropic
+    backend._anthropic = _anthropic
+    responses = iter([
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text="not json")], usage=SimpleNamespace(input_tokens=10, output_tokens=5)),
+        SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text='{"pairs": []}')], usage=SimpleNamespace(input_tokens=11, output_tokens=6)),
+    ])
+    backend._call = lambda kwargs: next(responses)
+    seen = []
+    backend.on_call = seen.append
+    result = backend.structured(LLMRequest(name="verify_pairs", system="s", text="t", schema=schemas.VerifyResponse))
+    assert result.pairs == []
+    assert backend.calls == 2 and backend.usage == {"input_tokens": 21, "output_tokens": 11}
+    assert [c.input_tokens for c in seen] == [10, 11]

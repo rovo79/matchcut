@@ -131,6 +131,7 @@ class AnthropicBackend(LLMBackend):
         started = time.time()
         last_error: Optional[Exception] = None
         for attempt in range(self.cfg.max_retries + 1):
+            attempt_started = time.time()
             response = self._call(kwargs)
             if response.stop_reason == "refusal":
                 details = getattr(response, "stop_details", None)
@@ -139,9 +140,9 @@ class AnthropicBackend(LLMBackend):
             usage = getattr(response, "usage", None)
             in_tok = int(getattr(usage, "input_tokens", 0) or 0) if usage is not None else 0
             out_tok = int(getattr(usage, "output_tokens", 0) or 0) if usage is not None else 0
+            self._record_call(request.name, len(request.images), time.time() - attempt_started, in_tok, out_tok)
             try:
                 parsed = request.schema.model_validate_json(text)
-                self._record_call(request.name, len(request.images), time.time() - started, in_tok, out_tok)
                 self.log.write(
                     {
                         "name": request.name,

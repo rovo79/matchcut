@@ -37,7 +37,7 @@ from .events import Abort, CheckpointAnswer, CheckpointHandler, Continue, EventH
 from .features import Analysis, analyse_footage
 from .llm import make_backend
 from .media import MediaInfo, audio_energy, probe
-from .passes import PassResult, run_passes
+from .passes import PASSES, PassResult, run_passes
 from .render import render, snap_to_frames
 from .report import build_report
 from .sampling import FrameCache
@@ -88,6 +88,8 @@ class Pipeline:
 
     # ------------------------------------------------------------ events
     def _emit(self, event: events.Event) -> None:
+        if isinstance(event, events.StageStarted):
+            self._current_stage = event.stage
         if self.on_event is not None:
             self.on_event(event)
 
@@ -183,6 +185,7 @@ class Pipeline:
                 if answer.note:
                     ctx = self.ingest()
                     ctx.notes.setdefault(stage, []).append(answer.note)
+                    self._emit(events.Decision(pass_name=stage, action="note", clip_ids=[], detail=answer.note, score=None, data={}))
                 self.invalidate_from(stage)
                 continue
             return result
@@ -303,11 +306,13 @@ class Pipeline:
         names = list(passes or self.cfg.passes)
         passes_dir = self.ws / "passes"
         passes_dir.mkdir(exist_ok=True)
-        self._current_stage = "refine"
 
         def after_pass(name: str, result: PassResult) -> CheckpointAnswer:
             return self._ask(f"pass:{name}", self.summary_for(f"pass:{name}", result))
 
+        unknown = [n for n in names if n not in PASSES]
+        if unknown:
+            self._current_stage = f"pass:{unknown[0]}"
         final = run_passes(tl, ctx, names, save_dir=passes_dir, on_event=self._emit, after_pass=after_pass, cancel=self.cancel)
         final = snap_to_frames(final, ctx.shot_bounds)
         final.name = "final cut"
@@ -354,14 +359,16 @@ class Pipeline:
     # ------------------------------------------------------------ all
     def run(self) -> Timeline:
         """Run every stage with checkpoints after describe, narrative, roughcut and each pass."""
-        handler = _EventLogHandler(self._emit)
-        log.addHandler(handler)
+        handler: Optional[_EventLogHandler] = None
         previous_level = log.level
-        if log.getEffectiveLevel() > logging.INFO:
-            log.setLevel(logging.INFO)  # without basicConfig the effective level is WARNING and no Log events would fire
         started = time.time()
-        self._emit(events.RunStarted(source=self.cfg.source, workspace=str(self.ws), config=self.cfg.to_dict()))
         try:
+            if self.on_event is not None:
+                handler = _EventLogHandler(self._emit)
+                log.addHandler(handler)
+                if log.getEffectiveLevel() > logging.INFO:
+                    log.setLevel(logging.INFO)  # without basicConfig the effective level is WARNING and no Log events would fire
+            self._emit(events.RunStarted(source=self.cfg.source, workspace=str(self.ws), config=self.cfg.to_dict()))
             self._checkpointed("describe", self.describe)
             self._checkpointed("narrative", self.narrative)
             rough = self._checkpointed("roughcut", self.rough_cut)
@@ -386,5 +393,6 @@ class Pipeline:
             self._emit(events.RunFailed(stage=self._current_stage, error=str(e), traceback=_traceback.format_exc()))
             raise
         finally:
-            log.removeHandler(handler)
+            if handler is not None:
+                log.removeHandler(handler)
             log.setLevel(previous_level)

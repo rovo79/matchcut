@@ -754,10 +754,12 @@ def run_passes(
         if on_event is not None:
             on_event(e)
 
+    unknown = [n for n in names if n not in PASSES]
+    if unknown:
+        raise ValueError(f"unknown pass {unknown[0]!r}; available: {', '.join(PASSES)}")
+
     tl = timeline
     for n, name in enumerate(names, start=1):
-        if name not in PASSES:
-            raise ValueError(f"unknown pass {name!r}; available: {', '.join(PASSES)}")
         stage = f"pass:{name}"
         if cancel is not None and cancel.is_set():
             raise events.RunAborted(stage)
@@ -787,6 +789,7 @@ def run_passes(
                 if answer.note:
                     ctx.notes.setdefault(stage, []).append(answer.note)
                     note = Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note)
+                    tl = tl.copy()
                     tl.history.append(note)
                     emit(events.Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note, score=None, data={}))
                 continue

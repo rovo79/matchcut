@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 
 @dataclass
