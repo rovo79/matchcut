@@ -40,7 +40,7 @@ Requirements:
    ffmpeg's `aevalsrc` stands in for real music.
 
 Non-goals for phase 1: music sections detection beyond an energy curve,
-tempo changes within the track, centring dissolves on beats (dissolves end
+tempo changes within the track, centring dissolves on beats (a dissolve starts
 on the beat, as the render already works), EDL audio events.
 
 Dependencies: `librosa>=0.10` (beat tracking, onset strength); decoding stays

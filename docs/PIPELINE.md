@@ -97,7 +97,7 @@ duplicates, and keeps beats in narrative order.
 
 ### 5. Passes (`passes.py`)
 
-Passes run in the order given by `--passes` (default: all five). Each one
+Passes run in the order given by `--passes` (default: all six). Each one
 records `Decision`s that end up in `report.md`, and the timeline after every
 pass is saved to `passes/NN_name.json` so you can diff them.
 
@@ -141,8 +141,9 @@ and every decision each pass made.
   `loudnorm` to `music.target_lufs`. `music.only=true` drops the source audio.
 * The report gains a "Music" section with the track, tempo and snap stats.
 
-Dissolves end on the beat (the render starts a dissolve `duration` seconds
-before the junction), and tempo is assumed constant across the track.
+A dissolve starts on the beat: the cut point the pass aligns is where the
+incoming clip begins fading in (the render starts a dissolve `duration`
+seconds before the junction). Tempo is assumed constant across the track.
 
 ## Working iteratively
 
