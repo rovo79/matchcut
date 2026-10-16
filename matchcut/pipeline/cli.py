@@ -24,6 +24,9 @@ def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--force", action="store_true", help="ignore cached stage outputs")
     p.add_argument("--no-render", action="store_true", help="skip the ffmpeg render")
     p.add_argument("--proxy", action="store_true", help="render a quick low-res preview")
+    p.add_argument("--music", default=None, help="music track to play under the cut (mp3/wav/m4a...)")
+    p.add_argument("--music-start", type=float, default=None, help="seconds into the track where the cut begins")
+    p.add_argument("--music-gain", type=float, default=None, help="music level in dB relative to the source audio (default -8)")
     p.add_argument("--config", default=None, help="JSON config file to start from")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override any config value, e.g. matchcut.candidate_threshold=0.6")
     p.add_argument("-v", "--verbose", action="store_true")
@@ -48,11 +51,17 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
     cfg.force = args.force
     cfg.render.enabled = not args.no_render
     cfg.render.proxy = args.proxy
+    if args.music:
+        cfg.music.path = args.music
+    if args.music_start is not None:
+        cfg.music.start = args.music_start
+    if args.music_gain is not None:
+        cfg.music.gain_db = args.music_gain
     cfg.apply_overrides(args.set)
     return cfg
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="matchcut.pipeline", description="AI editing pipeline: sample -> narrative -> rough cut -> match-cut passes -> final cut")
     sub = parser.add_subparsers(dest="command", required=True)
     for name, help_text in [
@@ -71,8 +80,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         if name == "render":
             sp.add_argument("--timeline", default=None, help="timeline JSON to render (default: final.json)")
             sp.add_argument("-o", "--output", default=None)
+    return parser.parse_args(argv)
 
-    args = parser.parse_args(argv)
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("PIL").setLevel(logging.WARNING)
     cfg = build_config(args)

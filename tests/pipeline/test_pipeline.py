@@ -19,7 +19,7 @@ def test_full_run_with_mock_backend(demo_video, tmp_path):
     for name in ["config.json", "probe.json", "analysis.npz", "shots.json", "descriptions.json", "narrative.json", "roughcut.json", "final.json", "final.edl", "final.csv", "report.md", "final_proxy.mp4", "llm_calls.jsonl"]:
         assert (ws / name).exists(), name
     assert len(json.loads((ws / "shots.json").read_text())) == 8
-    assert len(list((ws / "passes").glob("*.json"))) == 5
+    assert len(list((ws / "passes").glob("*.json"))) == 6
     assert final.clips
     assert abs(final.duration - 8.0) < 8.0 * 0.15 + 0.5
     rendered = probe(str(ws / "final_proxy.mp4"))

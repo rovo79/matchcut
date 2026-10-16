@@ -17,6 +17,7 @@ DEFAULT_PASSES: Tuple[str, ...] = (
     "pacing",
     "transitions",
     "polish",
+    "beatsync",
 )
 
 
@@ -109,6 +110,28 @@ class PolishConfig:
 
 
 @dataclass
+class MusicConfig:
+    """Prerecorded music track played under the cut."""
+
+    path: Optional[str] = None  # None => no music
+    start: float = 0.0  # seconds into the track where the cut begins
+    gain_db: float = -8.0  # music level relative to the source audio
+    duck: bool = True  # sidechain-duck the music under the source audio
+    duck_threshold: float = 0.05  # source level (0..1) above which ducking kicks in
+    duck_ratio: float = 6.0
+    only: bool = False  # drop the source audio entirely
+    fade_out: float = 2.0  # seconds of music fade at the end of the cut
+    loudnorm: bool = True  # EBU R128 normalisation of the final mix
+    target_lufs: float = -16.0
+    sample_rate: int = 22050  # analysis sample rate
+    hop_seconds: float = 0.5  # energy curve resolution
+    beats_per_bar: int = 4
+    snap: bool = True  # move cuts onto beats (beatsync pass)
+    snap_window: float = 0.35  # max seconds a cut may move
+    prefer_downbeats_at_beat_changes: bool = True
+
+
+@dataclass
 class LLMConfig:
     backend: str = "anthropic"  # "anthropic" | "mock"
     model: str = "claude-opus-5-5"
@@ -147,6 +170,7 @@ class PipelineConfig:
     pacing: PacingConfig = field(default_factory=PacingConfig)
     transitions: TransitionConfig = field(default_factory=TransitionConfig)
     polish: PolishConfig = field(default_factory=PolishConfig)
+    music: MusicConfig = field(default_factory=MusicConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
 

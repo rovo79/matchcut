@@ -9,6 +9,7 @@ intermediate cut can be inspected or re-run.
     pacing       hit the beat/running-time targets with the intended rhythm
     transitions  dissolves / dips at beat changes, fades at the ends
     polish       the model reviews the storyboard and proposes final tweaks
+    beatsync     move cuts onto the beats of the music track (stub until the music task lands)
 """
 from __future__ import annotations
 
@@ -632,12 +633,25 @@ class PolishPass(Pass):
         return False, f"unknown op {edit.op}"
 
 
+# ==========================================================================
+# beat sync (stub: the real pass lands in a later task)
+# ==========================================================================
+class BeatSyncPass(Pass):
+    name = "beatsync"
+
+    def apply(self, timeline: Timeline, ctx: Context) -> PassResult:
+        tl = timeline.copy()
+        tl.stage = self.name
+        return PassResult(tl, [])
+
+
 PASSES: Dict[str, type] = {
     "matchcut": MatchCutPass,
     "continuity": ContinuityPass,
     "pacing": PacingPass,
     "transitions": TransitionsPass,
     "polish": PolishPass,
+    "beatsync": BeatSyncPass,
 }
 
 
