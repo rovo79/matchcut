@@ -145,6 +145,30 @@ A dissolve starts on the beat: the cut point the pass aligns is where the
 incoming clip begins fading in (the render starts a dissolve `duration`
 seconds before the junction). Tempo is assumed constant across the track.
 
+## Events and checkpoints
+
+`Pipeline(cfg, on_event=None, on_checkpoint=None, cancel=None)` lets a UI
+drive a run. Every callback runs on the pipeline's thread.
+
+* **Events** (`matchcut.pipeline.events`): `RunStarted`, `StageStarted`,
+  `StageCached`, `StageFinished`, `Decision` (one per pass decision),
+  `ModelCall` (one per Claude call, with tokens), `Log` (the pipeline's log
+  lines), `Checkpoint`, `RunFinished`, `RunFailed`. Each has `to_dict()`.
+  Stage names: `ingest`, `describe`, `narrative`, `roughcut`, `pass:<name>`,
+  `render`, `report`.
+* **Checkpoints**: after `describe`, `narrative`, `roughcut` and every pass,
+  `on_checkpoint(stage, summary)` is called and the run waits for its answer:
+  `Continue()`, `Redo(note)` or `Abort()`. `Redo` deletes that stage's cached
+  output and everything downstream (`Pipeline.invalidate_from(stage)`),
+  appends the note to the stage's director's notes and re-runs it. Notes are
+  rendered into the describe, narrative, rough-cut and polish prompts; the
+  deterministic passes record the note in the timeline history and simply
+  re-run. `Abort` raises `RunAborted` after emitting `RunFailed(error="aborted")`.
+* **Cancel**: a `threading.Event`; the run stops at the next stage or pass
+  boundary with `RunAborted`.
+
+Without handlers (the CLI) every checkpoint continues and nothing changes.
+
 ## Working iteratively
 
 Every stage is cached in the workspace, so you can change something and re-run

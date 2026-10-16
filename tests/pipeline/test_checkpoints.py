@@ -100,3 +100,87 @@ def test_run_passes_without_callbacks_is_unchanged(ctx, tmp_path):
     final = run_passes(base_timeline(ctx), ctx, ["matchcut", "continuity"], save_dir=tmp_path)
     assert final.validate(ctx.shot_bounds) == []
     assert sorted(p.name for p in tmp_path.glob("*.json")) == ["01_matchcut.json", "02_continuity.json"]
+
+
+def test_redo_at_narrative_reruns_with_the_note(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    answers = {"narrative": iter([events.Redo("end on the bird"), events.Continue()])}
+
+    def handler(stage, summary):
+        return next(answers.get(stage, iter([])), events.Continue())
+
+    seen = []
+    pipe = Pipeline(cfg, on_event=seen.append, on_checkpoint=handler)
+    pipe.llm = RecordingMock(cfg.llm)
+    pipe.run()
+    assert [e.stage for e in seen if isinstance(e, events.StageStarted) and e.stage == "narrative"] == ["narrative", "narrative"]
+    assert len(pipe.llm.texts["narrative"]) == 2
+    assert "end on the bird" not in pipe.llm.texts["narrative"][0]
+    assert "- end on the bird" in pipe.llm.texts["narrative"][1]
+    assert "- end on the bird" not in pipe.llm.texts["rough_cut"][0]  # notes are per stage
+    assert len(pipe.llm.texts["describe"]) == 1  # upstream stage not re-run
+    assert (tmp_path / "ws" / "final.json").exists()
+    # the stage was re-run on a cleared cache: narrative.json exists and the roughcut after it was computed once
+    assert len(pipe.llm.texts["rough_cut"]) == 1
+
+
+def test_redo_at_describe_invalidates_downstream(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    Pipeline(cfg).run()  # populate every cache
+    assert (tmp_path / "ws" / "narrative.json").exists() and (tmp_path / "ws" / "passes" / "01_matchcut.json").exists()
+    pipe = Pipeline(PipelineConfig.load(tmp_path / "ws" / "config.json"))
+    pipe.llm = RecordingMock(cfg.llm)
+    pipe.invalidate_from("describe")
+    assert not (tmp_path / "ws" / "descriptions.json").exists()
+    assert not (tmp_path / "ws" / "narrative.json").exists()
+    assert not (tmp_path / "ws" / "roughcut.json").exists()
+    assert not list((tmp_path / "ws" / "passes").glob("*.json"))
+    assert not (tmp_path / "ws" / "final.json").exists() and not (tmp_path / "ws" / "report.md").exists()
+    assert (tmp_path / "ws" / "shots.json").exists()  # ingest is never invalidated by a checkpoint
+    pipe.run()
+    assert set(pipe.llm.texts) >= {"describe", "narrative", "rough_cut"}
+
+
+def test_abort_at_roughcut_emits_run_failed_and_raises(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    seen = []
+
+    def handler(stage, summary):
+        return events.Abort() if stage == "roughcut" else events.Continue()
+
+    with pytest.raises(events.RunAborted):
+        Pipeline(cfg, on_event=seen.append, on_checkpoint=handler).run()
+    failed = seen[-1]
+    assert isinstance(failed, events.RunFailed) and failed.stage == "roughcut" and failed.error == "aborted"
+    assert not (tmp_path / "ws" / "final.json").exists()
+    assert (tmp_path / "ws" / "roughcut.json").exists()  # the stage ran; the run stopped after it
+
+
+def test_cancel_during_run_stops_at_the_next_boundary(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cancel = threading.Event()
+    seen = []
+
+    def on_event(e):
+        seen.append(e)
+        if isinstance(e, events.StageFinished) and e.stage == "narrative":
+            cancel.set()
+
+    with pytest.raises(events.RunAborted):
+        Pipeline(cfg, on_event=on_event, cancel=cancel).run()
+    assert isinstance(seen[-1], events.RunFailed) and seen[-1].error == "aborted" and seen[-1].stage == "roughcut"
+    assert not (tmp_path / "ws" / "roughcut.json").exists()
+
+
+def test_cli_style_run_without_handlers_is_unchanged(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    final = Pipeline(cfg).run()
+    assert final.clips and (tmp_path / "ws" / "report.md").exists()

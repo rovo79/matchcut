@@ -1,3 +1,4 @@
+import pytest
 import time
 
 from matchcut.pipeline import events
@@ -55,3 +56,59 @@ def test_backends_report_model_calls(demo_video, tmp_path):
     assert calls[0].images == 1 and calls[1].images == 0
     assert all(isinstance(c, events.ModelCall) and c.model == cfg.llm.model and c.seconds >= 0 for c in calls)
     assert calls[0].input_tokens == 0 and calls[0].output_tokens == 0  # the mock reports no tokens
+
+
+def test_run_emits_lifecycle_and_stage_events_in_order(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.proxy = True
+    seen = []
+    pipe = Pipeline(cfg, on_event=seen.append)
+    final = pipe.run()
+    kinds = [type(e).__name__ for e in seen]
+    assert kinds[0] == "RunStarted" and kinds[-1] == "RunFinished"
+    assert seen[0].source == str(demo_video) and seen[0].config["target_duration"] == 8.0
+    started = [e.stage for e in seen if isinstance(e, events.StageStarted)]
+    assert started[:4] == ["ingest", "describe", "narrative", "roughcut"]
+    assert started[4:10] == [f"pass:{p}" for p in cfg.passes]
+    assert started[10:] == ["render", "report"]
+    finished = {e.stage: e for e in seen if isinstance(e, events.StageFinished)}
+    assert finished["describe"].path.endswith("descriptions.json") and finished["roughcut"].path.endswith("roughcut.json")
+    assert finished["render"].path.endswith("final_proxy.mp4") and finished["report"].path.endswith("report.md")
+    checkpoints = [e.stage for e in seen if isinstance(e, events.Checkpoint)]
+    assert checkpoints == ["describe", "narrative", "roughcut"] + [f"pass:{p}" for p in cfg.passes]
+    describe_summary = next(e.summary for e in seen if isinstance(e, events.Checkpoint) and e.stage == "describe")
+    assert describe_summary["shots"] == 8 and "unusable" in describe_summary
+    pass_summary = next(e.summary for e in seen if isinstance(e, events.Checkpoint) and e.stage == "pass:transitions")
+    assert pass_summary["pass"] == "transitions" and "decisions" in pass_summary and pass_summary["clips"] == len(final.clips)
+    assert any(isinstance(e, events.Log) and "shots detected" in e.message for e in seen)
+    assert sum(isinstance(e, events.ModelCall) for e in seen) == pipe.llm.calls
+    done = seen[-1]
+    assert done.final_path.endswith("final.json") and done.render_path.endswith("final_proxy.mp4") and done.seconds > 0
+    assert not any(isinstance(e, events.StageCached) for e in seen)
+
+
+def test_second_run_reports_cached_stages(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    Pipeline(cfg).run()
+    seen = []
+    Pipeline(PipelineConfig.load(tmp_path / "ws" / "config.json"), on_event=seen.append).run()
+    cached = [e.stage for e in seen if isinstance(e, events.StageCached)]
+    assert cached == ["ingest", "describe", "narrative", "roughcut"]
+    assert all(e.path for e in seen if isinstance(e, events.StageCached))
+    assert [e.stage for e in seen if isinstance(e, events.StageStarted)][:1] == ["pass:matchcut"]
+    assert type(seen[-1]).__name__ == "RunFinished"
+
+
+def test_failure_emits_run_failed_and_reraises(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.passes = ("matchcut", "nosuchpass")
+    seen = []
+    with pytest.raises(ValueError):
+        Pipeline(cfg, on_event=seen.append).run()
+    failed = seen[-1]
+    assert isinstance(failed, events.RunFailed)
+    assert failed.stage == "refine" and "nosuchpass" in failed.error and "Traceback" in failed.traceback
