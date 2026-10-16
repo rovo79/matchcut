@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import prompts, schemas
+from . import events, prompts, schemas
 from .context import Context
 from .llm import LLMRequest
 from .matching import MatchScore
@@ -730,19 +733,63 @@ PASSES: Dict[str, type] = {
 }
 
 
-def run_passes(timeline: Timeline, ctx: Context, names: Sequence[str], save_dir: Optional = None) -> Timeline:
+def run_passes(
+    timeline: Timeline,
+    ctx: Context,
+    names: Sequence[str],
+    save_dir: Optional[Path] = None,
+    on_event: Optional[events.EventHandler] = None,
+    after_pass: Optional[Callable[[str, PassResult], events.CheckpointAnswer]] = None,
+    cancel: Optional[threading.Event] = None,
+) -> Timeline:
+    """Run the named passes in order.
+
+    ``on_event`` receives StageStarted/StageFinished/Decision events; ``after_pass``
+    is asked after every pass whether to Continue, Redo (re-run the same pass on the
+    same input, with an optional director's note) or Abort; ``cancel`` is checked
+    before each pass. Without callbacks the behaviour is unchanged.
+    """
+
+    def emit(e: events.Event) -> None:
+        if on_event is not None:
+            on_event(e)
+
     tl = timeline
     for n, name in enumerate(names, start=1):
         if name not in PASSES:
             raise ValueError(f"unknown pass {name!r}; available: {', '.join(PASSES)}")
-        log.info("pass %d/%d: %s", n, len(names), name)
-        result = PASSES[name]().apply(tl, ctx)
-        tl = result.timeline
-        problems = tl.validate(ctx.shot_bounds, min_clip=0.1)
-        if problems:
-            raise RuntimeError(f"pass {name} produced an invalid timeline: {problems[:5]}")
-        if save_dir is not None:
-            tl.name = f"after {name}"
-            tl.save(save_dir / f"{n:02d}_{name}.json")
-        log.info("  %d decisions, %d clips, %.1fs", len(result.decisions), len(tl.clips), tl.duration)
+        stage = f"pass:{name}"
+        if cancel is not None and cancel.is_set():
+            raise events.RunAborted(stage)
+        while True:
+            log.info("pass %d/%d: %s", n, len(names), name)
+            emit(events.StageStarted(stage=stage))
+            started = time.time()
+            result = PASSES[name]().apply(tl, ctx)
+            candidate = result.timeline
+            problems = candidate.validate(ctx.shot_bounds, min_clip=0.1)
+            if problems:
+                raise RuntimeError(f"pass {name} produced an invalid timeline: {problems[:5]}")
+            for d in result.decisions:
+                emit(events.Decision(pass_name=d.pass_name, action=d.action, clip_ids=list(d.clip_ids), detail=d.detail, score=d.score, data=dict(d.data)))
+            path = ""
+            if save_dir is not None:
+                candidate.name = f"after {name}"
+                out = save_dir / f"{n:02d}_{name}.json"
+                candidate.save(out)
+                path = str(out)
+            log.info("  %d decisions, %d clips, %.1fs", len(result.decisions), len(candidate.clips), candidate.duration)
+            emit(events.StageFinished(stage=stage, seconds=round(time.time() - started, 3), path=path))
+            answer = after_pass(name, result) if after_pass is not None else events.Continue()
+            if isinstance(answer, events.Abort):
+                raise events.RunAborted(stage)
+            if isinstance(answer, events.Redo):
+                if answer.note:
+                    ctx.notes.setdefault(stage, []).append(answer.note)
+                    note = Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note)
+                    tl.history.append(note)
+                    emit(events.Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note, score=None, data={}))
+                continue
+            tl = candidate
+            break
     return tl
