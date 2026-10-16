@@ -2,6 +2,7 @@ import json
 import subprocess
 
 import numpy as np
+import pytest
 
 from matchcut.pipeline.cli import main
 from matchcut.pipeline.config import PipelineConfig
@@ -131,7 +132,7 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
     assert "[asrc]asplit[asrc0][asrc1]" in graph
     assert "[music][asrc1]sidechaincompress=threshold=0.05:ratio=6.0" in graph
     assert "[asrc0][ducked]amix=inputs=2:duration=first:normalize=0[amixed]" in graph
-    assert "[amixed]loudnorm=I=-16.0:TP=-1.5:LRA=11[aout]" in graph
+    assert "[amixed]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=48000[aout]" in graph
     assert "[aout]" in graph and graph.count("[aout]") == 1
 
 
@@ -156,6 +157,8 @@ def test_render_with_music_track(demo_video, click_track, tmp_path):
     info = probe(str(out))
     assert info.has_audio
     assert abs(info.duration - 6.0) < 0.35
+    rate = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", str(out)], stdout=subprocess.PIPE, check=True).stdout.decode().strip()
+    assert rate == "48000"
     # a music-only render must carry the click track's sparse ticks, not the source's steady sine:
     # with ticks of 50 ms every 500 ms, the loudest 50 ms window is far above the median window
     only = render(
@@ -172,6 +175,25 @@ def test_render_with_music_track(demo_video, click_track, tmp_path):
     assert float(rms.max()) > 5.0 * float(np.median(rms)), (float(rms.max()), float(np.median(rms)))
 
 
+def test_short_music_track_fades_where_it_ends():
+    media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
+    graph = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", start=1.0, fade_out=2.0), music_duration=4.0)
+    assert "[1:a]atrim=start=1.000:end=4.000" in graph  # only 3 s of music are available
+    assert "afade=t=out:st=1.500:d=1.500" in graph  # fade capped at half the 3 s available
+
+
+def test_music_start_past_track_end_is_rejected(demo_video, click_track, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=6.0)
+    cfg.llm.backend = "mock"
+    cfg.render.proxy = True
+    cfg.music.path = str(click_track)
+    cfg.music.start = 45.0  # the click track is 40 s long
+    pipe = Pipeline(cfg)
+    final = pipe.refine(pipe.rough_cut())
+    with pytest.raises(ValueError):
+        pipe.render(final)
+
+
 def test_full_run_with_music(demo_video, click_track, tmp_path):
     cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
     cfg.llm.backend = "mock"
@@ -180,12 +202,14 @@ def test_full_run_with_music(demo_video, click_track, tmp_path):
     pipe = Pipeline(cfg)
     final = pipe.run()
     assert (tmp_path / "ws" / "passes" / "06_beatsync.json").exists()
-    synced = {tuple(d.clip_ids) for d in final.history if d.pass_name == "beatsync" and d.action in ("snap", "on_beat")}
-    assert synced  # at 120 BPM every cut is within 0.25 s of a beat, so only locked/no-room junctions stay off
+    by_pair = {tuple(d.clip_ids): d for d in final.history if d.pass_name == "beatsync" and d.action in ("snap", "on_beat")}
+    assert by_pair
     for i in range(1, len(final.clips)):
-        if (final.clips[i - 1].id, final.clips[i].id) in synced:
-            t = final.record_start(i)
-            assert abs(t - round(t * 2) / 2) < 0.1, t  # on the grid (frame snapping adds up to 1/25 s)
+        d = by_pair.get((final.clips[i - 1].id, final.clips[i].id))
+        if d is None:
+            continue
+        junction = final.record_start(i) + cfg.music.start
+        assert abs(junction - d.data["beat"]) <= 1.0 / final.fps + 1e-3, (i, junction, d.data["beat"])
     report = (tmp_path / "ws" / "report.md").read_text()
     assert "## Music" in report
     assert "click.wav" in report and "BPM" in report

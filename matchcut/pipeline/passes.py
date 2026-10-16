@@ -658,6 +658,8 @@ class BeatSyncPass(Pass):
             tl.stage = self.name
             return PassResult(tl, decisions)
 
+        tl = tl.snap_to_frames(ctx.shot_bounds)
+        fps = tl.fps
         for i in range(1, len(tl.clips)):
             prev, cur = tl.clips[i - 1], tl.clips[i]
             track_t = tl.record_start(i) + mcfg.start
@@ -676,9 +678,11 @@ class BeatSyncPass(Pass):
                 decisions.append(self.decision("skip", [prev.id, cur.id], f"no beat within {mcfg.snap_window:.2f}s of the cut"))
                 continue
             delta = target - track_t
-            if abs(delta) < 0.02:
-                decisions.append(self.decision("on_beat", [prev.id, cur.id], "cut already on the beat", 0.0))
+            frames = int(round(delta * fps))
+            if frames == 0:
+                decisions.append(self.decision("on_beat", [prev.id, cur.id], "cut already on the beat (within half a frame)", 0.0, beat=round(float(target), 4), downbeat=downbeat))
                 continue
+            delta = frames / fps
             if self._shift_junction(prev, delta, ctx):
                 decisions.append(
                     self.decision(
@@ -705,12 +709,12 @@ class BeatSyncPass(Pass):
         if not clip.locked_out:
             new_out = clip.source_out + delta
             if s <= new_out <= e and pacing.min_clip_seconds <= new_out - clip.source_in <= pacing.max_clip_seconds:
-                clip.source_out = round(new_out, 3)
+                clip.source_out = round(new_out, 4)
                 return True
         if not clip.locked_in:
             new_in = clip.source_in - delta
             if s <= new_in <= e and pacing.min_clip_seconds <= clip.source_out - new_in <= pacing.max_clip_seconds:
-                clip.source_in = round(new_in, 3)
+                clip.source_in = round(new_in, 4)
                 return True
         return False
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from .config import MusicConfig, RenderConfig
 from .media import MediaInfo, _require, run
@@ -12,19 +12,18 @@ from .timeline import Timeline
 log = logging.getLogger("matchcut.pipeline")
 
 
-def snap_to_frames(tl: Timeline) -> Timeline:
+def snap_to_frames(tl: Timeline, bounds: Optional[Dict[int, Sequence[float]]] = None) -> Timeline:
     """Round in/out points to the source frame grid (keeps the EDL and render in step)."""
-    out = tl.copy()
-    fps = out.fps
-    for c in out.clips:
-        c.source_in = round(round(c.source_in * fps) / fps, 4)
-        c.source_out = round(round(c.source_out * fps) / fps, 4)
-        if c.source_out - c.source_in < 2 / fps:
-            c.source_out = round(c.source_in + 2 / fps, 4)
-    return out
+    return tl.snap_to_frames(bounds)
 
 
-def build_filter_graph(tl: Timeline, media: MediaInfo, cfg: RenderConfig, music: Optional[MusicConfig] = None) -> str:
+def build_filter_graph(
+    tl: Timeline,
+    media: MediaInfo,
+    cfg: RenderConfig,
+    music: Optional[MusicConfig] = None,
+    music_duration: Optional[float] = None,
+) -> str:
     """ffmpeg -filter_complex graph assembling the timeline from input 0 (and music from input 1)."""
     fps = media.fps
     width = cfg.proxy_width if cfg.proxy else cfg.width
@@ -73,18 +72,19 @@ def build_filter_graph(tl: Timeline, media: MediaInfo, cfg: RenderConfig, music:
         label = "[asrc]" if has_music else "[aout]"
         parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}{label}")
     if has_music:
-        parts += _music_chain(music, total=cur_dur, source_audio=audio)
+        parts += _music_chain(music, cur_dur, audio, music_duration)
     return ";".join(parts)
 
 
-def _music_chain(music: MusicConfig, total: float, source_audio: bool) -> List[str]:
+def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None) -> List[str]:
     """Trim, fade, gain, duck (optional), mix and normalise the music (input 1) under [asrc]."""
     parts: List[str] = []
-    fade = min(music.fade_out, total / 2)
     start = max(0.0, music.start)
+    available = total if music_duration is None else max(0.0, min(total, music_duration - start))
+    fade = min(music.fade_out, available / 2)
     parts.append(
-        f"[1:a]atrim=start={start:.3f}:end={start + total:.3f},asetpts=PTS-STARTPTS,"
-        f"afade=t=out:st={max(0.0, total - fade):.3f}:d={fade:.3f},volume={music.gain_db:.1f}dB[music]"
+        f"[1:a]atrim=start={start:.3f}:end={start + available:.3f},asetpts=PTS-STARTPTS,"
+        f"afade=t=out:st={max(0.0, available - fade):.3f}:d={fade:.3f},volume={music.gain_db:.1f}dB[music]"
     )
     if source_audio:
         if music.duck:
@@ -97,7 +97,7 @@ def _music_chain(music: MusicConfig, total: float, source_audio: bool) -> List[s
             parts.append("[asrc][music]amix=inputs=2:duration=first:normalize=0[amixed]")
     else:
         parts.append("[music]anull[amixed]")
-    final = f"loudnorm=I={music.target_lufs:.1f}:TP=-1.5:LRA=11" if music.loudnorm else "anull"
+    final = f"loudnorm=I={music.target_lufs:.1f}:TP=-1.5:LRA=11,aresample=48000" if music.loudnorm else "anull"
     parts.append(f"[amixed]{final}[aout]")
     return parts
 
@@ -109,12 +109,13 @@ def render(
     output: Path,
     overwrite: bool = True,
     music: Optional[MusicConfig] = None,
+    music_duration: Optional[float] = None,
 ) -> Path:
     if not tl.clips:
         raise ValueError("cannot render an empty timeline")
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
-    graph = build_filter_graph(tl, media, cfg, music=music)
+    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n", "-i", media.path]
     if has_music:

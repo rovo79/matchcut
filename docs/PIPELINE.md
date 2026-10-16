@@ -39,7 +39,7 @@ python -m matchcut.pipeline run footage.mp4 \
     --music track.mp3 --music-start 12
 ```
 
-With `--music`, the track is analysed for tempo and beats, the narrative stage is told about its energy curve, the `beatsync` pass moves cuts onto beats, and the render mixes it under the source audio (ducked, loudness-normalised).
+With `--music`, the track is analysed for tempo and beats, the narrative stage is told about its energy curve, the `beatsync` pass moves cuts onto beats, and the render mixes it under the source audio (ducked, loudness-normalised). `--music-gain` sets the music level in dB.
 
 Outputs land in `footage_edit/` (override with `-w`). Run `--backend mock` to
 exercise the whole pipeline without a model (deterministic heuristics stand in
@@ -136,7 +136,7 @@ and every decision each pass made.
 * **Beat sync**: see the `beatsync` pass above. `--music-start` offsets the
   grid; `music.snap_window` caps how far a cut may move.
 * **Mix** (`render.py`): the track is trimmed to the cut, faded out over
-  `music.fade_out`, set to `music.gain_db`, ducked under the source audio with
+  `music.fade_out`, set to `music.gain_db` (`--music-gain` on the command line), ducked under the source audio with
   `sidechaincompress` (`music.duck`), mixed with `amix`, and normalised with
   `loudnorm` to `music.target_lufs`. `music.only=true` drops the source audio.
 * The report gains a "Music" section with the track, tempo and snap stats.

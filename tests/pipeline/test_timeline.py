@@ -36,3 +36,15 @@ def test_edl_and_csv_exports():
     csv = tl.to_csv()
     assert csv.splitlines()[0].startswith("clip_id,shot_index")
     assert len(csv.splitlines()) == 4
+
+
+def test_snap_to_frames_stays_inside_shot_bounds():
+    tl = Timeline(source="x.mp4", fps=25.0)
+    tl.clips = [Clip("c001", 3, 6.5, 8.5, "b1"), Clip("c002", 0, 0.3, 1.5, "b1")]
+    snapped = tl.snap_to_frames({3: (6.5, 9.0), 0: (0.0, 1.5)})
+    assert snapped.clips[0].source_in == 6.52  # 162.5 frames rounds down to 6.48, outside the shot: pulled up
+    assert snapped.clips[0].source_out == 8.48
+    assert snapped.clips[1].source_out == 1.48  # 37.5 frames rounds up to 1.52, past the shot end: pulled down
+    plain = tl.snap_to_frames()
+    assert plain.clips[0].source_in == 6.48  # without bounds, plain rounding
+    assert tl.clips[0].source_in == 6.5  # input untouched

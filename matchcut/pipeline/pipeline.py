@@ -166,7 +166,7 @@ class Pipeline:
         passes_dir = self.ws / "passes"
         passes_dir.mkdir(exist_ok=True)
         final = run_passes(tl, ctx, names, save_dir=passes_dir)
-        final = snap_to_frames(final)
+        final = snap_to_frames(final, ctx.shot_bounds)
         final.name = "final cut"
         final.stage = "final"
         final.save(self.ws / "final.json")
@@ -180,7 +180,12 @@ class Pipeline:
         tl = timeline or Timeline.load(self.ws / "final.json")
         out = output or self.ws / ("final_proxy.mp4" if self.cfg.render.proxy else "final.mp4")
         music = self.cfg.music if self.cfg.music.path else None
-        return render(tl, ctx.media, self.cfg.render, out, music=music)
+        music_duration = None
+        if music is not None and ctx.music is not None:
+            music_duration = ctx.music.duration
+            if music.start >= music_duration:
+                raise ValueError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_duration:.1f}s)")
+        return render(tl, ctx.media, self.cfg.render, out, music=music, music_duration=music_duration)
 
     # ------------------------------------------------------------ report
     def report(self, final: Optional[Timeline] = None) -> str:

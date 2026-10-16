@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -128,6 +129,28 @@ class Timeline:
 
     def copy(self) -> "Timeline":
         return Timeline.from_dict(self.to_dict())
+
+    def snap_to_frames(self, bounds: Optional[Dict[int, Sequence[float]]] = None) -> "Timeline":
+        """Copy with in/out points on the frame grid (at least two frames per clip).
+
+        With ``bounds`` (shot index -> (start, end)), a rounding that would leave the
+        shot is pulled back in: in-points round up, out-points round down.
+        """
+        out = self.copy()
+        fps = out.fps
+        for c in out.clips:
+            lo, hi = (bounds or {}).get(c.shot_index, (None, None))
+            in_f = int(round(c.source_in * fps))
+            out_f = int(round(c.source_out * fps))
+            if lo is not None and in_f / fps < lo - 1e-9:
+                in_f = int(math.ceil(lo * fps - 1e-9))
+            if hi is not None and out_f / fps > hi + 1e-9:
+                out_f = int(math.floor(hi * fps + 1e-9))
+            if out_f - in_f < 2:
+                out_f = in_f + 2
+            c.source_in = round(in_f / fps, 4)
+            c.source_out = round(out_f / fps, 4)
+        return out
 
     def renumber(self) -> None:
         for i, c in enumerate(self.clips):

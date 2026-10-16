@@ -48,6 +48,16 @@ def test_cuts_land_on_beats(ctx):
     assert tl.clips[0].source_out == 1.8
 
 
+def test_beatsync_output_is_frame_aligned(ctx):
+    out = BeatSyncPass().apply(make_tl(ctx), ctx).timeline
+    again = out.snap_to_frames(ctx.shot_bounds)
+    assert [(c.source_in, c.source_out) for c in again.clips] == [(c.source_in, c.source_out) for c in out.clips]
+    fps = out.fps
+    for d in out.history:
+        if d.pass_name == "beatsync" and d.action == "snap":
+            assert abs(d.data["delta"] * fps - round(d.data["delta"] * fps)) < 1e-6  # whole frames
+
+
 def test_beat_change_prefers_downbeats(ctx):
     tl = make_tl(ctx)
     result = BeatSyncPass().apply(tl, ctx)
@@ -78,7 +88,8 @@ def test_fully_locked_clip_is_left_alone(ctx):
     tl.clips[0].locked_in = True
     result = BeatSyncPass().apply(tl, ctx)
     c = result.timeline.clips[0]
-    assert (c.source_in, c.source_out) == (0.5, 1.8)
+    expected = make_tl(ctx).snap_to_frames(ctx.shot_bounds).clips[0]
+    assert (c.source_in, c.source_out) == (expected.source_in, expected.source_out)
     assert any(d.action == "locked" and d.clip_ids == ["c001", "c002"] for d in result.decisions)
 
 
