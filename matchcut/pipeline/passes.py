@@ -9,7 +9,7 @@ intermediate cut can be inspected or re-run.
     pacing       hit the beat/running-time targets with the intended rhythm
     transitions  dissolves / dips at beat changes, fades at the ends
     polish       the model reviews the storyboard and proposes final tweaks
-    beatsync     move cuts onto the beats of the music track (stub until the music task lands)
+    beatsync     move cuts onto the beats of the music track (no-op without music); runs last
 """
 from __future__ import annotations
 
@@ -634,15 +634,85 @@ class PolishPass(Pass):
 
 
 # ==========================================================================
-# beat sync (stub: the real pass lands in a later task)
+# beat sync
 # ==========================================================================
 class BeatSyncPass(Pass):
+    """Move every cut onto the nearest beat of the music track.
+
+    The cut between clips i-1 and i happens at ``record_start(i)`` on the
+    timeline (for a dissolve: where the incoming clip starts fading in), i.e.
+    ``record_start(i) + music.start`` seconds into the track. Only the outgoing
+    clip can move it: its out-point when unlocked, else its in-point (a shorter
+    head lands the junction earlier). Locked ends stay. The pass runs last so
+    nothing moves a cut after it is on the beat.
+    """
+
     name = "beatsync"
 
     def apply(self, timeline: Timeline, ctx: Context) -> PassResult:
         tl = timeline.copy()
+        decisions: List[Decision] = []
+        music = ctx.music
+        mcfg = ctx.cfg.music
+        if music is None or not mcfg.snap:
+            tl.stage = self.name
+            return PassResult(tl, decisions)
+
+        for i in range(1, len(tl.clips)):
+            prev, cur = tl.clips[i - 1], tl.clips[i]
+            track_t = tl.record_start(i) + mcfg.start
+            beat_change = prev.beat_id != cur.beat_id
+            target: Optional[float] = None
+            downbeat = False
+            if beat_change and mcfg.prefer_downbeats_at_beat_changes:
+                db = music.nearest_beat(track_t, downbeats=True)
+                if db is not None and abs(db - track_t) <= mcfg.snap_window:
+                    target, downbeat = db, True
+            if target is None:
+                b = music.nearest_beat(track_t)
+                if b is not None and abs(b - track_t) <= mcfg.snap_window:
+                    target = b
+            if target is None:
+                decisions.append(self.decision("skip", [prev.id, cur.id], f"no beat within {mcfg.snap_window:.2f}s of the cut"))
+                continue
+            delta = target - track_t
+            if abs(delta) < 0.02:
+                decisions.append(self.decision("on_beat", [prev.id, cur.id], "cut already on the beat", 0.0))
+                continue
+            if self._shift_junction(prev, delta, ctx):
+                decisions.append(
+                    self.decision(
+                        "snap",
+                        [prev.id, cur.id],
+                        f"cut moved {delta:+.3f}s onto a {'downbeat' if downbeat else 'beat'} at {target:.2f}s of the track",
+                        abs(delta),
+                        delta=round(delta, 4),
+                        beat=round(float(target), 4),
+                        downbeat=downbeat,
+                    )
+                )
+            else:
+                decisions.append(self.decision("locked", [prev.id, cur.id], "both ends of the outgoing clip are locked or out of room"))
         tl.stage = self.name
-        return PassResult(tl, [])
+        tl.history.extend(decisions)
+        return PassResult(tl, decisions)
+
+    @staticmethod
+    def _shift_junction(clip: Clip, delta: float, ctx: Context) -> bool:
+        """Move the junction after ``clip`` by ``delta`` seconds via one of its unlocked ends."""
+        s, e = ctx.shot_bounds[clip.shot_index]
+        pacing = ctx.cfg.pacing
+        if not clip.locked_out:
+            new_out = clip.source_out + delta
+            if s <= new_out <= e and pacing.min_clip_seconds <= new_out - clip.source_in <= pacing.max_clip_seconds:
+                clip.source_out = round(new_out, 3)
+                return True
+        if not clip.locked_in:
+            new_in = clip.source_in - delta
+            if s <= new_in <= e and pacing.min_clip_seconds <= clip.source_out - new_in <= pacing.max_clip_seconds:
+                clip.source_in = round(new_in, 3)
+                return True
+        return False
 
 
 PASSES: Dict[str, type] = {
