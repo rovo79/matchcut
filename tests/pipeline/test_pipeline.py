@@ -110,6 +110,7 @@ def test_no_music_means_no_music_text(demo_video, tmp_path):
     assert "Music track: none" in pipe.llm.texts["narrative"][0]
 
 
+from matchcut.pipeline.audio import decode_audio
 from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.render import render
 
@@ -155,7 +156,17 @@ def test_render_with_music_track(demo_video, click_track, tmp_path):
     info = probe(str(out))
     assert info.has_audio
     assert abs(info.duration - 6.0) < 0.35
-    # music is audible: the mix has more energy in a quiet stretch of the source than the source alone would
-    from matchcut.pipeline.audio import decode_audio
-    mixed = decode_audio(str(out), 22050)
-    assert float(np.abs(mixed).max()) > 0.05
+    # a music-only render must carry the click track's sparse ticks, not the source's steady sine:
+    # with ticks of 50 ms every 500 ms, the loudest 50 ms window is far above the median window
+    only = render(
+        tl,
+        media,
+        PipelineConfig().render,
+        tmp_path / "music_only.mp4",
+        music=MusicConfig(path=str(click_track), start=1.0, only=True, loudnorm=False, duck=False, fade_out=0.5),
+    )
+    y = decode_audio(str(only), 22050)
+    win = 22050 // 20  # 50 ms
+    core = y[22050 : 22050 * 5]  # 4 s from the middle, clear of fades
+    rms = np.sqrt(np.mean(core[: len(core) // win * win].reshape(-1, win) ** 2, axis=1))
+    assert float(rms.max()) > 5.0 * float(np.median(rms)), (float(rms.max()), float(np.median(rms)))
