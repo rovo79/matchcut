@@ -50,6 +50,44 @@ def make_demo_footage(
     return output
 
 
+def make_click_track(
+    output: Path,
+    seconds: float = 40.0,
+    bpm: float = 120.0,
+    beats_per_bar: int = 4,
+    sample_rate: int = 22050,
+) -> Path:
+    """Synthetic music: a tick on every beat and a louder low thump on every bar (WAV)."""
+    ffmpeg = _require("ffmpeg")
+    beat = 60.0 / bpm
+    bar = beat * beats_per_bar
+    expr = (
+        f"0.6*sin(2*PI*880*t)*lt(mod(t,{beat:.6f}),0.05)"
+        f"+0.9*sin(2*PI*110*t)*lt(mod(t,{bar:.6f}),0.08)"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-t",
+            f"{seconds:.3f}",
+            "-i",
+            f"aevalsrc='{expr}':s={sample_rate}",
+            "-c:a",
+            "pcm_s16le",
+            str(output),
+        ],
+        capture=False,
+    )
+    return output
+
+
 if __name__ == "__main__":  # pragma: no cover
     import sys
 

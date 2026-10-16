@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from matchcut.pipeline.demo import make_demo_footage
+from matchcut.pipeline.demo import make_click_track, make_demo_footage
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 
@@ -47,3 +47,10 @@ def matchcut_video(footage_dir: Path) -> Path:
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg not installed")
     return make_demo_footage(footage_dir / "mc.mp4", shots=MC_SHOTS)
+
+
+@pytest.fixture(scope="session")
+def click_track(footage_dir: Path) -> Path:
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    return make_click_track(footage_dir / "click.wav", seconds=40.0, bpm=120.0)
