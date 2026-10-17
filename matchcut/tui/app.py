@@ -11,6 +11,7 @@ from textual.widgets import Footer, Static, TabbedContent, TabPane
 from matchcut.pipeline.config import PipelineConfig
 from .bridge import PipelineBridge
 from .state import RunState
+from .views.config import ConfigView
 from .views.cut import CutView
 from .views.run import RunView
 from .views.shots import ShotsView
@@ -70,7 +71,7 @@ class MatchcutApp(App):
             with TabPane("4 Cut", id="tab-cut"):
                 yield CutView(id="cut-view")
             with TabPane("5 Config", id="tab-config"):
-                yield Static("config view (next task)", id="config-placeholder")
+                yield ConfigView(id="config-view")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -99,6 +100,8 @@ class MatchcutApp(App):
             self.call_after_refresh(self._focus_if_active, "tab-story", "#story-view")
         elif event.pane.id == "tab-cut":
             self.call_after_refresh(self._focus_if_active, "tab-cut", "#cut-view")
+        elif event.pane.id == "tab-config":
+            self.call_after_refresh(self._focus_if_active, "tab-config", "#config-tree")
 
     # -- event pump -------------------------------------------------------------
     def _pump(self) -> None:

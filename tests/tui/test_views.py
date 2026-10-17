@@ -2,8 +2,11 @@ import json
 import os
 import shutil
 
+import pytest
+
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.tui.app import MatchcutApp
+from matchcut.tui.views.config import ConfigView, parse_value, set_value
 from matchcut.tui.views.shots import ShotsView
 from tests.tui.conftest import run_async, wait_for
 
@@ -332,3 +335,200 @@ async def _cut_changed(cfg, ws):
         await pilot.pause()
         assert len(redraws) == 1
         assert len(track.timeline.clips) == clips - 1
+
+
+def test_parse_value_types():
+    assert parse_value(True, "false") is False and parse_value(False, "yes") is True
+    assert parse_value(3, "7") == 7 and parse_value(0.5, "0.75") == 0.75
+    assert parse_value(("a", "b"), "matchcut, pacing") == ("matchcut", "pacing")
+    assert parse_value(None, "") is None and parse_value("x", "") is None and parse_value(None, "track.mp3") == "track.mp3"
+    with pytest.raises(ValueError):
+        parse_value(3, "seven")
+
+
+def test_parse_value_branches():
+    for text in ("true", "yes", "1", "TRUE", " on "):
+        assert parse_value(False, text) is True
+    for text in ("false", "no", "0", "Off"):
+        assert parse_value(True, text) is False
+    with pytest.raises(ValueError):
+        parse_value(True, "maybe")
+    assert parse_value(3, " 42 ") == 42
+    with pytest.raises(ValueError):
+        parse_value(3, "1.5")
+    assert parse_value(1.5, "2") == 2.0 and isinstance(parse_value(1.5, "2"), float)
+    with pytest.raises(ValueError):
+        parse_value(1.5, "fast")
+    assert parse_value(("a",), "x,, y ,") == ("x", "y")
+    assert parse_value(("a",), "") == ()
+    assert parse_value("old", "new") == "new" and parse_value("old", "") is None
+    with pytest.raises(ValueError):
+        parse_value({"slow": 1.0}, "x")
+
+
+def test_set_value_targets_top_level_and_sections():
+    cfg = PipelineConfig()
+    set_value(cfg, None, "seed", 9)
+    set_value(cfg, "music", "snap", False)
+    assert cfg.seed == 9 and cfg.music.snap is False
+
+
+def test_config_view_edits_the_live_config(mock_workspace):
+    run_async(_config(mock_workspace))
+
+
+async def _config(mock_workspace):
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        labels = [str(n.label) for n in tree.root.children]
+        assert "music" in labels and "pacing" in labels and "brief" in " ".join(labels)
+        node = next(n for n in tree.root.children if str(n.label).startswith("target_duration"))
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit = view.query_one("#config-edit")
+        assert edit.display is True
+        edit.value = ""
+        await pilot.click("#config-edit")
+        await pilot.press(*"12.5", "enter")
+        await pilot.pause()
+        assert cfg.target_duration == 12.5  # the same object the bridge will hand to Pipeline
+        assert app.state.config is cfg
+        assert edit.display is False
+        music = next(n for n in tree.root.children if str(n.label) == "music")
+        music.expand()
+        await pilot.pause()
+        snap = next(n for n in music.children if str(n.label).startswith("snap "))
+        tree.select_node(snap)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit.value = ""
+        await pilot.click("#config-edit")
+        await pilot.press(*"false", "enter")
+        await pilot.pause()
+        assert cfg.music.snap is False
+        # a bad value is rejected and the config untouched
+        node = next(n for n in tree.root.children if str(n.label).startswith("target_duration"))
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit.value = ""
+        await pilot.click("#config-edit")
+        await pilot.press(*"abc", "enter")
+        await pilot.pause()
+        assert cfg.target_duration == 12.5
+
+
+def test_config_view_rejects_bad_values_with_a_notification(mock_workspace):
+    run_async(_config_bad_value(mock_workspace))
+
+
+async def _config_bad_value(mock_workspace):
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    app = MatchcutApp(cfg)
+    sent = []
+    real_notify = app.notify
+
+    def spy(message, **kwargs):
+        sent.append((str(message), kwargs.get("severity", "information")))
+        return real_notify(message, **kwargs)
+
+    app.notify = spy
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        before = cfg.seed
+        node = next(n for n in tree.root.children if str(n.label).startswith("seed"))
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit = view.query_one("#config-edit")
+        assert edit.display is True
+        edit.value = "not-a-number"
+        await pilot.click("#config-edit")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.seed == before
+        assert any(sev == "error" for _, sev in sent)
+        assert edit.display is True  # still open so the value can be corrected
+        edit.value = "5"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.seed == 5 and edit.display is False
+        # Escape cancels an edit without touching the config
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit.value = "99"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert cfg.seed == 5 and edit.display is False
+
+
+def test_config_refresh_is_idempotent_and_keeps_tree_state(mock_workspace):
+    run_async(_config_idempotent(mock_workspace))
+
+
+async def _config_idempotent(mock_workspace):
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        music = next(n for n in tree.root.children if str(n.label) == "music")
+        music.expand()
+        await pilot.pause()
+        tree.move_cursor(music.children[2])
+        await pilot.pause()
+        line, count = tree.cursor_line, len(list(tree.root.children)) + len(music.children)
+        total = sum(1 for _ in _walk(tree.root))
+        for _ in range(3):
+            app.refresh_views()
+        await pilot.pause()
+        assert tree.cursor_line == line and music.is_expanded
+        assert sum(1 for _ in _walk(tree.root)) == total
+        assert len(list(tree.root.children)) + len(music.children) == count
+        # a changed config object is picked up
+        other = PipelineConfig()
+        other.seed = 77
+        app.state.config = other
+        app.refresh_views()
+        await pilot.pause()
+        seed = next(n for n in tree.root.children if str(n.label).startswith("seed"))
+        assert "77" in str(seed.label)
+
+
+def _walk(node):
+    yield node
+    for child in node.children:
+        yield from _walk(child)
+
+
+def test_config_tab_focuses_the_tree_so_enter_opens_the_editor(mock_workspace):
+    run_async(_config_keyboard(mock_workspace))
+
+
+async def _config_keyboard(mock_workspace):
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        await wait_for(pilot, lambda: app.focused is tree, timeout=10)
+        await pilot.press("down", "down", "down", "enter")  # source, workspace, brief -> brief
+        await wait_for(pilot, lambda: view.query_one("#config-edit").display is True, timeout=10)
+        edit = view.query_one("#config-edit")
+        assert app.focused is edit
+        await pilot.press(*"hello", "enter")
+        await pilot.pause()
+        assert cfg.brief.endswith("hello") and app.focused is tree
