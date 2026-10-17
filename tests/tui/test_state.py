@@ -1,4 +1,5 @@
-from pathlib import Path
+import os
+import time
 
 from matchcut.pipeline import events
 from matchcut.pipeline.config import PipelineConfig
@@ -78,7 +79,6 @@ def test_readers_reload_when_the_file_changes(mock_workspace):
     before = st.narrative()["logline"]
     path = mock_workspace / "narrative.json"
     data = path.read_text().replace(before, "A changed logline")
-    import os, time
     path.write_text(data)
     os.utime(path, (time.time() + 5, time.time() + 5))  # guarantee a new mtime
     st.invalidate(str(path))

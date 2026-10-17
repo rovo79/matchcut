@@ -1,4 +1,3 @@
-```
 # Control-room TUI (python -m matchcut.tui). Install on top of requirements-pipeline.txt.
 textual>=8
 textual-image>=0.8
