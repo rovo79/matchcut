@@ -293,12 +293,69 @@ def test_the_inspector_explains_the_junction():
 def test_the_inspector_flags_a_pending_pin_and_missing_scores():
     j = inspected_junction()
     plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
-    assert "pinned (locked)" in plain and "pin pending" in plain
+    assert "pin pending: run again (R) to apply" in plain and "pinned (locked)" not in plain
     for s in j.states:
         s.score = None
-    assert "scores unavailable" in render_inspector(j, "final", None).plain
+    assert "scores unavailable (no usable analysis for this workspace)" in render_inspector(j, "final", None).plain
 
 
 def test_the_expanded_inspector_lists_every_decision():
     plain = render_inspector(inspected_junction(), "final", None, expanded=True).plain
     assert "decisions:" in plain and "matchcut:match_cut" in plain
+
+
+def editor_decision(action, out_time, in_time, detail="", **extra):
+    data = {"out_shot": 1, "in_shot": 3, "out_time": out_time, "in_time": in_time, "origin": "locked", "note": ""}
+    data.update(extra)
+    return Decision("editor", action, ["c002", "c003"], detail, None, data)
+
+
+def test_a_applied_pin_is_not_pending_at_any_inspected_stage():
+    j = inspected_junction()
+    j.decisions.append(editor_decision("pinned", 4.88, 7.12, "locked by the editor: out 4.88s, in 7.12s", out=4.88, in_=7.12))
+    for stage in ("roughcut", "final"):
+        plain = render_inspector(j, stage, Pin(1, 3, 4.88, 7.12)).plain
+        assert "pinned (locked)" in plain and "pending" not in plain and "adjusted" not in plain
+
+
+def test_a_clamped_pin_says_where_it_was_placed():
+    j = inspected_junction()
+    j.decisions.append(editor_decision("pinned", 4.50, 7.12, out=4.88, in_=7.12))
+    plain = render_inspector(j, "final", Pin(1, 3, 4.50, 7.12)).plain
+    assert "pinned (locked), adjusted to out 4.88s / in 7.12s to fit the clips" in plain
+    assert "pending" not in plain
+
+
+def test_an_unplaced_pin_says_why():
+    j = inspected_junction()
+    j.decisions.append(editor_decision("pin_unplaced", 4.70, 7.12, "not enough room in these clips for the pinned points"))
+    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+    assert "pin not placed: not enough room in these clips for the pinned points" in plain
+    assert "pending" not in plain
+
+
+def test_a_pin_changed_since_the_last_run_is_pending():
+    j = inspected_junction()
+    j.decisions.append(editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12))
+    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+    assert "pin pending: run again (R) to apply" in plain
+
+
+def test_match_cut_and_lock_badges_follow_the_inspected_stage():
+    j = inspected_junction()
+    assert "MATCH CUT" not in render_inspector(j, "roughcut", None).plain
+    assert "MATCH CUT (motion)" in render_inspector(j, "final", None).plain
+
+
+def test_the_baseline_stage_shows_a_single_score_column():
+    lines = render_inspector(inspected_junction(), "roughcut", None).plain.splitlines()
+    header = lines[2]  # title, badges, then the score table's header
+    assert header.split() == ["roughcut"]
+    combined = next(line for line in lines if line.startswith("combined"))
+    assert combined.split() == ["combined", "0.44"]
+
+
+def test_the_inspector_survives_a_zero_fps_junction():
+    j = inspected_junction()
+    j.fps = 0.0
+    assert "Junction 2" in render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
