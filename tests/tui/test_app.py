@@ -173,3 +173,98 @@ async def _log_after_buffer_full(mock_workspace):
         await pilot.pause()
         text = "\n".join(strip.text for strip in log.lines)
         assert "line-5009" in text and "line-5000" in text
+
+
+def test_open_target_depends_on_the_active_tab(mock_workspace, monkeypatch):
+    run_async(_open_target(mock_workspace, monkeypatch))
+
+
+async def _open_target(mock_workspace, monkeypatch):
+    from matchcut.pipeline.sampling import shot_sample_times
+    from matchcut.tui import images
+    from matchcut.tui.views.shots import ShotsView
+    from matchcut.tui.widgets.timeline import TimelineTrack
+
+    opened = []
+    monkeypatch.setattr(images, "open_externally", lambda p: opened.append(p) or True)
+    app = MatchcutApp(load_cfg(mock_workspace))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        assert app.current_open_target() is None  # no render in this workspace
+        await pilot.press("o")
+        await pilot.pause()
+        assert opened == []
+        await pilot.press("2")
+        await pilot.pause()
+        target = app.current_open_target()
+        assert target is not None and target.suffix == ".jpg" and target.exists()
+        shot = next(s for s in app.state.shots() if s.index == app.query_one(ShotsView).current_shot_index())
+        mid = shot_sample_times(shot, 3)[1]  # the frame the Shots view shows as "middle"
+        assert f"t{int(round(mid * 1000)):09d}" in target.name
+        await pilot.press("o")
+        await pilot.pause()
+        assert opened == [target]
+        # moving the cursor moves the target
+        await pilot.press("down")
+        await pilot.pause()
+        assert app.current_open_target() != target
+        await pilot.press("4")
+        await pilot.pause()
+        first = app.current_open_target()
+        assert first is not None and first.suffix == ".jpg" and first.exists()
+        track = app.query_one("#track", TimelineTrack)
+        clip = track.timeline.clips[track.selected]
+        assert f"t{int(round(clip.source_in * 1000)):09d}" in first.name
+        await pilot.press("right")
+        await pilot.pause()
+        assert app.current_open_target() != first
+        await pilot.press("3")
+        await pilot.pause()
+        assert app.current_open_target() is None
+
+
+def test_open_prefers_the_full_render(mock_workspace, tmp_path, monkeypatch):
+    run_async(_open_render(mock_workspace, tmp_path, monkeypatch))
+
+
+async def _open_render(mock_workspace, tmp_path, monkeypatch):
+    import shutil
+
+    from matchcut.tui import images
+
+    ws = tmp_path / "ws"
+    shutil.copytree(mock_workspace, ws)
+    cfg = load_cfg(ws)
+    cfg.workspace = str(ws)
+    opened = []
+    monkeypatch.setattr(images, "open_externally", lambda p: opened.append(p) or True)
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        (ws / "final_proxy.mp4").write_bytes(b"x")
+        assert app.current_open_target() == ws / "final_proxy.mp4"
+        (ws / "final.mp4").write_bytes(b"x")
+        assert app.current_open_target() == ws / "final.mp4"
+        await pilot.press("o")
+        await pilot.pause()
+        assert opened == [ws / "final.mp4"]
+
+
+def test_image_mode_notice_fires_once(mock_workspace, monkeypatch):
+    run_async(_image_notice(mock_workspace, monkeypatch))
+
+
+async def _image_notice(mock_workspace, monkeypatch):
+    app = MatchcutApp(load_cfg(mock_workspace))
+    messages = []
+    real_notify = app.notify
+    monkeypatch.setattr(app, "notify", lambda message, *a, **k: messages.append(str(message)) or real_notify(message, *a, **k))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await wait_for(pilot, lambda: app.state.image_mode is not None)
+        await pilot.pause(0.2)
+        await pilot.press("4")
+        await pilot.pause(0.2)
+        await pilot.press("2")
+        await pilot.pause(0.2)
+        assert app.state.image_mode == "half-block"
+        assert [m for m in messages if "images rendered" in m] == ["images rendered as half-block"]

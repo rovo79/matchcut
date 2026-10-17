@@ -86,6 +86,18 @@ class ShotsView(Horizontal):
         except Exception:
             return None
 
+    def open_target(self) -> Optional[Path]:
+        """The middle-frame file of the highlighted shot, as shown in the detail pane."""
+        index = self.current_shot_index()
+        if self._state is None or index is None:
+            return None
+        shot = next((s for s in self._state.shots() if s.index == index), None)
+        media = self._state.media()
+        if shot is None or media is None:
+            return None
+        t = shot_sample_times(shot, 3)[1]
+        return images.cached_frame_path(media.path, self._state.workspace / "frames", self._state.config.sampling, t)
+
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         # Read the live cursor: events queued while the table was rebuilt may be stale.
         self._show(self.current_shot_index())

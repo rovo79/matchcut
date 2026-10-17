@@ -1,6 +1,7 @@
 """The control-room application."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Optional
 
 from textual.app import App, ComposeResult
@@ -9,6 +10,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Footer, Static, TabbedContent, TabPane
 
 from matchcut.pipeline.config import PipelineConfig
+from . import images
 from .bridge import PipelineBridge
 from .state import RunState
 from .views.config import ConfigView
@@ -57,6 +59,7 @@ class MatchcutApp(App):
         self.bridge: Optional[PipelineBridge] = None
         self._bridge_factory = bridge_factory or (lambda c: PipelineBridge(c, interactive=True))
         self._quit_armed = False
+        self._image_notice_shown = False
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -111,6 +114,9 @@ class MatchcutApp(App):
                 self.state.apply(e)
                 changed = True
         self._update_status()
+        if self.state.image_mode and not self._image_notice_shown:
+            self._image_notice_shown = True
+            self.notify(f"images rendered as {self.state.image_mode}")
         if changed:
             self.refresh_views()
 
@@ -160,8 +166,30 @@ class MatchcutApp(App):
         self.bridge.stop()
         self.refresh_views()
 
-    def action_open(self) -> None:  # Task 8 fills this in
-        self.notify("nothing to open yet")
+    def current_open_target(self) -> Optional[Path]:
+        """What `o` would open for the active tab, or None."""
+        active = self.query_one(TabbedContent).active
+        if active == "tab-run":
+            for name in ("final.mp4", "final_proxy.mp4"):
+                path = self.state.workspace / name
+                if path.exists():
+                    return path
+            return None
+        if active == "tab-shots":
+            return self.query_one(ShotsView).open_target()
+        if active == "tab-cut":
+            return self.query_one(CutView).open_target()
+        return None
+
+    def action_open(self) -> None:
+        target = self.current_open_target()
+        if target is None:
+            self.notify("nothing to open on this view")
+            return
+        if not images.open_externally(target):
+            self.notify(f"no system opener found; file is {target}", severity="warning")
+        else:
+            self.notify(f"opened {target.name}")
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(name="help"))

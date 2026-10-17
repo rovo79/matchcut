@@ -1,6 +1,7 @@
 """Cut view: the timeline track, clip detail, and a stepper through the passes."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from rich.text import Text
@@ -10,6 +11,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from matchcut.pipeline.sampling import FrameCache
+from .. import images
 from ..state import RunState, file_fingerprint
 from ..widgets.frame import Frame
 from ..widgets.timeline import TimelineTrack
@@ -119,6 +121,16 @@ class CutView(Vertical):
         frame.show(img, caption=f"{c.id} @ {c.source_in:.2f}s")
         if frame.image_mode:
             self._state.image_mode = frame.image_mode
+
+    def open_target(self) -> Optional[Path]:
+        """The frame file of the selected clip, as shown in the clip row."""
+        track = self.query_one("#track", TimelineTrack)
+        tl = track.timeline
+        media = self._state.media() if self._state is not None else None
+        if tl is None or not tl.clips or media is None:
+            return None
+        t = tl.clips[track.selected].source_in
+        return images.cached_frame_path(media.path, self._state.workspace / "frames", self._state.config.sampling, t)
 
     # -- actions ------------------------------------------------------------------
     def action_prev_clip(self) -> None:

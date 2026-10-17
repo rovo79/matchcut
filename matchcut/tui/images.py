@@ -10,6 +10,8 @@ from typing import Dict, Optional, Tuple
 
 from PIL import Image as PILImage
 
+from matchcut.pipeline.sampling import FrameCache
+
 _cache: Dict[Tuple[str, float, int], PILImage.Image] = {}
 
 
@@ -68,3 +70,14 @@ def open_externally(path: Path) -> bool:
     except OSError:
         return False
     return True
+
+
+def cached_frame_path(source: str, root: Path, sampling, t: float) -> Optional[Path]:
+    """Path of the cached JPEG for time ``t``, extracting it first when the views have not yet. None on failure."""
+    cache = FrameCache(source, Path(root), sampling)
+    try:
+        cache.frame(t)
+    except Exception:
+        return None
+    path = cache.root / f"t{int(round(t * 1000)):09d}_w{sampling.tile_width}.jpg"
+    return path if path.exists() else None
