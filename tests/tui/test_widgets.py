@@ -161,3 +161,22 @@ async def _energy_curve_handles_no_music_and_music():
         curve.update_music(m, beat_times=[0.0, 4.0])
         await pilot.pause()
         assert "120" in curve.caption_text() and "4.0" in curve.caption_text()
+
+
+def make_long_tl(n: int = 60) -> Timeline:
+    tl = Timeline(source="x.mp4", fps=25.0)
+    tl.clips = [Clip("c%03d" % (i + 1), i, float(i), float(i) + 1.0, "b%d" % (i // 5)) for i in range(n)]
+    return tl
+
+
+def test_render_track_never_exceeds_width_for_many_clips():
+    tl = make_long_tl(60)
+    for width in (80, 20):
+        text = render_track(tl, width=width, selected=59, beats=[0.0, 1.0, 2.0])
+        for line in text.plain.split("\n"):
+            assert len(line) <= width
+        assert any("reverse" in str(span.style) for span in text.spans)  # the selected clip stays visible
+
+
+def test_render_track_tolerates_zero_width():
+    render_track(make_tl(), 0, 0, beats=[0.0])

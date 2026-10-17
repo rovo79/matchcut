@@ -63,5 +63,8 @@ def open_externally(path: Path) -> bool:
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if shutil.which(opener) is None:
         return False
-    subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.Popen([opener, str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return False
     return True

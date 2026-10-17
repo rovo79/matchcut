@@ -13,27 +13,34 @@ GLYPHS = {"cut": "|", "dissolve": "~", "dip_to_black": "#"}
 
 
 def render_track(tl: Timeline, width: int, selected: int, beats: Optional[List[float]] = None, music_start: float = 0.0) -> Text:
-    text = Text()
+    width = max(width, 1)
+    text = Text(no_wrap=True, overflow="crop")
     if not tl.clips:
         text.append("(empty timeline)", style="dim")
         return text
     total = max(tl.duration, 1e-6)
-    clip_total = max(sum(c.duration for c in tl.clips), 1e-6)  # tl.duration discounts transition overlaps
     beat_ids = []
     for c in tl.clips:
         if c.beat_id not in beat_ids:
             beat_ids.append(c.beat_id)
-    usable = max(width - (len(tl.clips) - 1), len(tl.clips))
-    spans = [max(1, int(round(c.duration / clip_total * usable))) for c in tl.clips]
+    # Window the clips around the selection when even one cell per clip plus glyphs would not fit.
+    n = len(tl.clips)
+    visible = min(n, max(1, (width + 1) // 2))
+    lo = min(max(0, selected - visible // 2), n - visible)
+    window = range(lo, lo + visible)
+    clip_total = max(sum(tl.clips[i].duration for i in window), 1e-6)
+    usable = max(width - (visible - 1), visible)
+    spans = [max(1, int(round(tl.clips[i].duration / clip_total * usable))) for i in window]
     while sum(spans) > usable and max(spans) > 1:  # rounding and the 1-cell minimum can overshoot
         spans[spans.index(max(spans))] -= 1
-    for i, c in enumerate(tl.clips):
-        if i > 0:
+    for k, i in enumerate(window):
+        c = tl.clips[i]
+        if k > 0:
             prev = tl.clips[i - 1]
             locked = prev.locked_out and c.locked_in
             glyph = "L" if locked else GLYPHS.get(c.transition_in.kind, "|")
             text.append(glyph, style="bold white" if locked else "white")
-        span = spans[i]
+        span = spans[k]
         label = f"{c.id[-3:].lstrip('0') or '0'}:s{c.shot_index}"[:span].ljust(span)
         style = PALETTE[beat_ids.index(c.beat_id) % len(PALETTE)]
         if i == selected:
