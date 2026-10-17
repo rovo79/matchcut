@@ -86,3 +86,13 @@ def test_readers_reload_when_the_file_changes(mock_workspace):
     path.write_text(data.replace("A changed logline", before))
     os.utime(path, (time.time() + 10, time.time() + 10))
     assert st.narrative()["logline"] == before  # mtime change alone is enough, no invalidate needed
+
+
+def test_event_count_keeps_counting_after_the_event_buffer_is_full(mock_workspace):
+    st = RunState(PipelineConfig.load(mock_workspace / "config.json"))
+    for i in range(5010):
+        st.apply(events.Log(message=f"m{i}"))
+    assert st.event_count == 5010
+    assert len(st.events) == 5000
+    st.apply(events.RunStarted())
+    assert st.event_count == 1

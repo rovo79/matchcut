@@ -17,6 +17,15 @@ from ..widgets.ladder import StageLadder
 FILTERS = ("all", "decisions", "model", "log")
 
 
+class NoteInput(Input):
+    """The director's note field; Escape leaves it without submitting."""
+
+    BINDINGS = [Binding("escape", "leave", "Leave field", show=False)]
+
+    def action_leave(self) -> None:
+        self.screen.query_one("#ladder").focus()
+
+
 class RunView(Vertical):
     BINDINGS = [
         Binding("c", "cp_continue", "Continue", show=False),
@@ -36,8 +45,8 @@ class RunView(Vertical):
             yield RichLog(id="log", highlight=False, markup=False, wrap=True)
         with Vertical(id="checkpoint"):
             yield Static("", id="checkpoint-summary")
-            yield Input(placeholder="director's note for a redo (optional)", id="note")
-            yield Static("[c] continue   [r] redo with note (type note, Enter, then r)   [a] abort", id="checkpoint-hint")
+            yield NoteInput(placeholder="director's note for a redo (optional)", id="note")
+            yield Static("[c] continue   [r] redo with note (type note, Enter or Esc to leave the field, then r)   [a] abort", id="checkpoint-hint")
 
     def on_mount(self) -> None:
         self.query_one("#checkpoint").display = False
@@ -50,14 +59,16 @@ class RunView(Vertical):
         self.query_one("#ladder", StageLadder).update_stages(state.stages)
         log = self.query_one("#log", RichLog)
         events_list = list(state.events)
-        if len(events_list) < self._seen:  # a new run reset the deque
+        if state.event_count < self._seen:  # a new run restarted the count
             log.clear()
             self._seen = 0
-        for e in events_list[self._seen :]:
-            line = self._format(e)
-            if line is not None:
-                log.write(line)
-        self._seen = len(events_list)
+        fresh = min(state.event_count - self._seen, len(events_list))
+        if fresh > 0:
+            for e in events_list[-fresh:]:
+                line = self._format(e)
+                if line is not None:
+                    log.write(line)
+        self._seen = state.event_count
         panel = self.query_one("#checkpoint")
         if state.checkpoint is not None:
             cp = state.checkpoint
@@ -67,6 +78,9 @@ class RunView(Vertical):
             )
         else:
             panel.display = False
+            note = self.query_one("#note", Input)
+            if note.has_focus:  # the field is hidden with the panel; keep the run keys alive
+                self.query_one("#ladder").focus()
 
     def _format(self, e: events.Event) -> Optional[Text]:
         f = FILTERS[self._filter]

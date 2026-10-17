@@ -113,3 +113,63 @@ async def _help(demo_video, tmp_path):
         assert app.bridge is first_bridge  # ignored while running
         await pilot.press("S")
         await wait_for(pilot, lambda: app.state.run_status == "failed")
+
+
+def test_run_keys_regain_focus_and_note_field_can_be_left(mock_workspace):
+    run_async(_focus_paths(mock_workspace))
+
+
+async def _focus_paths(mock_workspace):
+    app = MatchcutApp(load_cfg(mock_workspace))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        # clicking the Run tab while it is already active leaves focus on the tab bar
+        await pilot.click("Tab#--content-tab-tab-run")
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.pause()
+        assert app.focused.id == "ladder"
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.press("1")
+        await pilot.pause()
+        assert app.focused.id == "ladder"
+        # Escape leaves the note field without submitting
+        app.state.apply(events.Checkpoint(stage="describe", summary={"shots": 3}))
+        app.refresh_views()
+        await pilot.pause()
+        await pilot.click("#note")
+        await pilot.pause()
+        assert app.focused.id == "note"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.focused.id == "ladder"
+        # hiding the checkpoint panel while the note is focused must not drop focus
+        await pilot.click("#note")
+        await pilot.pause()
+        app.state.resolve_checkpoint()
+        app.refresh_views()
+        await pilot.pause()
+        assert app.query_one("#checkpoint").display is False
+        assert app.focused.id == "ladder"
+
+
+def test_log_keeps_streaming_after_the_event_buffer_is_full(mock_workspace):
+    run_async(_log_after_buffer_full(mock_workspace))
+
+
+async def _log_after_buffer_full(mock_workspace):
+    app = MatchcutApp(load_cfg(mock_workspace))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#log")
+        for i in range(5000):
+            app.state.apply(events.Log(message=f"line-{i}"))
+        app.refresh_views()
+        await pilot.pause()
+        for i in range(5000, 5010):
+            app.state.apply(events.Log(message=f"line-{i}"))
+        app.refresh_views()
+        await pilot.pause()
+        text = "\n".join(strip.text for strip in log.lines)
+        assert "line-5009" in text and "line-5000" in text

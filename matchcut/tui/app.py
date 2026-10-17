@@ -120,6 +120,8 @@ class MatchcutApp(App):
             # A focused widget inside the Run pane would pull TabbedContent back to it.
             self.screen.set_focus(None)
         self.query_one(TabbedContent).active = pane
+        if pane == "tab-run":
+            self._focus_run_view()
 
     def action_run(self) -> None:
         if self.bridge is not None and self.bridge.is_running():
@@ -128,6 +130,7 @@ class MatchcutApp(App):
         self.bridge = self._bridge_factory(self.state.config)
         self.bridge.start()
         self.action_show_tab("tab-run")
+        self._focus_run_view()
 
     def action_stop(self) -> None:
         if self.bridge is None or not self.bridge.is_running():
