@@ -78,6 +78,12 @@ class PipelineBridge:
         self._answered.clear()
         self._answer = None
         self.pending = (stage, summary)
+        if self.cancel.is_set():
+            # stop() landed before pending was visible to it (a stage was still running): abort now
+            # instead of blocking on a prompt nobody will answer. Checked after pending is set so
+            # either this sees cancel or stop() sees pending.
+            self.pending = None
+            return events.Abort()
         self._answered.wait()
         self.pending = None
         return self._answer if self._answer is not None else events.Continue()

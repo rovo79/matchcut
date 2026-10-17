@@ -1,4 +1,3 @@
-import threading
 import time
 
 import pytest
@@ -105,3 +104,18 @@ def test_redo_resaves_config_and_set_descriptions_reaches_the_context(demo_video
     assert saved.brief == "a brief set while paused"
     bridge.stop()
     bridge.join(30)
+    assert not bridge.is_running()
+
+
+def test_stop_while_a_stage_is_running_aborts_instead_of_prompting(demo_video, tmp_path):
+    bridge = PipelineBridge(make_cfg(demo_video, tmp_path), interactive=True)
+    bridge.start()
+    seen = pump(bridge, lambda s: any(isinstance(e, events.StageStarted) and e.stage == "describe" for e in s))
+    assert bridge.pending is None  # the describe stage is running, no checkpoint yet
+    bridge.stop()
+    bridge.join(60)
+    assert not bridge.is_running()
+    assert bridge.pending is None
+    seen += bridge.drain()
+    failed = [e for e in seen if isinstance(e, events.RunFailed)]
+    assert failed and failed[0].error == "aborted"
