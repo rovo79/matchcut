@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+from typing import Optional, Tuple
 
 import pytest
 
@@ -532,3 +533,62 @@ async def _config_keyboard(mock_workspace):
         await pilot.press(*"hello", "enter")
         await pilot.pause()
         assert cfg.brief.endswith("hello") and app.focused is tree
+
+
+def test_parse_value_follows_the_declared_type():
+    assert parse_value(None, "12", Optional[float]) == 12.0
+    assert isinstance(parse_value(None, "12", Optional[float]), float)
+    assert parse_value(None, "", Optional[int]) is None
+    assert parse_value(None, "640", Optional[int]) == 640
+    assert parse_value(None, "", Optional[str]) is None
+    assert parse_value("old", "", str) == ""
+    assert parse_value("old", " new ", str) == "new"
+    with pytest.raises(ValueError):
+        parse_value(3, "x", int)
+    with pytest.raises(ValueError):
+        parse_value(1.0, "nan", float)
+    with pytest.raises(ValueError):
+        parse_value(None, "inf", Optional[float])
+    with pytest.raises(ValueError):
+        parse_value(("a",), "", Tuple[str, ...])
+    assert parse_value(("a",), "x, y", Tuple[str, ...]) == ("x", "y")
+    with pytest.raises(ValueError):
+        parse_value(True, "maybe", bool)
+    assert parse_value(True, "no", bool) is False
+    # legacy callers (no hint): an unset value tries int, then float, then str
+    assert parse_value(None, "12") == 12 and parse_value(None, "1.5") == 1.5 and parse_value(None, "a.mp3") == "a.mp3"
+
+
+def test_config_view_edits_by_declared_type(demo_video, tmp_path):
+    run_async(_config_declared_types(demo_video, tmp_path))
+
+
+async def _config_declared_types(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path), brief="old")
+    assert cfg.target_duration is None
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        edit = view.query_one("#config-edit")
+
+        async def open_editor(prefix):
+            node = next(n for n in tree.root.children if str(n.label).startswith(prefix))
+            tree.select_node(node)
+            tree.action_select_cursor()
+            await pilot.pause()
+            assert edit.display is True
+
+        await open_editor("target_duration")
+        edit.value = ""
+        await pilot.press(*"12", "enter")
+        await pilot.pause()
+        assert cfg.target_duration == 12.0 and isinstance(cfg.target_duration, float)
+        await open_editor("brief")
+        edit.value = ""
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.brief == "" and edit.display is False
+        assert cfg.workspace_path == tmp_path  # non-Optional strings never become None
