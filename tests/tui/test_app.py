@@ -1,6 +1,7 @@
 from matchcut.pipeline import events
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.tui.app import MatchcutApp
+from matchcut.tui.views.edit import EditView
 from matchcut.tui.views.run import RunView
 from matchcut.tui.widgets.ladder import StageLadder
 from tests.tui.conftest import run_async, wait_for
@@ -22,7 +23,7 @@ async def _opens(mock_workspace):
         assert ladder.row_count == len(app.state.stage_names())
         status = str(app.query_one("#status").content)
         assert "idle" in status and "MOCK" in status
-        for key, tab in [("2", "tab-shots"), ("3", "tab-story"), ("4", "tab-cut"), ("5", "tab-config"), ("1", "tab-run")]:
+        for key, tab in [("2", "tab-shots"), ("3", "tab-story"), ("4", "tab-edit"), ("5", "tab-config"), ("1", "tab-run")]:
             await pilot.press(key)
             await pilot.pause()
             assert app.query_one("TabbedContent").active == tab
@@ -197,7 +198,6 @@ async def _open_target(mock_workspace, monkeypatch):
     from matchcut.pipeline.sampling import shot_sample_times
     from matchcut.tui import images
     from matchcut.tui.views.shots import ShotsView
-    from matchcut.tui.widgets.timeline import TimelineTrack
 
     opened = []
     monkeypatch.setattr(images, "open_externally", lambda p: opened.append(p) or True)
@@ -223,12 +223,12 @@ async def _open_target(mock_workspace, monkeypatch):
         await pilot.pause()
         assert app.current_open_target() != target
         await pilot.press("4")
-        await pilot.pause()
+        view = app.query_one(EditView)
+        await wait_for(pilot, lambda: view.current_junction() is not None and view._blend_image is not None)
         first = app.current_open_target()
         assert first is not None and first.suffix == ".jpg" and first.exists()
-        track = app.query_one("#track", TimelineTrack)
-        clip = track.timeline.clips[track.selected]
-        assert f"t{int(round(clip.source_in * 1000)):09d}" in first.name
+        j = view.current_junction()
+        assert f"{j.out_clip}_{j.in_clip}" in first.name
         await pilot.press("right")
         await pilot.pause()
         assert app.current_open_target() != first

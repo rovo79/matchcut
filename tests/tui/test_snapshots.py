@@ -11,7 +11,7 @@ from matchcut.pipeline.config import PipelineConfig
 from matchcut.tui.app import MatchcutApp
 
 
-@pytest.mark.parametrize("key,name", [("1", "run"), ("2", "shots"), ("3", "story"), ("4", "cut"), ("5", "config")])
+@pytest.mark.parametrize("key,name", [("1", "run"), ("2", "shots"), ("3", "story"), ("4", "edit"), ("5", "config")])
 def test_view_snapshots(snap_compare, mock_workspace, tmp_path, monkeypatch, key, name):
     cfg = PipelineConfig.load(mock_workspace / "config.json")
     (tmp_path / "ws").symlink_to(mock_workspace, target_is_directory=True)

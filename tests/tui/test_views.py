@@ -145,7 +145,7 @@ async def _idempotent(mock_workspace):
         assert list(table.rows) == rows and table.cursor_row == 3
 
 
-from matchcut.tui.views.cut import CutView
+from matchcut.tui.views.edit import EditView
 from matchcut.tui.views.story import StoryView
 from matchcut.tui.widgets.frame import Frame
 from matchcut.tui.widgets.timeline import TimelineTrack
@@ -168,56 +168,23 @@ async def _story(mock_workspace):
         assert "no music" in view.query_one("#story-energy").caption_text()
 
 
-def test_cut_view_steps_stages_and_selects_clips(mock_workspace):
-    run_async(_cut(mock_workspace))
-
-
-async def _cut(mock_workspace):
-    app = MatchcutApp(PipelineConfig.load(mock_workspace / "config.json"))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("4")
-        await pilot.pause()
-        view = app.query_one(CutView)
-        stages = app.state.timeline_stages()
-        assert view.stages == stages and view.current_stage() == "final"
-        assert "final" in str(view.query_one("#cut-header").content)
-        track = view.query_one("#track", TimelineTrack)
-        final = app.state.timeline("final")
-        assert track.timeline is not None and len(track.timeline.clips) == len(final.clips)
-        await pilot.press("right")
-        await pilot.pause()
-        assert track.selected == min(1, len(final.clips) - 1)
-        detail = str(view.query_one("#clip-detail").content)
-        assert final.clips[track.selected].id in detail
-        await wait_for(pilot, lambda: view.query_one("#clip-frame").image_mode == "half-block")
-        await pilot.press("left_square_bracket")
-        await pilot.pause()
-        assert view.current_stage() == stages[-2]
-        for _ in range(len(stages) + 2):
-            await pilot.press("left_square_bracket")
-        await pilot.pause()
-        assert view.current_stage() == "roughcut"
-        await pilot.press("right_square_bracket")
-        await pilot.pause()
-        assert view.current_stage() == stages[1]
-
-
 def test_views_survive_an_empty_workspace(tmp_path):
-    run_async(_empty_story_cut(tmp_path))
+    run_async(_empty_story_edit(tmp_path))
 
 
-async def _empty_story_cut(tmp_path):
+async def _empty_story_edit(tmp_path):
     cfg = PipelineConfig(source="missing.mp4", workspace=str(tmp_path / "empty"))
     app = MatchcutApp(cfg)
     async with app.run_test(size=(120, 40)) as pilot:
         for key in ("2", "3", "4"):
             await pilot.press(key)
             await pilot.pause()
-        assert app.query_one(CutView).current_stage() is None
-        assert "no timeline" in str(app.query_one("#track").content).lower()
+        assert app.query_one(EditView).current_stage() is None
+        assert "no cut yet" in str(app.query_one("#edit-header").content)
+        assert "no timeline" in str(app.query_one("#edit-track").content).lower()
         assert "no narrative" in str(app.query_one("#story-head").content)
         assert len(app.query_one(StoryView).query(".beat-card")) == 0
-        await pilot.press("left", "right", "left_square_bracket", "right_square_bracket")
+        await pilot.press("left", "right", "left_square_bracket", "right_square_bracket", "l", "v", "x", "enter")
         await pilot.pause()
 
 
@@ -245,22 +212,21 @@ async def _story_idempotent(mock_workspace):
         assert updates == []
 
 
-def test_cut_refresh_is_idempotent_and_stepping_still_updates(mock_workspace):
-    run_async(_cut_idempotent(mock_workspace))
+def test_edit_refresh_is_idempotent_and_stepping_still_updates(mock_workspace):
+    run_async(_edit_idempotent(mock_workspace))
 
 
-async def _cut_idempotent(mock_workspace):
+async def _edit_idempotent(mock_workspace):
     app = MatchcutApp(PipelineConfig.load(mock_workspace / "config.json"))
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.press("4")
-        await pilot.pause()
-        view = app.query_one(CutView)
-        frame = view.query_one("#clip-frame", Frame)
-        track = view.query_one("#track", TimelineTrack)
-        await wait_for(pilot, lambda: frame.image_mode == "half-block")
+        view = app.query_one(EditView)
+        track = view.query_one("#edit-track", TimelineTrack)
+        await wait_for(pilot, lambda: bool(view.junctions) and all(view.query_one(f, Frame).image_mode for f in ("#out-frame", "#in-frame", "#blend-frame")))
         shown, redraws = [], []
-        original_show = frame.show
-        frame.show = lambda *a, **k: (shown.append(1), original_show(*a, **k))[1]
+        for frame in view.query(Frame):
+            original_show = frame.show
+            frame.show = lambda *a, _o=original_show, **k: (shown.append(1), _o(*a, **k))[1]
         original_set = track.set_timeline
         track.set_timeline = lambda *a, **k: (redraws.append(1), original_set(*a, **k))[1]
         for _ in range(5):
@@ -270,17 +236,17 @@ async def _cut_idempotent(mock_workspace):
         # an action still updates immediately, and the stage change reaches the track
         await pilot.press("right")
         await pilot.pause()
-        assert len(shown) == 1
+        assert len(shown) == 3  # outgoing, incoming and blend
         await pilot.press("left_square_bracket")
         await pilot.pause()
         assert len(redraws) == 1
         assert view.current_stage() == view.stages[-2]
-        assert view.stages[-2] in str(view.query_one("#cut-header").content)
-        before = len(shown)
+        assert view.stages[-2] in str(view.query_one("#edit-header").content)
+        before_shown = len(shown)
         for _ in range(3):
             app.refresh_views()
         await pilot.pause()
-        assert len(shown) == before and len(redraws) == 1
+        assert len(shown) == before_shown and len(redraws) == 1
 
 
 def _copied_workspace(mock_workspace, tmp_path):
@@ -317,17 +283,17 @@ async def _story_changed(cfg, ws):
         await wait_for(pilot, lambda: len(view.query(".beat-card")) == before + 1)
 
 
-def test_cut_view_rebuilds_when_the_timeline_changes(mock_workspace, tmp_path):
-    run_async(_cut_changed(*_copied_workspace(mock_workspace, tmp_path)))
+def test_edit_view_rebuilds_when_the_timeline_changes(mock_workspace, tmp_path):
+    run_async(_edit_changed(*_copied_workspace(mock_workspace, tmp_path)))
 
 
-async def _cut_changed(cfg, ws):
+async def _edit_changed(cfg, ws):
     app = MatchcutApp(cfg)
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.press("4")
-        await pilot.pause()
-        view = app.query_one(CutView)
-        track = view.query_one("#track", TimelineTrack)
+        view = app.query_one(EditView)
+        await wait_for(pilot, lambda: bool(view.junctions))
+        track = view.query_one("#edit-track", TimelineTrack)
         redraws = []
         original = track.set_timeline
         track.set_timeline = lambda *a, **k: (redraws.append(1), original(*a, **k))[1]
@@ -341,6 +307,7 @@ async def _cut_changed(cfg, ws):
         await pilot.pause()
         assert len(redraws) == 1
         assert len(track.timeline.clips) == clips - 1
+        assert len(view.junctions) == clips - 2
 
 
 def test_parse_value_types():
@@ -599,35 +566,6 @@ async def _config_declared_types(demo_video, tmp_path):
         assert cfg.workspace_path == tmp_path  # non-Optional strings never become None
 
 
-def test_cut_view_gives_the_clip_frame_real_room(mock_workspace):
-    run_async(_cut_layout(mock_workspace))
-
-
-async def _cut_layout(mock_workspace):
-    from matchcut.tui.views.cut import CutView
-    from matchcut.tui.widgets.timeline import TimelineTrack
-
-    app = MatchcutApp(PipelineConfig.load(mock_workspace / "config.json"))
-    async with app.run_test(size=(120, 40)) as pilot:
-        await pilot.press("4")
-        await pilot.pause()
-        view = app.query_one(CutView)
-        frame = view.query_one("#clip-frame")
-        await wait_for(pilot, lambda: frame.image_mode == "half-block")
-        await pilot.pause()
-        assert frame.region.height >= 12, frame.region
-        assert frame.region.width >= 30, frame.region
-        assert view.query_one("#clip-detail").region.width > 0
-        # the locked field only appears when an end is locked
-        track = view.query_one("#track", TimelineTrack)
-        for i in range(len(track.timeline.clips)):
-            clip = track.timeline.clips[track.selected]
-            detail = str(view.query_one("#clip-detail").content)
-            assert ("locked:" in detail) == bool(clip.locked_in or clip.locked_out), detail
-            await pilot.press("right")
-            await pilot.pause()
-
-
 def test_config_edit_field_sits_above_the_footer(mock_workspace):
     run_async(_config_layout(mock_workspace))
 
@@ -651,13 +589,3 @@ async def _config_layout(mock_workspace):
         assert view.region.contains_region(edit.region), (view.region, edit.region)
         assert edit.region.bottom <= footer.region.y, (edit.region, footer.region)
         assert tree.region.height > 0 and tree.region.bottom <= edit.region.y
-
-
-def test_locked_note_names_the_locked_ends():
-    from matchcut.pipeline.timeline import Clip
-    from matchcut.tui.views.cut import CutView
-
-    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1")) == ""
-    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_in=True)) == "   locked: in"
-    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_out=True)) == "   locked: out"
-    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_in=True, locked_out=True)) == "   locked: in + out"

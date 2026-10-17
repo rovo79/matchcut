@@ -16,7 +16,7 @@ from . import images
 from .bridge import PipelineBridge
 from .state import RunState
 from .views.config import ConfigView
-from .views.cut import CutView
+from .views.edit import EditView
 from .views.run import RunView
 from .views.shots import ShotsView
 from .views.story import StoryView
@@ -25,10 +25,10 @@ QUIT_CONFIRM_SECONDS = 3.0  # how long a warned `q` stays armed
 
 HELP_TEXT = """Control room keys
 
- 1-5   Run / Shots / Story / Cut / Config        R  run or resume        S  stop
+ 1-5   Run / Shots / Story / Edit / Config        R  run or resume        S  stop
  c/r/a continue / redo with note / abort a checkpoint (Run view)
  f     cycle the log filter (Run view)           o  open the current image or render externally
- u     toggle a shot's usable flag (Shots)       [ ]  step through passes (Cut)    ←/→ select a clip (Cut)
+ u     toggle a shot's usable flag (Shots)       ←/→ junction · [ ] stage · l lock · v revert · x clear pin · Enter history (Edit)
  Enter edit a config value (Config)              ?  this help      Esc  close      q  quit
 
 Press Escape to close."""
@@ -63,7 +63,7 @@ class MatchcutApp(App):
         Binding("1", "show_tab('tab-run')", "Run"),
         Binding("2", "show_tab('tab-shots')", "Shots"),
         Binding("3", "show_tab('tab-story')", "Story"),
-        Binding("4", "show_tab('tab-cut')", "Cut"),
+        Binding("4", "show_tab('tab-edit')", "Edit"),
         Binding("5", "show_tab('tab-config')", "Config"),
         Binding("R", "run", "Run"),
         Binding("S", "stop", "Stop"),
@@ -91,8 +91,8 @@ class MatchcutApp(App):
                 yield ShotsView(id="shots-view")
             with TabPane("3 Story", id="tab-story"):
                 yield StoryView(id="story-view")
-            with TabPane("4 Cut", id="tab-cut"):
-                yield CutView(id="cut-view")
+            with TabPane("4 Edit", id="tab-edit"):
+                yield EditView(id="edit-view")
             with TabPane("5 Config", id="tab-config"):
                 yield ConfigView(id="config-view")
         yield Footer()
@@ -121,8 +121,9 @@ class MatchcutApp(App):
             self.call_after_refresh(self._focus_if_active, "tab-shots", "#shots-table")
         elif event.pane.id == "tab-story":
             self.call_after_refresh(self._focus_if_active, "tab-story", "#story-view")
-        elif event.pane.id == "tab-cut":
-            self.call_after_refresh(self._focus_if_active, "tab-cut", "#cut-view")
+        elif event.pane.id == "tab-edit":
+            self.call_after_refresh(self._focus_if_active, "tab-edit", "#edit-view")
+            self.call_after_refresh(self.query_one(EditView).reshow)
         elif event.pane.id == "tab-config":
             self.call_after_refresh(self._focus_if_active, "tab-config", "#config-tree")
 
@@ -143,7 +144,7 @@ class MatchcutApp(App):
             self.refresh_views()
 
     def refresh_views(self) -> None:
-        for view in self.query("RunView, ShotsView, StoryView, CutView, ConfigView"):
+        for view in self.query("RunView, ShotsView, StoryView, EditView, ConfigView"):
             view.refresh_from_state(self.state)
         self._update_status()
 
@@ -200,8 +201,8 @@ class MatchcutApp(App):
             return None
         if active == "tab-shots":
             return self.query_one(ShotsView).open_target()
-        if active == "tab-cut":
-            return self.query_one(CutView).open_target()
+        if active == "tab-edit":
+            return self.query_one(EditView).open_target()
         return None
 
     def action_open(self) -> None:
