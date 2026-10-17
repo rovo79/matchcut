@@ -44,7 +44,8 @@ class EditView(Vertical):
         self.selected = 0
         self.expanded = False
         self._fingerprint: Optional[tuple] = None  # identity of the workspace data last rendered
-        self._shown: Optional[tuple] = None  # (fingerprint, stage, junction, expanded) on screen
+        self._shown: Optional[tuple] = None  # (fingerprint, stage, junction, expanded) the panel text was rendered for
+        self._frames_key: Optional[tuple] = None  # (stage, clips, cut points, media) the three frames were rendered for
         self._blend_image = None
 
     def compose(self) -> ComposeResult:
@@ -134,15 +135,18 @@ class EditView(Vertical):
             panel.update("(no junctions: the cut needs at least two clips)" if stage else "")
             for f in self._frames():
                 f.show(None)
-            self._shown, self._blend_image = None, None
+            self._shown, self._frames_key, self._blend_image = None, None, None
             return
         key = (self._fingerprint, stage, self.selected, self.expanded)
-        if self._shown == key and not force:
-            return
-        need_frames = force or self._shown is None or self._shown[:3] != key[:3]
-        self._shown = key
-        panel.update(render_inspector(j, stage, PinStore(self._state.workspace).get(j.out_shot, j.in_shot), self.expanded))
-        if need_frames:
+        if self._shown != key or force:
+            self._shown = key
+            panel.update(render_inspector(j, stage, PinStore(self._state.workspace).get(j.out_shot, j.in_shot), self.expanded))
+        # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
+        shown = j.state_at(stage) or j.current
+        media = self._state.media()
+        frames_key = (stage, j.out_clip, j.in_clip, shown.out_time, shown.in_time, media.path if media is not None else None)
+        if self._frames_key != frames_key or force:
+            self._frames_key = frames_key
             self._show_frames(j, stage)
 
     def _show_frames(self, j: Junction, stage: str) -> None:

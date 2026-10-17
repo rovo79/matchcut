@@ -13,6 +13,7 @@ from matchcut.tui.widgets.timeline import TimelineTrack, junction_columns
 from tests.tui.conftest import run_async, wait_for
 
 FRAMES = ("#out-frame", "#in-frame", "#blend-frame")
+FRAMES_IDS = tuple(f[1:] for f in FRAMES)
 
 
 def app_for(ws):
@@ -53,14 +54,22 @@ def test_a_junction_shows_three_frames_and_its_evidence(mock_workspace):
     run_async(body())
 
 
-def test_frames_render_when_the_data_arrived_while_the_tab_was_hidden(mock_workspace):
+def test_frames_render_when_the_data_arrived_while_the_tab_was_hidden(mock_workspace, monkeypatch):
+    reshown, shown = [], []
+
     async def body():
         app = app_for(mock_workspace)
         async with app.run_test(size=(120, 40)) as pilot:
             view = app.query_one(EditView)
             await wait_for(pilot, lambda: bool(view.junctions))  # loaded by refresh_views while tab 1 is shown
+            original_reshow, original_show = EditView.reshow, Frame.show
+            monkeypatch.setattr(EditView, "reshow", lambda self: (reshown.append(1), original_reshow(self))[1])
+            monkeypatch.setattr(Frame, "show", lambda self, *a, **k: (shown.append(self.id), original_show(self, *a, **k))[1])
             await pilot.press("4")
+            await wait_for(pilot, lambda: len(reshown) == 1 and set(FRAMES_IDS) <= set(shown))
             await wait_for(pilot, lambda: frames_ready(app) and min(image_heights(app)) >= 8)
+            assert reshown == [1]  # the tab activation re-mounts the frames exactly once
+            assert sorted(shown) == sorted(FRAMES_IDS)  # each of the three frames, once
 
     run_async(body())
 
@@ -165,5 +174,26 @@ def test_an_empty_workspace_shows_how_to_start(tmp_path):
             for key in ("left", "right", "left_square_bracket", "l", "v", "x", "enter"):
                 await pilot.press(key)
             assert not (tmp_path / "editorial.json").exists()
+
+    run_async(body())
+
+
+def test_pins_do_not_re_render_the_frames_of_an_unmoved_junction(mock_workspace, tmp_path, monkeypatch):
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions) and frames_ready(app))
+            calls = []
+            monkeypatch.setattr(Frame, "show", lambda self, *a, **k: calls.append(self.id))
+            await pilot.press("l")
+            await wait_for(pilot, lambda: "pin pending" in str(app.query_one("#junction-panel").content))
+            await pilot.press("x")
+            await wait_for(pilot, lambda: "pin pending" not in str(app.query_one("#junction-panel").content))
+            await pilot.pause()
+            assert calls == []  # the workspace was rewritten twice, but the junction and its cut points did not move
 
     run_async(body())

@@ -8,8 +8,6 @@ from rich.text import Text
 from matchcut.pipeline.editorial import Pin
 from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frames_delta
 
-KEYS = "l lock these points · v revert to the first cut · x clear pin · o open blend · Enter full history"
-
 
 def _same_points(a: float, b: float) -> bool:
     return round(a, 3) == round(b, 3)
@@ -86,5 +84,5 @@ def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool
     else:
         t.append("history: ", style="bold")
         t.append(" · ".join(j.history()) + "\n")
-    t.append(KEYS, style="dim")
+    t.rstrip()
     return t
