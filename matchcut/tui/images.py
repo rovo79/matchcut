@@ -48,16 +48,32 @@ def widget_class(headless: bool) -> type:
 
 
 def protocol_label(cls: type) -> str:
-    name = cls.__name__.lower()
+    """Name of the rendering mode ``cls`` produces.
+
+    textual-image's auto widget resolves its renderer when the module is imported (the
+    launcher imports it before Textual starts), so the label reports what it resolved to.
+    """
+    from textual_image import renderable
+    from textual_image.widget import Image as AutoImage
+
+    if cls is AutoImage:
+        resolved = {
+            renderable.TGPImage: "kitty graphics",
+            renderable.SixelImage: "sixel",
+            renderable.HalfcellImage: "half-block",
+            renderable.UnicodeImage: "unicode",
+        }
+        return resolved.get(renderable.Image, renderable.Image.__module__.rsplit(".", 1)[-1])
+    name = f"{cls.__module__}.{cls.__name__}".lower()  # the sixel widget class is just sixel.Image
     if "halfcell" in name:
         return "half-block"
     if "unicode" in name:
-        return "unicode blocks"
+        return "unicode"
     if "sixel" in name:
         return "sixel"
     if "tgp" in name:
         return "kitty graphics"
-    return "auto (kitty/iterm2/sixel)"
+    return cls.__name__
 
 
 def open_externally(path: Path) -> bool:

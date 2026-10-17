@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -57,13 +58,20 @@ def build_config(args: argparse.Namespace) -> PipelineConfig:
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     cfg = build_config(args)
+    # A terminal that never answers the probe would make textual-image log a traceback to stderr.
+    logging.getLogger("textual_image").setLevel(logging.ERROR)
     try:
+        import textual_image.widget  # noqa: F401  probes the terminal; must run before App.run()
         from .app import MatchcutApp
-    except ImportError as e:  # textual / textual-image missing
+    except ModuleNotFoundError as e:  # textual / textual-image missing
+        missing = e.name or ""
+        if not any(missing == pkg or missing.startswith(pkg + ".") for pkg in ("textual", "textual_image")):
+            raise  # a real bug elsewhere: show the traceback
         print(f"{INSTALL_HINT}\n({e})", file=sys.stderr)
         return 1
-    MatchcutApp(cfg).run()
-    return 0
+    app = MatchcutApp(cfg)
+    app.run()
+    return app.return_code or 0
 
 
 if __name__ == "__main__":  # pragma: no cover

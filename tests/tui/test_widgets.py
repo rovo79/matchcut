@@ -39,6 +39,25 @@ def test_widget_class_selection(monkeypatch):
     assert "half" in images.protocol_label(HalfcellImage)
 
 
+def test_protocol_label_reports_the_resolved_auto_renderer(monkeypatch):
+    import textual_image.renderable as renderable
+    from textual_image.widget import HalfcellImage, Image, SixelImage, TGPImage, UnicodeImage
+
+    assert images.protocol_label(HalfcellImage) == "half-block"
+    assert images.protocol_label(UnicodeImage) == "unicode"
+    assert images.protocol_label(SixelImage) == "sixel"
+    assert images.protocol_label(TGPImage) == "kitty graphics"
+    for resolved, label in [
+        (renderable.TGPImage, "kitty graphics"),
+        (renderable.SixelImage, "sixel"),
+        (renderable.HalfcellImage, "half-block"),
+        (renderable.UnicodeImage, "unicode"),
+    ]:
+        monkeypatch.setattr(renderable, "Image", resolved)
+        assert images.protocol_label(Image) == label  # the auto widget reports what it resolved to
+    assert "auto" not in images.protocol_label(Image)
+
+
 class FrameApp(App):
     def compose(self) -> ComposeResult:
         yield Frame(id="f")
