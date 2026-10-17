@@ -15,9 +15,10 @@ python -m matchcut.pipeline run footage.mp4 --brief "..." --target-duration 60
 python -m matchcut.pipeline run footage.mp4 --backend mock   # offline dry run
 python -m matchcut.pipeline run footage.mp4 --music track.mp3 -t 60   # cut to the music
 python -m matchcut.tui footage.mp4 --music track.mp3        # control-room TUI (pip install -r requirements-tui.txt)
+python -m matchcut.pipeline.cli junctions WORKSPACE   # explain every cut as text
 ```
 
-See [docs/PIPELINE.md](docs/PIPELINE.md) for the stages, passes, outputs and how to iterate, and [docs/TUI.md](docs/TUI.md) for the terminal control room that drives a run and inspects its shots, story and cut.
+See [docs/PIPELINE.md](docs/PIPELINE.md) for the stages, passes, outputs and how to iterate, and [docs/TUI.md](docs/TUI.md) for the terminal control room that drives a run and inspects its shots, story and cut. [docs/M1-ACCEPTANCE.md](docs/M1-ACCEPTANCE.md) is the procedure for judging whether the Edit tab explains cuts well enough without logs.
 
 ### Getting started
 1. Create and activate the conda environment.

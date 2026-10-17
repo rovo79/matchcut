@@ -174,6 +174,88 @@ drive a run. Every callback runs on the pipeline's thread.
 
 Without handlers (the CLI) every checkpoint continues and nothing changes.
 
+## Editorial pins
+
+An editor can pin a junction (a cut between two clips) from the TUI's Edit
+tab so that later runs keep it. Pins live in `workspace/editorial.json`,
+written atomically:
+
+```json
+{"pins": [{"out_shot": 0, "in_shot": 1, "out_time": 4.0, "in_time": 11.88, "origin": "locked", "note": ""}]}
+```
+
+A pin names a junction by its two **shots**, not by clip ids: passes renumber
+clips, shots do not. `out_time` and `in_time` are source seconds. `origin` is
+`locked` (keep the points the editor was looking at) or `reverted` (go back to
+the points of the first cut). A malformed entry is skipped and logged; a
+missing or corrupt file means no pins.
+
+How a pin takes effect:
+
+- **Rough cut.** When the rough cut is assembled, every pin is added to the
+  model's constraints as "keep shot A immediately followed by shot B", so a
+  regenerated rough cut still contains the junction.
+- **Before the passes.** `Pipeline.refine` calls `editorial.apply_pins` on the
+  rough cut before the first pass. For each pin whose two shots are adjacent,
+  both clips get the pinned points (snapped to frames, clamped to the shot and
+  to `pacing.min_clip_seconds`), the facing ends are locked (`locked_out` /
+  `locked_in`) and both clips are tagged `pinned`. The passes already leave
+  locked ends alone, and `pacing` never drops a clip tagged `pinned`.
+- **Decisions.** Each pin leaves one decision with pass name `editor`:
+  `editor:pinned` (detail `locked by the editor: out 4.00s, in 11.88s`; the
+  data holds the pin plus the points actually placed) or
+  `editor:pin_unplaced` (the shots are not adjacent in this cut, or the clips
+  have no room for the points). These show in the event stream, in
+  `report.md`, in the TUI log, and in the junction inspector's badge.
+
+A pin written during a run is read when the passes next start, so it applies
+on the next run. The TUI shows `pin pending: run again (R) to apply` until
+then.
+
+## Explaining the cuts as text
+
+`junctions` lists every junction of the final cut with its evidence, so a cut
+can be understood without opening the TUI or the JSON files:
+
+```shell
+python -m matchcut.pipeline junctions WORKSPACE            # one line per junction
+python -m matchcut.pipeline junctions WORKSPACE --index 1  # one junction in full
+```
+
+Each line gives the junction number, the two clips and shots, the cut points
+in source seconds, the transition, the combined score and badges (`match`
+type, `locked`, `pinned`, `beat`). Junctions are followed across stages by
+lineage (same shot, overlapping source range), so the scores before and after
+the passes describe the same cut even when clips were renumbered. The scores
+are rebuilt from `analysis.npz` with the deterministic scorer, the same one the
+match-cut pass uses. Output from a mock run on the 20 s Big Buck Bunny clip
+(`-t 12`):
+
+```text
+$ python -m matchcut.pipeline junctions ws_bbb
+2 junctions in final (8 stages)
+  1  c001->c002  s0->s1  out    4.00  in   11.88  dissolve     score 0.23  beat
+  2  c002->c003  s1->s2  out   15.75  in   15.88  dissolve     score 0.36  beat
+
+$ python -m matchcut.pipeline junctions ws_bbb --index 1
+  1  c001->c002  s0->s1  out    4.00  in   11.88  dissolve     score 0.23  beat
+why: transitions: beat b1 -> b2: dissolve 0.75s
+history:
+  roughcut: cut at out 4.00s / in 11.88s
+  transitions: dissolve 0.75s
+scores (roughcut -> final):
+  structure    0.000 -> 0.000
+  composition  0.595 -> 0.595
+  luminance    0.370 -> 0.370
+  color        0.199 -> 0.199
+  frame        0.245 -> 0.245
+  motion       0.200 -> 0.200
+  combined     0.232 -> 0.232
+decisions:
+  roughcut:notes  mock rough cut
+  transitions:dissolve  beat b1 -> b2: dissolve 0.75s
+```
+
 ## Working iteratively
 
 Every stage is cached in the workspace, so you can change something and re-run
