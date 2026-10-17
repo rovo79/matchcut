@@ -1,10 +1,14 @@
 """Editorial pins: storage, application before the passes, prompt constraints, regeneration."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import Pin, PinStore, apply_pins, pin_constraints
+from matchcut.pipeline.passes import PacingPass
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.timeline import Clip, Timeline
 from tests.pipeline.conftest import RecordingMock
@@ -59,6 +63,17 @@ def test_a_pin_whose_shots_are_not_adjacent_is_reported_not_applied():
     assert [(c.source_in, c.source_out) for c in out.clips] == [(c.source_in, c.source_out) for c in cut().clips]
 
 
+def test_pin_store_skips_a_malformed_entry_and_keeps_the_rest(tmp_path):
+    good = Pin(0, 2, 2.0, 4.6, note="keep")
+    bad = {"out_shot": 3, "in_shot": 4, "out_time": 7.5}  # no in_time
+    (tmp_path / "editorial.json").write_text(json.dumps({"pins": [good.to_dict(), bad]}))
+    store = PinStore(tmp_path)
+    assert store.load() == [good]
+    store.put(Pin(5, 6, 1.0, 2.0))
+    assert [p.key for p in PinStore(tmp_path).load()] == [(0, 2), (5, 6)]
+    assert PinStore(tmp_path).get(0, 2) == good
+
+
 def test_pin_constraints_name_the_shot_pairs():
     assert pin_constraints([Pin(0, 2, 2.0, 4.6)]) == ["keep shot 0 immediately followed by shot 2 (an editor-locked junction)"]
 
@@ -104,3 +119,34 @@ def test_pins_survive_regenerating_the_rough_cut(matchcut_video, tmp_path):
     assert x.locked_out and y.locked_in
     assert abs(x.source_out - pin.out_time) <= tolerance and abs(y.source_in - pin.in_time) <= tolerance
     assert any(d.pass_name == "editor" and d.action == "pinned" for d in final.history)
+
+
+@pytest.fixture(scope="module")
+def narrative_ctx(matchcut_video, tmp_path_factory):
+    cfg = PipelineConfig(source=str(matchcut_video), workspace=str(tmp_path_factory.mktemp("ws")), target_duration=6.0)
+    cfg.llm.backend = "mock"
+    ctx = Pipeline(cfg).narrative()
+    ctx.narrative = {"beats": [{"id": "b1", "title": "A", "pace": "medium", "target_duration_s": 1.0, "shot_ids": [0, 2, 3], "transition_in": "cut"}]}
+    return ctx
+
+
+def test_pacing_never_drops_a_pinned_clip_even_when_it_is_the_lowest_value(narrative_ctx):
+    ctx = narrative_ctx
+    saved = ctx.descriptions
+    ctx.descriptions = {0: {"quality": 0.1, "usable": False}, 2: {"quality": 0.1, "usable": False}, 3: {"quality": 0.9}}
+    try:
+        tl = Timeline(source=ctx.media.path, fps=ctx.media.fps, clips=[Clip("c001", 0, 0.5, 2.5, "b1"), Clip("c002", 2, 4.5, 6.0, "b1"), Clip("c003", 3, 6.0, 8.0, "b1")])
+        pinned, _ = apply_pins(tl, [Pin(0, 2, 2.5, 4.5)], ctx.shot_bounds, ctx.cfg.pacing.min_clip_seconds)
+        points = (pinned.clips[0].source_out, pinned.clips[1].source_in)
+        result = PacingPass().apply(pinned, ctx)
+    finally:
+        ctx.descriptions = saved
+    final = result.timeline
+    pairs = [(a, b) for a, b in zip(final.clips, final.clips[1:]) if (a.shot_index, b.shot_index) == (0, 2)]
+    assert len(pairs) == 1
+    a, b = pairs[0]
+    assert (a.source_out, b.source_in) == points
+    assert a.locked_out and b.locked_in and "dropped" not in a.tags + b.tags
+    dropped = {i for d in result.decisions if d.action == "drop" for i in d.clip_ids}
+    assert not dropped & {"c001", "c002"}
+    assert "c003" in dropped  # the over-target beat still sheds its unpinned clip

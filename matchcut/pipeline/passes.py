@@ -430,7 +430,10 @@ class PacingPass(Pass):
                     excess -= removed
             # still too long: drop the least valuable clips
             while excess > target * tol and len(live) > 1:
-                victim = min(live, key=lambda c: self._value(c, ctx))
+                droppable = [c for c in live if "pinned" not in c.tags]  # an editor's pin is never dropped
+                if not droppable:
+                    break
+                victim = min(droppable, key=lambda c: self._value(c, ctx))
                 victim.tags.append("dropped")
                 live.remove(victim)
                 excess -= victim.duration

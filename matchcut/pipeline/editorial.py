@@ -3,17 +3,20 @@
 A pin names a junction by its two shots (clip ids change when a cut is
 regenerated; shots do not) and stores the cut points to hold. Pins are applied
 to the rough cut before any pass runs: both ends of the junction are locked,
-and every pass already leaves locked ends alone.
+the passes leave locked ends alone, and pacing never drops a pinned clip.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .timeline import Decision, Timeline
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,10 +48,17 @@ class PinStore:
 
     def load(self) -> List[Pin]:
         try:
-            data = json.loads(self.path.read_text())
-            return [Pin.from_dict(d) for d in data.get("pins", [])]
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            entries = json.loads(self.path.read_text()).get("pins", [])
+            iter(entries)
+        except (OSError, ValueError, TypeError, AttributeError):
             return []
+        pins: List[Pin] = []
+        for entry in entries:  # one malformed entry must not make a later put/remove drop the others
+            try:
+                pins.append(Pin.from_dict(entry))
+            except (KeyError, ValueError, TypeError, AttributeError):
+                log.warning("%s: skipping a malformed pin entry: %r", self.path, entry)
+        return pins
 
     def _save(self, pins: Sequence[Pin]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
