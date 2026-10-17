@@ -205,11 +205,32 @@ def test_a_junction_level_decision_outranks_a_clip_level_one():
 
 
 def test_whole_timeline_decisions_are_not_attributed_to_a_junction():
-    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
-    ids = ["c001", "c002", "c003"]
-    polished = tl("polish", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)], [Decision("polish", "assessment", ids + ["c004"], "overall: fine")])
+    clips = lambda: [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0), clip("c004", 3, 9.0, 11.0)]
+    rough = tl("roughcut", clips())
+    polished = tl("polish", clips(), [Decision("polish", "assessment", ["c001", "c002", "c003", "c004"], "overall: fine")])
     js = build_junctions([("roughcut", rough), ("polish", polished)])
+    assert len(js) == 3
     assert all(j.decisions == [] and j.why() == "no pass changed this junction" for j in js)
+
+
+def test_a_beat_fit_is_attributed_to_none_of_the_beats_junctions():
+    clips = lambda: [clip("c%03d" % n, n, n * 3.0, n * 3.0 + 2.0) for n in range(1, 6)]
+    rough = tl("roughcut", clips())
+    fit = Decision("pacing", "fit", ["c003", "c004", "c005"], "beat b2 fitted to 5.0s")
+    paced = tl("pacing", clips(), [fit])
+    js = build_junctions([("roughcut", rough), ("pacing", paced)])
+    assert [(j.out_clip, j.in_clip) for j in js][2:] == [("c003", "c004"), ("c004", "c005")]
+    assert all(fit not in j.decisions for j in js)
+
+
+def test_a_polish_refusal_on_a_clip_does_not_outrank_the_match_cut_decision():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    mc = tl("matchcut", [clip("c001", 0, 0.0, 1.88, locked_out=True), clip("c002", 1, 3.12, 5.0, locked_in=True)], [MATCH])
+    refusal = Decision("polish", "rejected", ["c001"], "trim_tail: out-point locked by a match cut")
+    polished = tl("polish", [clip("c001", 0, 0.0, 1.88, locked_out=True), clip("c002", 1, 3.12, 5.0, locked_in=True)], [MATCH, refusal])
+    j = build_junctions([("roughcut", rough), ("matchcut", mc), ("polish", polished)])[0]
+    assert j.why().startswith("matchcut:")
+    assert refusal in j.decisions and j.clip_level == [False, True]
 
 
 def test_cli_reports_a_corrupt_config(tmp_path, capsys):
@@ -233,6 +254,7 @@ def test_junctions_through_every_default_pass_keep_their_lineage(mc_ctx, tmp_pat
             t = by_stage[state.stage]
             i = _locate(t, final.clips[j.index], final.clips[j.index + 1])
             assert i is not None
+            assert (state.out_time, state.in_time) == (t.clips[i].source_out, t.clips[i + 1].source_in)
             for got, ref in ((t.clips[i], final.clips[j.index]), (t.clips[i + 1], final.clips[j.index + 1])):
                 assert got.shot_index == ref.shot_index
                 assert max(got.source_in, ref.source_in) < min(got.source_out, ref.source_out)

@@ -18,6 +18,8 @@ from .features import Analysis
 from .matching import MatchScore, MatchScorer
 from .timeline import Clip, Decision, Timeline
 
+# decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
+WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades")
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
 
@@ -136,7 +138,7 @@ class Junction:
         ranked = list(enumerate(self.decisions))[::-1]
         tiers = (
             lambda i, d: d.pass_name == "editor",
-            lambda i, d: d.action in ("match_cut", "rejected", "jump_cut_risk"),
+            lambda i, d: d.action in ("match_cut", "rejected", "jump_cut_risk") and not self._is_clip_level(i),
             lambda i, d: not self._is_clip_level(i),
             lambda i, d: True,
         )
@@ -208,7 +210,7 @@ def _attribute(
     found: List[Tuple[Decision, bool]] = []
     for d in new:
         ids = d.clip_ids
-        if not ids or len(ids) > 3:  # whole-timeline records: assessment, fit, reorder
+        if not ids or len(ids) > 3 or d.action in WHOLE_SCOPE_ACTIONS:
             continue
         candidates: List[Tuple[str, str]] = []
         if prev_ids is not None:
