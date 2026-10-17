@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.screen import ModalScreen
@@ -38,6 +39,21 @@ class HelpScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         yield Static(HELP_TEXT, id="help")
+
+
+def status_text(st: RunState) -> Text:
+    source = st.config.source.rsplit("/", 1)[-1]
+    running = st.checkpoint.stage if st.checkpoint else next((n for n, s in st.stages.items() if s.state in ("running", "stopping")), "-")
+    status = st.finished_label() if st.run_status == "finished" else st.run_status
+    usage = f"{st.calls} calls  mock backend" if st.is_mock else f"{st.calls} calls  {st.input_tokens}/{st.output_tokens} tok  ~${st.cost_estimate():.3f}"
+    text = Text()
+    if st.is_mock:
+        text.append("MOCK", style="bold black on yellow")
+        text.append("  ")
+    text.append(f"{source}  |  {status}  |  stage {running}  |  {st.elapsed():6.1f}s  |  {usage}")
+    if st.image_mode:
+        text.append(f"  |  images: {st.image_mode}")
+    return text
 
 
 class MatchcutApp(App):
@@ -132,18 +148,9 @@ class MatchcutApp(App):
         self._update_status()
 
     def _update_status(self) -> None:
-        st = self.state
-        source = st.config.source.rsplit("/", 1)[-1]
-        running = st.checkpoint.stage if st.checkpoint else next((n for n, s in st.stages.items() if s.state in ("running", "stopping")), "-")
-        text = (
-            f"{source}  |  {st.run_status}  |  stage {running}  |  {st.elapsed():6.1f}s  |  "
-            f"{st.calls} calls  {st.input_tokens}/{st.output_tokens} tok  ~${st.cost_estimate():.3f}"
-        )
-        if st.image_mode:
-            text += f"  |  images: {st.image_mode}"
         status = self.query("#status")
         if status:  # the timer can tick once more while the screen is being torn down
-            status.first(Static).update(text)
+            status.first(Static).update(status_text(self.state))
 
     # -- actions ----------------------------------------------------------------
     def action_show_tab(self, tab: str) -> None:

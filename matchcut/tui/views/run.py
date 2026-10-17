@@ -77,6 +77,7 @@ class RunView(Vertical):
         self._seen = 0
         self._serial = 0
         self._filter = 0
+        self._mock = False
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="run-top"):
@@ -98,6 +99,7 @@ class RunView(Vertical):
     def refresh_from_state(self, state: RunState) -> None:
         self.query_one("#ladder", StageLadder).update_stages(state.stages)
         log = self.query_one("#log", RichLog)
+        self._mock = state.is_mock
         events_list = list(state.events)
         if state.run_serial != self._serial:  # a new run started: its log starts empty
             log.clear()
@@ -133,7 +135,8 @@ class RunView(Vertical):
         if isinstance(e, events.ModelCall):
             if f not in ("all", "model"):
                 return None
-            return Text.assemble(("model ", "yellow"), f"{e.name} images={e.images} in={e.input_tokens} out={e.output_tokens} {e.seconds:.1f}s")
+            mock = " (mock)" if self._mock else ""
+            return Text.assemble(("model ", "yellow"), f"{e.name} images={e.images} in={e.input_tokens} out={e.output_tokens} {e.seconds:.1f}s{mock}")
         if isinstance(e, events.Log):
             if f not in ("all", "log"):
                 return None

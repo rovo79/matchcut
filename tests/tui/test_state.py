@@ -96,3 +96,45 @@ def test_event_count_keeps_counting_after_the_event_buffer_is_full(mock_workspac
     assert len(st.events) == 5000
     st.apply(events.RunStarted())
     assert st.event_count == 1
+
+
+def finished_run(cfg, render_path=""):
+    from matchcut.pipeline import events
+    from matchcut.tui.state import RunState
+
+    st = RunState(cfg)
+    st.apply(events.RunStarted(source=cfg.source, workspace=cfg.workspace, config={}))
+    for name in [n for n in st.stage_names() if n != "render"]:
+        st.apply(events.StageStarted(stage=name))
+        st.apply(events.StageFinished(stage=name, seconds=0.1, path=""))
+    st.apply(events.RunFinished(final_path="final.json", render_path=render_path, report_path="report.md", seconds=1.0))
+    return st
+
+
+def test_a_finished_run_marks_unreached_stages_skipped(tmp_path):
+    from matchcut.pipeline.config import PipelineConfig
+
+    cfg = PipelineConfig(source="x.mp4", workspace=str(tmp_path))
+    cfg.render.enabled = False
+    st = finished_run(cfg)
+    assert st.stages["render"].state == "skipped" and st.stages["render"].note == "render disabled"
+    assert st.stages["report"].state == "done"
+    assert st.finished_label() == "finished · analysis only"
+
+
+def test_a_rendered_run_names_its_file(tmp_path):
+    from matchcut.pipeline.config import PipelineConfig
+
+    st = finished_run(PipelineConfig(source="x.mp4", workspace=str(tmp_path)), render_path=str(tmp_path / "final.mp4"))
+    assert st.finished_label() == "finished · rendered final.mp4"
+
+
+def test_is_mock_follows_the_backend(tmp_path):
+    from matchcut.pipeline.config import PipelineConfig
+    from matchcut.tui.state import RunState
+
+    cfg = PipelineConfig(source="x.mp4", workspace=str(tmp_path))
+    cfg.llm.backend = "mock"
+    assert RunState(cfg).is_mock
+    cfg.llm.backend = "anthropic"
+    assert not RunState(cfg).is_mock

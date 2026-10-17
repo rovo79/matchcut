@@ -21,7 +21,7 @@ async def _opens(mock_workspace):
         ladder = app.query_one("#ladder", StageLadder)
         assert ladder.row_count == len(app.state.stage_names())
         status = str(app.query_one("#status").content)
-        assert "idle" in status and "~$" in status
+        assert "idle" in status and "MOCK" in status
         for key, tab in [("2", "tab-shots"), ("3", "tab-story"), ("4", "tab-cut"), ("5", "tab-config"), ("1", "tab-run")]:
             await pilot.press(key)
             await pilot.pause()
@@ -75,7 +75,7 @@ async def _run_with_checkpoints(demo_video, tmp_path):
         assert app.state.run_status == "finished"
         assert app.state.stages["report"].state == "done"
         status = str(app.query_one("#status").content)
-        assert "finished" in status
+        assert "MOCK" in status and "finished · analysis only" in status
         assert "shots detected" in "\n".join(str(e.message) for e in app.state.events if isinstance(e, events.Log))
 
 
@@ -450,3 +450,17 @@ def test_checkpoint_text_is_compact():
     capped = checkpoint_text("pass:pace", many).plain.splitlines()
     assert len(capped) == 8 and capped[-1] == DETERMINISTIC_HINT and "more" in capped[-2]
     assert len(checkpoint_text("describe", many).plain.splitlines()) == 8
+
+
+def test_status_text_labels_mock_runs_and_prices_real_ones(tmp_path):
+    from matchcut.pipeline.config import PipelineConfig
+    from matchcut.tui.app import status_text
+    from matchcut.tui.state import RunState
+
+    cfg = PipelineConfig(source="/footage/demo.mp4", workspace=str(tmp_path))
+    cfg.llm.backend = "mock"
+    mock = status_text(RunState(cfg)).plain
+    assert mock.startswith("MOCK") and "mock backend" in mock and "~$" not in mock and "tok" not in mock
+    cfg.llm.backend = "anthropic"
+    real = status_text(RunState(cfg)).plain
+    assert "MOCK" not in real and "0/0 tok" in real and "~$0.000" in real and "demo.mp4" in real

@@ -16,6 +16,7 @@ STATE_STYLES = {
     "waiting": "bold magenta",
     "failed": "bold red",
     "stopping": "red",
+    "skipped": "dim italic",
 }
 
 
@@ -29,5 +30,5 @@ class StageLadder(DataTable):
         self.clear()
         for name, s in stages.items():
             seconds = f"{s.seconds:.1f}s" if s.state in ("done",) else ""
-            label = s.state if not s.error else f"{s.state}: {s.error[:40]}"
+            label = f"skipped: {s.note}" if s.state == "skipped" and s.note else (s.state if not s.error else f"{s.state}: {s.error[:40]}")
             self.add_row(name, Text(label, style=STATE_STYLES.get(s.state, "")), seconds, key=name)

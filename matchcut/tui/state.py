@@ -16,7 +16,7 @@ from matchcut.pipeline.media import MediaInfo
 from matchcut.pipeline.shots import Shot, load_shots
 from matchcut.pipeline.timeline import Decision, Timeline
 
-STAGE_STATES = ("pending", "cached", "running", "done", "waiting", "failed", "stopping")
+STAGE_STATES = ("pending", "cached", "running", "done", "waiting", "failed", "stopping", "skipped")
 
 # USD per million tokens (input, output); an estimate shown as "~$" in the status bar
 PRICES: Dict[str, Tuple[float, float]] = {
@@ -43,6 +43,7 @@ class StageStatus:
     seconds: float = 0.0
     path: str = ""
     error: str = ""
+    note: str = ""
 
 
 @dataclass
@@ -70,6 +71,7 @@ class RunState:
         self.model = cfg.llm.model
         self.last_error = ""
         self.image_mode = ""
+        self.render_path = ""
         self._cache: Dict[str, Tuple[float, Any]] = {}  # path -> (mtime, parsed)
 
     # -- stages ----------------------------------------------------------
@@ -97,6 +99,7 @@ class RunState:
             self.calls = self.input_tokens = self.output_tokens = 0
             self._cost = 0.0
             self.last_error = ""
+            self.render_path = ""
         elif isinstance(event, events.StageStarted):
             self._stage(event.stage).state = "running"
             if self.run_status != "stopping":
@@ -124,6 +127,11 @@ class RunState:
             self.run_status = "finished"
             self.finished_at = time.time()
             self.checkpoint = None
+            self.render_path = event.render_path or ""
+            for s in self.stages.values():
+                if s.state == "pending":
+                    s.state = "skipped"
+                    s.note = "render disabled" if s.name == "render" and not self.config.render.enabled else "not run"
         elif isinstance(event, events.RunFailed):
             self.run_status = "failed"
             self.finished_at = time.time()
@@ -153,6 +161,15 @@ class RunState:
         if self.started_at is None:
             return 0.0
         return (self.finished_at or time.time()) - self.started_at
+
+    @property
+    def is_mock(self) -> bool:
+        return self.config.llm.backend == "mock"
+
+    def finished_label(self) -> str:
+        if self.render_path:
+            return f"finished · rendered {Path(self.render_path).name}"
+        return "finished · analysis only"
 
     def cost_estimate(self) -> float:
         return self._cost
