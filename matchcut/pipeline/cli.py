@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import DEFAULT_PASSES, PipelineConfig
+from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace
 from .pipeline import Pipeline
 from .timeline import Timeline
 
@@ -80,11 +81,39 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         if name == "render":
             sp.add_argument("--timeline", default=None, help="timeline JSON to render (default: final.json)")
             sp.add_argument("-o", "--output", default=None)
+    sp = sub.add_parser("junctions", help="list a workspace's junctions, or explain one with --index")
+    sp.add_argument("workspace")
+    sp.add_argument("--index", type=int, default=None, help="1-based junction number to explain")
     return parser.parse_args(argv)
+
+
+def _junctions(ws: Path, index: Optional[int]) -> int:
+    cfg_path = ws / "config.json"
+    if not cfg_path.exists():
+        print(f"no workspace at {ws} (config.json missing)", file=sys.stderr)
+        return 1
+    cfg = PipelineConfig.load(cfg_path)
+    stages = load_stage_timelines(ws)
+    if not stages:
+        print(f"no timelines in {ws}: run the pipeline first", file=sys.stderr)
+        return 1
+    junctions = build_junctions(stages, scorer_for_workspace(ws, cfg))
+    if index is None:
+        print(f"{len(junctions)} junctions in {stages[-1][0]} ({len(stages)} stages)")
+        for j in junctions:
+            print(junction_line(j))
+        return 0
+    if not 1 <= index <= len(junctions):
+        print(f"junction {index} is out of range 1..{len(junctions)}", file=sys.stderr)
+        return 1
+    print(junction_detail(junctions[index - 1]))
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    if args.command == "junctions":
+        return _junctions(Path(args.workspace), args.index)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("PIL").setLevel(logging.WARNING)
     cfg = build_config(args)

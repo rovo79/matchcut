@@ -11,6 +11,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matchcut.pipeline import events
 from matchcut.pipeline.audio import MusicAnalysis
 from matchcut.pipeline.config import PipelineConfig
+from matchcut.pipeline.junctions import stage_timeline_paths
 from matchcut.pipeline.media import MediaInfo
 from matchcut.pipeline.shots import Shot, load_shots
 from matchcut.pipeline.timeline import Decision, Timeline
@@ -197,11 +198,7 @@ class RunState:
 
     def _timeline_entries(self) -> List[Tuple[str, Path]]:
         """(stage, path) for every place a timeline can live, in stage order: the one copy of the layout."""
-        ws = self.workspace
-        entries = [("roughcut", ws / "roughcut.json")]
-        entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
-        entries.append(("final", ws / "final.json"))
-        return entries
+        return stage_timeline_paths(self.workspace)
 
     def timeline_files(self) -> List[Path]:
         """Every file a timeline stage can come from (present or not), for change fingerprints."""
