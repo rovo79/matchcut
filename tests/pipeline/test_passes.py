@@ -112,6 +112,8 @@ def test_transitions_follow_beats_but_keep_match_cuts_hard(ctx):
     tl2 = base_timeline(ctx)
     tl2.clips[1].locked_out = True
     tl2.clips[2].locked_in = True
+    tl2.clips[1].tags.append("match_out:motion")  # the match-cut pass tags both ends; a bare lock (an editor's pin) keeps the beat transition
+    tl2.clips[2].tags.append("match_in:motion")
     result2 = TransitionsPass().apply(tl2, ctx)
     assert result2.timeline.clips[2].transition_in.is_cut
 

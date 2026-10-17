@@ -40,6 +40,11 @@ class Pass:
         return Decision(self.name, action, list(clips), detail, score, dict(data))
 
 
+def is_match_cut(a: Clip, b: Clip) -> bool:
+    """The junction a -> b was locked by the match-cut pass (an editor's pin locks the same ends but is not a match cut)."""
+    return a.locked_out and b.locked_in and any(t.startswith("match_out:") for t in a.tags) and any(t.startswith("match_in:") for t in b.tags)
+
+
 def _beat_groups(tl: Timeline) -> List[List[int]]:
     """Indices of clips grouped by consecutive beat id."""
     groups: List[List[int]] = []
@@ -420,6 +425,7 @@ class PacingPass(Pass):
         if total > target * (1 + tol):
             excess = total - target
             # proportional trim of unlocked clips first
+            trimmed: Dict[str, float] = {}
             for _ in range(3):
                 flexible = [c for c in live if not (c.locked_in and c.locked_out) and c.duration > ctx.cfg.pacing.min_clip_seconds]
                 if not flexible or excess <= 0.05:
@@ -428,6 +434,10 @@ class PacingPass(Pass):
                 for c in flexible:
                     removed = self._shorten(c, excess * c.duration / weight, ctx)
                     excess -= removed
+                    trimmed[c.id] = trimmed.get(c.id, 0.0) + removed
+            for c in live:  # the beat-wide fit below is not attributed to a junction, so say what happened to each clip
+                if trimmed.get(c.id, 0.0) > 0.005:
+                    decisions.append(self.decision("trim", [c.id], f"{label}: fitted to target, -{trimmed[c.id]:.2f}s"))
             # still too long: drop the least valuable clips
             while excess > target * tol and len(live) > 1:
                 droppable = [c for c in live if "pinned" not in c.tags]  # an editor's pin is never dropped
@@ -478,7 +488,7 @@ class TransitionsPass(Pass):
             beat_change = a.beat_id != b.beat_id
             if not beat_change:
                 continue
-            if a.locked_out and b.locked_in:
+            if is_match_cut(a, b):  # a pin holds the cut points, not the transition
                 decisions.append(self.decision("keep_cut", [a.id, b.id], "beat change lands on a match cut: hard cut kept"))
                 continue
             kind = beats.get(b.beat_id, {}).get("transition_in", "cut")
@@ -630,7 +640,7 @@ class PolishPass(Pass):
             if i == 0:
                 return False, "first clip has no incoming transition"
             prev = tl.clips[i - 1]
-            if (prev.locked_out and c.locked_in) and edit.transition != "cut":
+            if is_match_cut(prev, c) and edit.transition != "cut":
                 return False, "match cuts stay hard cuts"
             tcfg = ctx.cfg.transitions
             d = {"dissolve": tcfg.dissolve_seconds, "dip_to_black": tcfg.dip_to_black_seconds, "cut": 0.0}[edit.transition]

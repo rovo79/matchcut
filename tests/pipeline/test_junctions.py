@@ -10,7 +10,9 @@ from matchcut.pipeline import cli
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.junctions import (
     _locate,
+    JunctionState,
     build_junctions,
+    frame_delta,
     frames_delta,
     load_stage_timelines,
     scorer_for_workspace,
@@ -70,7 +72,7 @@ def test_a_junction_made_by_a_reorder_starts_where_it_first_exists():
     j = build_junctions([("roughcut", rough), ("final", final)])[0]
     assert [s.stage for s in j.states] == ["final"]
     assert j.history() == ["final: cut at out 2.00s / in 6.00s"]
-    assert j.why() == "no pass changed this junction"
+    assert j.why() == "made adjacent by final"
 
 
 def test_upto_builds_the_junctions_of_an_earlier_stage():
@@ -168,7 +170,7 @@ def test_a_renumbering_pass_does_not_attach_the_wrong_earlier_clips():
     assert [s.stage for s in j.states] == ["continuity"]
     assert j.baseline.in_time == 6.0 and j.history() == ["continuity: cut at out 2.00s / in 6.00s"]
     assert drop not in j.decisions  # c002 in the drop is the rough cut's shot-1 clip, not this junction's in-clip
-    assert j.why() == "no pass changed this junction"
+    assert j.why() == "made adjacent by continuity: too short"  # but it is the clip that sat between the two
 
 
 def test_a_junction_survives_renumbering_and_keeps_its_own_decisions():
@@ -261,3 +263,132 @@ def test_junctions_through_every_default_pass_keep_their_lineage(mc_ctx, tmp_pat
     match = next(j for j in js if (j.out_shot, j.in_shot) == (0, 2))
     assert match.latest("match_cut") is not None
     assert match.why().startswith("matchcut:")
+
+
+# -- C1: why() never claims "no pass changed this junction" when one did --------------------------
+NOTHING = "no pass changed this junction"
+
+
+def run_stages(ctx, tmp_path, beat_targets=(3.0, 3.0), total=6.0, monkeypatch=None):
+    """The default passes over the designed rough cut with a mock backend, as (stage, timeline) pairs."""
+    monkeypatch.setattr(ctx.cfg, "target_duration", total)
+    narrative = {"beats": [dict(b, target_duration_s=t) for b, t in zip(ctx.narrative["beats"], beat_targets)]}
+    monkeypatch.setattr(ctx, "narrative", narrative)
+    rough = designed_rough_cut(ctx)
+    run_passes(rough, ctx, ["matchcut", "continuity", "pacing", "transitions", "polish"], save_dir=tmp_path)
+    return [("roughcut", designed_rough_cut(ctx))] + [(p.stem.split("_", 1)[-1], Timeline.load(p)) for p in sorted(tmp_path.glob("*.json"))]
+
+
+def test_real_default_passes_never_say_nothing_changed_for_a_moved_junction(mc_ctx, tmp_path, monkeypatch):
+    js = build_junctions(run_stages(mc_ctx, tmp_path, monkeypatch=monkeypatch))
+    moved = [j for j in js if len(j.history()) > 1]
+    assert moved
+    assert all(NOTHING not in j.why() for j in moved)
+    pacing_moved = [j for j in js if any(line.startswith("pacing:") for line in j.history())]
+    assert any("pacing" in j.why() for j in pacing_moved)
+    # a junction only pacing touched (no match cut, no transition) is explained by pacing
+    only_pacing = [j for j in pacing_moved if not any(h.startswith(("matchcut:", "transitions:")) for h in j.history())]
+    assert only_pacing and all(j.why().startswith("pacing:") for j in only_pacing)
+
+
+def test_a_junction_made_by_a_drop_names_the_stage_that_made_it_adjacent(mc_ctx, tmp_path, monkeypatch):
+    stages = run_stages(mc_ctx, tmp_path, beat_targets=(1.5, 2.0), total=3.5, monkeypatch=monkeypatch)
+    js = build_junctions(stages)
+    made = [j for j in js if j.baseline.stage != "roughcut"]
+    assert made, "tightening the target should drop a clip and join its neighbours"
+    for j in made:
+        assert NOTHING not in j.why()
+    assert all(j.first_stage == "roughcut" for j in js)
+    assert any(j.baseline.stage == "pacing" for j in made)
+
+
+def test_why_for_a_junction_with_history_but_no_attributed_decision_names_the_last_moving_stage():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    paced = tl("pacing", [clip("c001", 0, 0.0, 1.08), clip("c002", 1, 3.0, 5.0)], [Decision("pacing", "fit", ["c001", "c002"], "beat b1 fitted")])
+    final = tl("final", [clip("c001", 0, 0.0, 1.08), clip("c002", 1, 3.0, 5.0)])
+    j = build_junctions([("roughcut", rough), ("pacing", paced), ("final", final)])[0]
+    assert j.decisions == []
+    assert j.why() == "pacing moved this junction: out -0.92s (-23f)"
+
+
+def test_why_for_a_junction_a_drop_made_adjacent_names_the_dropping_stage_and_its_detail():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    drop = Decision("pacing", "drop", ["c002"], "total: over target, dropped lowest-value clip")
+    paced = tl("pacing", [clip("c001", 0, 0.0, 2.0), clip("c002", 2, 6.0, 8.0)], [drop])
+    j = build_junctions([("roughcut", rough), ("pacing", paced)])[0]
+    assert j.baseline.stage == "pacing" and j.first_stage == "roughcut"
+    assert j.why() == "made adjacent by pacing: total: over target, dropped lowest-value clip"
+    bare = tl("pacing", [clip("c001", 0, 0.0, 2.0), clip("c002", 2, 6.0, 8.0)])
+    assert build_junctions([("roughcut", rough), ("pacing", bare)])[0].why() == "made adjacent by pacing"
+
+
+def test_nothing_changed_is_only_said_for_one_history_line_from_the_first_stage():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    j = build_junctions([("roughcut", rough), ("final", tl("final", rough.clips))])[0]
+    assert len(j.history()) == 1 and j.why() == NOTHING
+
+
+def test_pacing_records_a_trim_for_every_clip_the_proportional_fit_shortened(mc_ctx, tmp_path, monkeypatch):
+    stages = run_stages(mc_ctx, tmp_path, monkeypatch=monkeypatch)
+    paced = dict(stages)["pacing"]
+    fits = [d for d in paced.history if d.pass_name == "pacing" and d.action == "trim" and "fitted to target" in d.detail]
+    assert fits and all(len(d.clip_ids) == 1 and d.detail.split(", -")[-1].endswith("s") for d in fits)
+
+
+# -- I2: snapping noise below half a frame is not a change ---------------------------------------
+def state(out, inn, **kw):
+    return JunctionState("x", out, inn, **kw)
+
+
+def test_frame_delta_counts_frames_on_the_grid_not_the_rounded_seconds():
+    assert frame_delta(2.0, 1.88, 25.0) == "-0.12s (-3f)"
+    assert frame_delta(4.25, 4.24, 25.0) == "-0.01s (+0f)"  # both ends round to frame 106
+    assert frame_delta(1.019, 1.021, 25.0) == "+0.00s (+1f)"  # a hair apart, but across a frame boundary
+    assert frame_delta(1.03, 1.05, 25.0) == "+0.02s (+0f)"  # frames 26 and 26: the grid, not the rounded seconds, decides
+    assert frame_delta(0.0, 0.5, 0.0) == "+0.50s (+0f)"
+
+
+def test_change_from_ignores_differences_under_half_a_frame():
+    assert state(2.004, 4.2).change_from(state(2.0, 4.2), 25.0) == ""
+    assert state(2.0, 4.19).change_from(state(2.0, 4.2), 25.0) == ""  # 0.01s < 0.02s
+    assert state(2.0, 4.18).change_from(state(2.0, 4.2), 25.0) == "in -0.02s (-1f)"  # half a frame is a change
+    assert state(2.0, 4.2).change_from(state(2.0, 4.21), 0.0) == ""  # no fps: 0.02s threshold
+    assert state(2.0, 4.2, transition="dissolve", transition_seconds=0.3).change_from(state(2.004, 4.2), 25.0) == "dissolve 0.30s"
+
+
+def test_a_real_run_has_no_history_line_that_only_snaps_to_the_grid(mc_ctx, tmp_path, monkeypatch):
+    js = build_junctions(run_stages(mc_ctx, tmp_path, monkeypatch=monkeypatch))
+    lines = [line for j in js for line in j.history()[1:]]
+    assert lines and not any("(+0f)" in line for line in lines)
+
+
+def test_a_real_workspace_run_has_no_snapping_noise_in_its_histories(demo_video, tmp_path):
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    Pipeline(cfg).run()
+    js = build_junctions(load_stage_timelines(Path(cfg.workspace)))
+    assert js and not any("(+0f)" in line for j in js for line in j.history()[1:])
+
+
+# -- I5: the pin's effect is the editor's, not the first pass's ----------------------------------
+def pinned_stages():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    pinned = Decision("editor", "pinned", ["c001", "c002"], "locked by the editor: out 1.88s, in 3.12s", None, {"out_time": 1.88, "in_time": 3.12})
+    mc = tl("matchcut", [clip("c001", 0, 0.0, 1.88, locked_out=True), clip("c002", 1, 3.12, 5.0, locked_in=True)], [pinned])
+    final = tl("final", [clip("c001", 0, 0.0, 1.88, locked_out=True), clip("c002", 1, 3.12, 5.0, locked_in=True)], [pinned])
+    return [("roughcut", rough), ("matchcut", mc), ("final", final)]
+
+
+def test_the_pins_effect_is_labelled_as_the_editors_not_the_first_passes():
+    j = build_junctions(pinned_stages())[0]
+    assert j.history() == ["roughcut: cut at out 2.00s / in 3.00s", "editor (before matchcut): out -0.12s (-3f), in +0.12s (+3f), locked"]
+    assert j.why().startswith("editor:")
+
+
+def test_a_pass_that_moves_a_pinned_junction_later_keeps_its_own_label():
+    stages = pinned_stages()
+    moved = tl("final", [clip("c001", 0, 0.0, 1.5, locked_out=True), clip("c002", 1, 3.12, 5.0, locked_in=True)], stages[2][1].history)
+    j = build_junctions(stages[:2] + [("final", moved)])[0]
+    assert j.history()[-1].startswith("final: out -0.38s")
+    assert j.history()[1].startswith("editor (before matchcut):")

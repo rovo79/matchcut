@@ -19,7 +19,7 @@ from .matching import MatchScore, MatchScorer
 from .timeline import Clip, Decision, Timeline
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
-WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades")
+WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades", "notes")
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
 
@@ -58,6 +58,17 @@ def frames_delta(seconds: float, fps: float) -> str:
     return f"{seconds:+.2f}s ({frames:+d}f)"
 
 
+def frame_delta(t0: float, t1: float, fps: float) -> str:
+    """The move from ``t0`` to ``t1`` in seconds and in whole frames on the frame grid (round(t1*fps) - round(t0*fps))."""
+    frames = int(round(t1 * fps)) - int(round(t0 * fps)) if fps > 0 else 0
+    return f"{t1 - t0:+.2f}s ({frames:+d}f)"
+
+
+def _noise(fps: float) -> float:
+    """Differences below this are snapping to the frame grid, not an edit: half a frame (0.02 s when the rate is unknown)."""
+    return 0.5 / fps if fps > 0 else 0.02
+
+
 @dataclass
 class JunctionState:
     stage: str
@@ -75,10 +86,11 @@ class JunctionState:
 
     def change_from(self, prev: "JunctionState", fps: float) -> str:
         parts: List[str] = []
-        if abs(self.out_time - prev.out_time) > 1e-4:
-            parts.append(f"out {frames_delta(self.out_time - prev.out_time, fps)}")
-        if abs(self.in_time - prev.in_time) > 1e-4:
-            parts.append(f"in {frames_delta(self.in_time - prev.in_time, fps)}")
+        floor = _noise(fps) - 1e-6
+        if abs(self.out_time - prev.out_time) >= floor:
+            parts.append(f"out {frame_delta(prev.out_time, self.out_time, fps)}")
+        if abs(self.in_time - prev.in_time) >= floor:
+            parts.append(f"in {frame_delta(prev.in_time, self.in_time, fps)}")
         if (self.transition, round(self.transition_seconds, 3)) != (prev.transition, round(prev.transition_seconds, 3)):
             parts.append(self.transition if self.transition == "cut" else f"{self.transition} {self.transition_seconds:.2f}s")
         if self.locked and not prev.locked:
@@ -99,6 +111,9 @@ class Junction:
     states: List[JunctionState] = field(default_factory=list)  # stage order; only stages where the clips are adjacent
     decisions: List[Decision] = field(default_factory=list)  # stage order: decisions that name this junction or one of its clips
     clip_level: List[bool] = field(default_factory=list)  # parallel to decisions: True when it names only one of the two clips (a trim, a drop)
+    decision_stage: List[str] = field(default_factory=list)  # parallel to decisions: the stage whose timeline recorded it
+    first_stage: str = ""  # the first stage this junction was built from; a later baseline means a pass made the two clips adjacent
+    adjacent_detail: str = ""  # the drop/insert that made them adjacent, when the baseline stage is not the first
 
     @property
     def beat_boundary(self) -> bool:
@@ -146,15 +161,34 @@ class Junction:
             d = next((d for i, d in ranked if tier(i, d)), None)
             if d is not None:
                 return f"{d.pass_name}: {d.detail}"
+        moved = self._last_move()
+        if moved is not None:
+            return f"{moved[0]} moved this junction: {moved[1]}"
+        if self.first_stage and self.baseline.stage != self.first_stage:
+            return f"made adjacent by {self.baseline.stage}" + (f": {self.adjacent_detail}" if self.adjacent_detail else "")
         return "no pass changed this junction"
+
+    def _changes(self) -> List[Tuple[str, str]]:
+        """(stage, change) for every stage after the baseline that moved something, in stage order."""
+        out: List[Tuple[str, str]] = []
+        for prev, cur in zip(self.states, self.states[1:]):
+            change = cur.change_from(prev, self.fps)
+            if change:
+                out.append((cur.stage, change))
+        return out
+
+    def _pinned_in(self, stage: str) -> bool:
+        return any(d.pass_name == "editor" and d.action == "pinned" and k < len(self.decision_stage) and self.decision_stage[k] == stage for k, d in enumerate(self.decisions))
+
+    def _last_move(self) -> Optional[Tuple[str, str]]:
+        changes = self._changes()
+        return changes[-1] if changes else None
 
     def history(self) -> List[str]:
         b = self.baseline
         lines = [f"{b.stage}: {b.transition} at out {b.out_time:.2f}s / in {b.in_time:.2f}s"]
-        for prev, cur in zip(self.states, self.states[1:]):
-            change = cur.change_from(prev, self.fps)
-            if change:
-                lines.append(f"{cur.stage}: {change}")
+        # Pins are applied to the rough cut before the first pass runs, so the pass that saved first is not who moved it.
+        lines += [f"{'editor (before ' + stage + ')' if self._pinned_in(stage) else stage}: {change}" for stage, change in self._changes()]
         return lines
 
 
@@ -180,6 +214,27 @@ def _locate(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
             if overlap > best_overlap:
                 best, best_overlap = i, overlap
     return best
+
+
+def _best_clip(timeline: Timeline, ref: Clip) -> Optional[int]:
+    best: Optional[int] = None
+    best_overlap = 0.0
+    for i, c in enumerate(timeline.clips):
+        if _lineage(c, ref) and _overlap(c, ref) > best_overlap:
+            best, best_overlap = i, _overlap(c, ref)
+    return best
+
+
+def _adjacency_detail(considered: Sequence[Tuple[str, Timeline]], k: int, a_ref: Clip, b_ref: Clip, cur_ids: Tuple[str, str]) -> str:
+    """The drop or insert of stage ``k`` that made the junction's clips adjacent: it names a clip that sat between them, or one of them."""
+    prev, timeline = considered[k - 1][1], considered[k][1]
+    pa, pb = _best_clip(prev, a_ref), _best_clip(prev, b_ref)
+    named = set(cur_ids)
+    if pa is not None and pb is not None and pa < pb:
+        named |= {c.id for c in prev.clips[pa + 1 : pb]}
+    new = timeline.history[len(prev.history):]
+    d = next((d for d in new if d.action in ("drop", "insert") and named & set(d.clip_ids)), None)
+    return d.detail if d is not None else ""
 
 
 def _state(stage: str, timeline: Timeline, i: int, scorer: Optional[MatchScorer]) -> JunctionState:
@@ -238,7 +293,7 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
     out: List[Junction] = []
     for i in range(len(ref.clips) - 1):
         a, b = ref.clips[i], ref.clips[i + 1]
-        j = Junction(i, a.id, b.id, a.shot_index, b.shot_index, a.beat_id, b.beat_id, ref.fps)
+        j = Junction(i, a.id, b.id, a.shot_index, b.shot_index, a.beat_id, b.beat_id, ref.fps, first_stage=names[0])
         at: List[Optional[int]] = []  # index of the junction's first clip in each considered stage
         for k, (stage, timeline) in enumerate(considered):
             idx = i if k == len(considered) - 1 else _locate(timeline, a, b)
@@ -255,6 +310,11 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
             for d, clip_level in _attribute(new, prev_ids, cur_ids, prev_all, {c.id for c in timeline.clips}):
                 j.decisions.append(d)
                 j.clip_level.append(clip_level)
+                j.decision_stage.append(considered[k][0])
+        first = next((k for k, idx in enumerate(at) if idx is not None), 0)
+        if first > 0:  # the clips were not adjacent before stage ``first``: a pass joined them
+            tl_first = considered[first][1]
+            j.adjacent_detail = _adjacency_detail(considered, first, a, b, (tl_first.clips[at[first]].id, tl_first.clips[at[first] + 1].id))
         out.append(j)
     return out
 

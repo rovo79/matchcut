@@ -120,8 +120,10 @@ Pins survive regeneration:
    out-point and the incoming clip's in-point are set to the pinned times
    (clamped to the shots and the minimum clip length) and both ends are
    locked. Every pass already honours locks, so the junction comes through
-   unchanged. Each applied pin is recorded as a decision by the pass
-   `editor`; a pin whose shots are not adjacent in the new cut is recorded as
+   unchanged. A pin holds the cut points, not the transition: a pinned
+   junction on a beat boundary still gets the beat's dissolve, and only a match
+   cut (tagged by the match-cut pass) is forced to a hard cut. Each applied pin
+   is recorded as a decision by the pass `editor`; a pin whose shots are not adjacent in the new cut is recorded as
    `pin_unplaced` and listed in the Edit header.
 2. The rough-cut prompt carries the pins as editor constraints ("keep shot A
    immediately followed by shot B"), so a regenerated rough cut keeps the

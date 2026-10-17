@@ -50,13 +50,13 @@ class PinStore:
         try:
             entries = json.loads(self.path.read_text()).get("pins", [])
             iter(entries)
-        except (OSError, ValueError, TypeError, AttributeError):
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError):
             return []
         pins: List[Pin] = []
         for entry in entries:  # one malformed entry must not make a later put/remove drop the others
             try:
                 pins.append(Pin.from_dict(entry))
-            except (KeyError, ValueError, TypeError, AttributeError):
+            except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
                 log.warning("%s: skipping a malformed pin entry: %r", self.path, entry)
         return pins
 
@@ -120,6 +120,20 @@ def apply_pins(tl: Timeline, pins: Sequence[Pin], bounds: Dict[int, Tuple[float,
         decisions.append(Decision("editor", "pinned", [a.id, b.id], detail, None, dict(pin.to_dict(), out=a.source_out, in_=b.source_in)))
     out.history.extend(decisions)
     return out, decisions
+
+
+def pin_outcome(tl: Timeline, pin: Pin) -> Optional[Decision]:
+    """What the latest run did with ``pin``: the editor's latest decision in ``tl`` for the same two shots at the same points."""
+    for d in reversed(tl.history):
+        if d.pass_name != "editor" or d.data.get("out_shot") != pin.out_shot or d.data.get("in_shot") != pin.in_shot:
+            continue
+        try:
+            same = round(float(d.data["out_time"]), 3) == round(pin.out_time, 3) and round(float(d.data["in_time"]), 3) == round(pin.in_time, 3)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if same:
+            return d
+    return None
 
 
 def pin_constraints(pins: Sequence[Pin]) -> List[str]:
