@@ -11,8 +11,10 @@ from textual.widgets import Footer, Static, TabbedContent, TabPane
 from matchcut.pipeline.config import PipelineConfig
 from .bridge import PipelineBridge
 from .state import RunState
+from .views.cut import CutView
 from .views.run import RunView
 from .views.shots import ShotsView
+from .views.story import StoryView
 
 HELP_TEXT = """Control room keys
 
@@ -64,9 +66,9 @@ class MatchcutApp(App):
             with TabPane("2 Shots", id="tab-shots"):
                 yield ShotsView(id="shots-view")
             with TabPane("3 Story", id="tab-story"):
-                yield Static("story view (next task)", id="story-placeholder")
+                yield StoryView(id="story-view")
             with TabPane("4 Cut", id="tab-cut"):
-                yield Static("cut view (next task)", id="cut-placeholder")
+                yield CutView(id="cut-view")
             with TabPane("5 Config", id="tab-config"):
                 yield Static("config view (next task)", id="config-placeholder")
         yield Footer()
@@ -93,6 +95,10 @@ class MatchcutApp(App):
         elif event.pane.id == "tab-shots":
             # The tab switch cleared focus; hand it to the table so down/u work at once.
             self.call_after_refresh(self._focus_if_active, "tab-shots", "#shots-table")
+        elif event.pane.id == "tab-story":
+            self.call_after_refresh(self._focus_if_active, "tab-story", "#story-view")
+        elif event.pane.id == "tab-cut":
+            self.call_after_refresh(self._focus_if_active, "tab-cut", "#cut-view")
 
     # -- event pump -------------------------------------------------------------
     def _pump(self) -> None:

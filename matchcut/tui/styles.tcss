@@ -12,3 +12,9 @@ TabbedContent { height: 1fr; }
 #shot-frames { height: 12; }
 #shot-frames > Frame { width: 1fr; margin-right: 1; }
 #shot-desc { height: auto; }
+.beat-card { border: round $secondary; padding: 0 1; margin: 0 0 1 0; height: auto; }
+#story-head { height: auto; padding: 0 1; }
+#cut-header { height: 1; padding: 0 1; }
+#clip-row { height: 1fr; }
+#clip-frame { width: 40%; }
+#clip-detail { width: 1fr; padding: 0 1; }
