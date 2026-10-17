@@ -78,12 +78,12 @@ class MatchcutApp(App):
 
     def _focus_run_view(self) -> None:
         # RunView's c/r/a/f bindings only apply while focus sits inside it.
-        self.call_after_refresh(self._focus_ladder_if_active)
+        self.call_after_refresh(self._focus_if_active, "tab-run", "#ladder")
 
-    def _focus_ladder_if_active(self) -> None:
-        # The deferred focus must not pull the user back from a tab they already left.
-        if self.query_one(TabbedContent).active == "tab-run":
-            self.query_one("#ladder").focus()
+    def _focus_if_active(self, pane_id: str, selector: str) -> None:
+        # A deferred focus must not pull the user back from a tab they already left.
+        if self.query_one(TabbedContent).active == pane_id:
+            self.query_one(selector).focus()
 
     def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated) -> None:
         if event.pane.id != self.query_one(TabbedContent).active:
@@ -92,7 +92,7 @@ class MatchcutApp(App):
             self._focus_run_view()
         elif event.pane.id == "tab-shots":
             # The tab switch cleared focus; hand it to the table so down/u work at once.
-            self.call_after_refresh(self.query_one("#shots-table").focus)
+            self.call_after_refresh(self._focus_if_active, "tab-shots", "#shots-table")
 
     # -- event pump -------------------------------------------------------------
     def _pump(self) -> None:

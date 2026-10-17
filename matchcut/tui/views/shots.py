@@ -23,7 +23,8 @@ class ShotsView(Horizontal):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._state: Optional[RunState] = None
-        self._loaded_for: Optional[int] = None
+        self._fingerprint: Optional[tuple] = None  # identity of the data last rendered
+        self._shown: Optional[tuple] = None  # (shot index, fingerprint) last shown in the detail pane
 
     def compose(self) -> ComposeResult:
         yield DataTable(id="shots-table")
@@ -41,8 +42,22 @@ class ShotsView(Horizontal):
         table.add_columns("#", "Start", "End", "Dur", "Subject", "Size", "Move", "Q", "Use")
 
     # -- data --------------------------------------------------------------
+    def _data_fingerprint(self, state: RunState) -> tuple:
+        parts = []
+        for name in ("shots.json", "descriptions.json"):
+            try:
+                st = (state.workspace / name).stat()
+                parts.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                parts.append(None)
+        return tuple(parts)
+
     def refresh_from_state(self, state: RunState) -> None:
         self._state = state
+        fingerprint = self._data_fingerprint(state)
+        if fingerprint == self._fingerprint:
+            return  # nothing changed on disk: keep the table, cursor and frames as they are
+        self._fingerprint = fingerprint
         table = self.query_one("#shots-table", DataTable)
         cursor = table.cursor_row
         table.clear()
@@ -65,6 +80,7 @@ class ShotsView(Horizontal):
             table.move_cursor(row=min(cursor, table.row_count - 1))
             self._show(self.current_shot_index())
         else:
+            self._shown = None
             self.query_one("#shot-desc", Static).update("(no shots yet: run the pipeline)")
 
     def current_shot_index(self) -> Optional[int]:
@@ -78,7 +94,8 @@ class ShotsView(Horizontal):
             return None
 
     def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self._show(int(str(event.row_key.value)) if event.row_key is not None else None)
+        # Read the live cursor: events queued while the table was rebuilt may be stale.
+        self._show(self.current_shot_index())
 
     def _show(self, index: Optional[int]) -> None:
         if self._state is None or index is None:
@@ -88,7 +105,9 @@ class ShotsView(Horizontal):
         media = self._state.media()
         if shot is None or media is None:
             return
-        self._loaded_for = index
+        if self._shown == (index, self._fingerprint):
+            return  # already showing this shot from this data
+        self._shown = (index, self._fingerprint)
         cache = FrameCache(media.path, self._state.workspace / "frames", self._state.config.sampling)
         times = shot_sample_times(shot, 3)
         for fid, t in zip(("#shot-head", "#shot-mid", "#shot-tail"), times):
@@ -127,6 +146,7 @@ class ShotsView(Horizontal):
         entry["usable"] = not entry.get("usable", True)
         path.write_text(json.dumps(data, indent=2))
         self._state.invalidate(str(path))
+        self._fingerprint = None  # force the rebuild even if the mtime did not move
         bridge = getattr(self.app, "bridge", None)
         if bridge is not None:
             bridge.set_descriptions({int(k): v for k, v in data.items()})
