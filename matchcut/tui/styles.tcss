@@ -7,3 +7,8 @@ TabbedContent { height: 1fr; }
 #checkpoint { height: auto; max-height: 14; border: round $secondary; padding: 0 1; }
 #checkpoint-summary { height: auto; max-height: 10; }
 #help { padding: 1 2; }
+#shots-table { width: 1fr; }
+#shot-detail { width: 60%; border-left: solid $primary; padding: 0 1; }
+#shot-frames { height: 12; }
+#shot-frames > Frame { width: 1fr; margin-right: 1; }
+#shot-desc { height: auto; }
