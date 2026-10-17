@@ -86,11 +86,21 @@ beats  b1 Setup ─────── b2 Develop ──────── b3 Res
   reflected in the stage shown).
 
 ### Junction identity across stages
-A junction is identified by its two clip ids. Passes keep clip ids, so the
-same junction can be followed from the rough cut through every pass. Stages
-where the two clips are not adjacent (a reorder created or removed the
-junction) are omitted from its history; the first stage where it exists is
-its baseline.
+A junction is the cut between two consecutive clips of the reference stage.
+Passes drop, merge, insert and renumber clips, so ids do not carry across
+stages. An earlier stage's clip is the same clip when it comes from the same
+source shot and its source range overlaps (the best overlap wins), and the
+junction has a state at every stage where its two clips are adjacent; the first
+such stage is its baseline.
+
+Decisions are attributed per stage: the ones a stage added (its history beyond
+the previous stage's) are read against the junction's ids in the previous stage
+first, because a pass records ids before it renumbers, and against the stage's
+own ids only for clips the pass created. Decisions naming the junction's two
+clips (at most three ids) are junction-level; single-id decisions (trim, drop,
+set_transition) on one of its clips are clip-level and only explain it when
+nothing else does; whole-timeline records (assessment, fit, reorder) are not
+attributed.
 
 ## Keeping or undoing a decision: editorial pins
 

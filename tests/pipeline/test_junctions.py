@@ -9,6 +9,7 @@ import pytest
 from matchcut.pipeline import cli
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.junctions import (
+    _locate,
     build_junctions,
     frames_delta,
     load_stage_timelines,
@@ -153,3 +154,88 @@ def test_cli_lists_and_details_junctions(mc_ctx, tmp_path, capsys):
     assert "why: matchcut:" in detail and "combined" in detail and "history:" in detail
     assert cli.main(["junctions", str(ws), "--index", "9"]) == 1
     assert cli.main(["junctions", str(tmp_path / "nope")]) == 1
+
+
+# -- passes renumber, drop and trim clips: junctions follow lineage, not ids -------------------
+def test_a_renumbering_pass_does_not_attach_the_wrong_earlier_clips():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 3.4), clip("c003", 2, 6.0, 8.0)])
+    drop = Decision("continuity", "drop", ["c002"], "too short")
+    cont = tl("continuity", [clip("c001", 0, 0.0, 2.0), clip("c002", 2, 6.0, 8.0)], list(rough.history) + [drop])
+    js = build_junctions([("roughcut", rough), ("continuity", cont)])
+    assert len(js) == 1
+    j = js[0]
+    assert (j.out_clip, j.in_clip, j.out_shot, j.in_shot) == ("c001", "c002", 0, 2)
+    assert [s.stage for s in j.states] == ["continuity"]
+    assert j.baseline.in_time == 6.0 and j.history() == ["continuity: cut at out 2.00s / in 6.00s"]
+    assert drop not in j.decisions  # c002 in the drop is the rough cut's shot-1 clip, not this junction's in-clip
+    assert j.why() == "no pass changed this junction"
+
+
+def test_a_junction_survives_renumbering_and_keeps_its_own_decisions():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 3.4), clip("c003", 2, 6.0, 8.0), clip("c004", 3, 9.0, 11.0)])
+    drop = Decision("continuity", "drop", ["c002"], "too short")
+    fix = Decision("continuity", "match_cut", ["c003", "c004"], "kept", 0.5)
+    cont = tl("continuity", [clip("c001", 0, 0.0, 2.0), clip("c002", 2, 6.0, 8.0), clip("c003", 3, 9.0, 11.0)], [drop, fix])
+    js = build_junctions([("roughcut", rough), ("continuity", cont)])
+    last = js[1]  # shot 2 -> shot 3, now c002 -> c003
+    assert (last.out_clip, last.in_clip) == ("c002", "c003")
+    assert [s.stage for s in last.states] == ["roughcut", "continuity"]
+    assert last.baseline.out_time == 8.0 and last.baseline.in_time == 9.0
+    assert last.decisions == [fix]  # recorded in rough-cut numbering, attributed through it
+    assert drop not in js[0].decisions
+
+
+def test_a_single_clip_trim_is_clip_level_and_explains_the_junction_when_nothing_else_does():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    trim = Decision("pacing", "trim", ["c001"], "trimmed 0.20s of dead air")
+    paced = tl("pacing", [clip("c001", 0, 0.0, 1.8), clip("c002", 1, 3.0, 5.0)], [trim])
+    j = build_junctions([("roughcut", rough), ("pacing", paced)])[0]
+    assert j.decisions == [trim] and j.clip_level == [True]
+    assert j.why() == "pacing: trimmed 0.20s of dead air"
+    assert j.history()[-1] == "pacing: out -0.20s (-5f)"
+
+
+def test_a_junction_level_decision_outranks_a_clip_level_one():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    both = [Decision("transitions", "dissolve", ["c001", "c002"], "dissolve 0.30s"), Decision("pacing", "trim", ["c001"], "trimmed")]
+    final = tl("final", [clip("c001", 0, 0.0, 1.8), clip("c002", 1, 3.0, 5.0)], both)
+    j = build_junctions([("roughcut", rough), ("final", final)])[0]
+    assert j.clip_level == [False, True]
+    assert j.why() == "transitions: dissolve 0.30s"
+
+
+def test_whole_timeline_decisions_are_not_attributed_to_a_junction():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    ids = ["c001", "c002", "c003"]
+    polished = tl("polish", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)], [Decision("polish", "assessment", ids + ["c004"], "overall: fine")])
+    js = build_junctions([("roughcut", rough), ("polish", polished)])
+    assert all(j.decisions == [] and j.why() == "no pass changed this junction" for j in js)
+
+
+def test_cli_reports_a_corrupt_config(tmp_path, capsys):
+    (tmp_path / "config.json").write_text("{not json")
+    assert cli.main(["junctions", str(tmp_path)]) == 1
+    assert "config.json" in capsys.readouterr().err
+
+
+def test_junctions_through_every_default_pass_keep_their_lineage(mc_ctx, tmp_path):
+    rough = designed_rough_cut(mc_ctx)
+    run_passes(rough, mc_ctx, ["matchcut", "continuity", "pacing", "transitions", "polish"], save_dir=tmp_path)
+    stages = [("roughcut", designed_rough_cut(mc_ctx))] + [(p.stem.split("_", 1)[-1], Timeline.load(p)) for p in sorted(tmp_path.glob("*.json"))]
+    assert len(stages) >= 4
+    by_stage = dict(stages)
+    final = stages[-1][1]
+    js = build_junctions(stages)
+    assert len(js) == len(final.clips) - 1
+    for j in js:
+        assert j.states and j.current.stage == stages[-1][0]
+        for state in j.states:
+            t = by_stage[state.stage]
+            i = _locate(t, final.clips[j.index], final.clips[j.index + 1])
+            assert i is not None
+            for got, ref in ((t.clips[i], final.clips[j.index]), (t.clips[i + 1], final.clips[j.index + 1])):
+                assert got.shot_index == ref.shot_index
+                assert max(got.source_in, ref.source_in) < min(got.source_out, ref.source_out)
+    match = next(j for j in js if (j.out_shot, j.in_shot) == (0, 2))
+    assert match.latest("match_cut") is not None
+    assert match.why().startswith("matchcut:")

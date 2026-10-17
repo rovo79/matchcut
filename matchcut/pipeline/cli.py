@@ -92,7 +92,11 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
     if not cfg_path.exists():
         print(f"no workspace at {ws} (config.json missing)", file=sys.stderr)
         return 1
-    cfg = PipelineConfig.load(cfg_path)
+    try:
+        cfg = PipelineConfig.load(cfg_path)
+    except Exception as exc:  # corrupt or hand-edited JSON
+        print(f"cannot read {cfg_path}: {exc}", file=sys.stderr)
+        return 1
     stages = load_stage_timelines(ws)
     if not stages:
         print(f"no timelines in {ws}: run the pipeline first", file=sys.stderr)

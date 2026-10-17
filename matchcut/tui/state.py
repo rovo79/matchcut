@@ -197,7 +197,7 @@ class RunState:
         return self._load(self.workspace / "music.json", MusicAnalysis.load)
 
     def _timeline_entries(self) -> List[Tuple[str, Path]]:
-        """(stage, path) for every place a timeline can live, in stage order: the one copy of the layout."""
+        """(stage, path) for every place a timeline can live, in stage order; delegates to ``junctions.stage_timeline_paths``, the one copy of the layout."""
         return stage_timeline_paths(self.workspace)
 
     def timeline_files(self) -> List[Path]:

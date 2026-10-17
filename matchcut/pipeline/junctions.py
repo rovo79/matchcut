@@ -1,7 +1,9 @@
 """Junctions: the cut between two consecutive clips, followed through every stage of a cut.
 
-A junction is identified by its two clip ids. Passes keep clip ids, so the same
-junction can be traced from the rough cut through each pass to the final cut.
+A junction is identified by the two clips of the reference stage. Passes drop,
+merge, insert and renumber clips, so earlier stages are matched by lineage (same
+source shot, overlapping source range), not by id, and a pass's decisions are
+attributed through the ids that were valid when the pass recorded them.
 Scores come from the same MatchScorer the match-cut pass uses, rebuilt from the
 workspace's cached analysis, so the numbers shown are the numbers the pass compared.
 """
@@ -9,12 +11,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Set, Tuple
 
 from .config import PipelineConfig
 from .features import Analysis
 from .matching import MatchScore, MatchScorer
-from .timeline import Decision, Timeline
+from .timeline import Clip, Decision, Timeline
 
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
@@ -93,7 +95,8 @@ class Junction:
     in_beat: str
     fps: float
     states: List[JunctionState] = field(default_factory=list)  # stage order; only stages where the clips are adjacent
-    decisions: List[Decision] = field(default_factory=list)  # every decision naming both clips
+    decisions: List[Decision] = field(default_factory=list)  # stage order: decisions that name this junction or one of its clips
+    clip_level: List[bool] = field(default_factory=list)  # parallel to decisions: True when it names only one of the two clips (a trim, a drop)
 
     @property
     def beat_boundary(self) -> bool:
@@ -125,13 +128,23 @@ class Junction:
     def pinned(self) -> bool:
         return any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
 
+    def _is_clip_level(self, i: int) -> bool:
+        return i < len(self.clip_level) and self.clip_level[i]
+
     def why(self) -> str:
-        d = (
-            next((x for x in reversed(self.decisions) if x.pass_name == "editor"), None)
-            or self.latest("match_cut", "rejected", "jump_cut_risk")
-            or self.latest()
+        """The decision that best explains this junction: editor, then the match-cut verdicts, then pass decisions about the junction, then about one of its clips."""
+        ranked = list(enumerate(self.decisions))[::-1]
+        tiers = (
+            lambda i, d: d.pass_name == "editor",
+            lambda i, d: d.action in ("match_cut", "rejected", "jump_cut_risk"),
+            lambda i, d: not self._is_clip_level(i),
+            lambda i, d: True,
         )
-        return f"{d.pass_name}: {d.detail}" if d is not None else "no pass changed this junction"
+        for tier in tiers:
+            d = next((d for i, d in ranked if tier(i, d)), None)
+            if d is not None:
+                return f"{d.pass_name}: {d.detail}"
+        return "no pass changed this junction"
 
     def history(self) -> List[str]:
         b = self.baseline
@@ -143,6 +156,30 @@ class Junction:
         return lines
 
 
+def _overlap(x: Clip, r: Clip) -> float:
+    """Seconds of source footage two clips share, 0 when they come from different shots."""
+    if x.shot_index != r.shot_index:
+        return 0.0
+    return max(0.0, min(x.source_out, r.source_out) - max(x.source_in, r.source_in))
+
+
+def _lineage(x: Clip, r: Clip) -> bool:
+    return x.shot_index == r.shot_index and max(x.source_in, r.source_in) < min(x.source_out, r.source_out)
+
+
+def _locate(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
+    """Index i where clip i descends from ``a_ref`` and clip i+1 from ``b_ref``; the best-overlapping pair if several."""
+    best: Optional[int] = None
+    best_overlap = -1.0
+    for i in range(len(timeline.clips) - 1):
+        a, b = timeline.clips[i], timeline.clips[i + 1]
+        if _lineage(a, a_ref) and _lineage(b, b_ref):
+            overlap = _overlap(a, a_ref) + _overlap(b, b_ref)
+            if overlap > best_overlap:
+                best, best_overlap = i, overlap
+    return best
+
+
 def _state(stage: str, timeline: Timeline, i: int, scorer: Optional[MatchScorer]) -> JunctionState:
     a, b = timeline.clips[i], timeline.clips[i + 1]
     score: Optional[MatchScore] = None
@@ -152,6 +189,40 @@ def _state(stage: str, timeline: Timeline, i: int, scorer: Optional[MatchScorer]
         except Exception:
             score = None
     return JunctionState(stage, a.source_out, b.source_in, b.transition_in.kind, b.transition_in.duration, a.locked_out, b.locked_in, score)
+
+
+def _attribute(
+    new: Sequence[Decision],
+    prev_ids: Optional[Tuple[str, str]],
+    cur_ids: Optional[Tuple[str, str]],
+    prev_all: Optional[Set[str]],
+    cur_all: Set[str],
+) -> List[Tuple[Decision, bool]]:
+    """The (decision, clip_level) pairs among a stage's new decisions that concern the junction.
+
+    A pass records the ids of the timeline it was given, then renumbers. So a decision is read
+    against the junction's ids in the previous stage first; only a decision whose ids all exist
+    in this stage but not all in the previous one (a clip the pass created) is read against this
+    stage's ids. In the first stage there is no previous one and its own ids apply.
+    """
+    found: List[Tuple[Decision, bool]] = []
+    for d in new:
+        ids = d.clip_ids
+        if not ids or len(ids) > 3:  # whole-timeline records: assessment, fit, reorder
+            continue
+        candidates: List[Tuple[str, str]] = []
+        if prev_ids is not None:
+            candidates.append(prev_ids)
+        if cur_ids is not None and (prev_all is None or (all(i in cur_all for i in ids) and not all(i in prev_all for i in ids))):
+            candidates.append(cur_ids)
+        for pair in candidates:
+            if all(i in ids for i in pair):
+                found.append((d, False))
+                break
+            if len(ids) == 1 and ids[0] in pair:
+                found.append((d, True))
+                break
+    return found
 
 
 def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[MatchScorer] = None, upto: Optional[str] = None) -> List[Junction]:
@@ -166,11 +237,22 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
     for i in range(len(ref.clips) - 1):
         a, b = ref.clips[i], ref.clips[i + 1]
         j = Junction(i, a.id, b.id, a.shot_index, b.shot_index, a.beat_id, b.beat_id, ref.fps)
-        for stage, timeline in considered:
-            ids = [c.id for c in timeline.clips]
-            if a.id in ids and b.id in ids and ids.index(b.id) == ids.index(a.id) + 1:
-                j.states.append(_state(stage, timeline, ids.index(a.id), scorer))
-        j.decisions = [d for d in ref.history if a.id in d.clip_ids and b.id in d.clip_ids]
+        at: List[Optional[int]] = []  # index of the junction's first clip in each considered stage
+        for k, (stage, timeline) in enumerate(considered):
+            idx = i if k == len(considered) - 1 else _locate(timeline, a, b)
+            at.append(idx)
+            if idx is not None:
+                j.states.append(_state(stage, timeline, idx, scorer))
+        for k, (_, timeline) in enumerate(considered):
+            prev = considered[k - 1][1] if k else None
+            new = timeline.history[len(prev.history):] if prev is not None else timeline.history
+            cur_ids = (timeline.clips[at[k]].id, timeline.clips[at[k] + 1].id) if at[k] is not None else None
+            prev_idx = at[k - 1] if k else None
+            prev_ids = (prev.clips[prev_idx].id, prev.clips[prev_idx + 1].id) if prev is not None and prev_idx is not None else None
+            prev_all = {c.id for c in prev.clips} if prev is not None else None
+            for d, clip_level in _attribute(new, prev_ids, cur_ids, prev_all, {c.id for c in timeline.clips}):
+                j.decisions.append(d)
+                j.clip_level.append(clip_level)
         out.append(j)
     return out
 
