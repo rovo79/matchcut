@@ -10,10 +10,9 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Static
 
 from matchcut.pipeline.sampling import FrameCache
-from ..state import RunState
+from ..state import RunState, file_fingerprint
 from ..widgets.frame import Frame
 from ..widgets.timeline import TimelineTrack
-from .story import file_fingerprint, timeline_files
 
 
 class CutView(Vertical):
@@ -49,8 +48,8 @@ class CutView(Vertical):
     @staticmethod
     def _data_fingerprint(state: RunState) -> tuple:
         ws = state.workspace
-        files = [ws / "probe.json", ws / "music.json"] + timeline_files(ws)
-        return (file_fingerprint(files), state.config.music.path, state.config.music.start)
+        files = [ws / "probe.json", ws / "music.json"] + state.timeline_files()
+        return (tuple(file_fingerprint(f) for f in files), state.config.music.path, state.config.music.start)
 
     def refresh_from_state(self, state: RunState) -> None:
         self._state = state

@@ -26,6 +26,15 @@ PRICES: Dict[str, Tuple[float, float]] = {
 }
 
 
+def file_fingerprint(path: Path) -> Optional[Tuple[int, int]]:
+    """(mtime_ns, size) of a file, None when it is missing: a cheap identity of what a view last rendered."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
 @dataclass
 class StageStatus:
     name: str
@@ -183,28 +192,26 @@ class RunState:
             return None
         return self._load(self.workspace / "music.json", MusicAnalysis.load)
 
+    def _timeline_entries(self) -> List[Tuple[str, Path]]:
+        """(stage, path) for every place a timeline can live, in stage order: the one copy of the layout."""
+        ws = self.workspace
+        entries = [("roughcut", ws / "roughcut.json")]
+        entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
+        entries.append(("final", ws / "final.json"))
+        return entries
+
+    def timeline_files(self) -> List[Path]:
+        """Every file a timeline stage can come from (present or not), for change fingerprints."""
+        return [path for _, path in self._timeline_entries()]
+
     def _timeline_path(self, stage: str) -> Optional[Path]:
-        if stage == "roughcut":
-            return self.workspace / "roughcut.json"
-        if stage == "final":
-            return self.workspace / "final.json"
-        passes_dir = self.workspace / "passes"
-        if passes_dir.exists():
-            for p in sorted(passes_dir.glob("*.json")):
-                if p.stem.split("_", 1)[-1] == stage:
-                    return p
+        for name, path in self._timeline_entries():
+            if name == stage:
+                return path
         return None
 
     def timeline_stages(self) -> List[str]:
-        out: List[str] = []
-        if (self.workspace / "roughcut.json").exists():
-            out.append("roughcut")
-        passes_dir = self.workspace / "passes"
-        if passes_dir.exists():
-            out += [p.stem.split("_", 1)[-1] for p in sorted(passes_dir.glob("*.json"))]
-        if (self.workspace / "final.json").exists():
-            out.append("final")
-        return out
+        return [name for name, path in self._timeline_entries() if path.exists()]
 
     def timeline(self, stage: str) -> Optional[Timeline]:
         path = self._timeline_path(stage)

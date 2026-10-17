@@ -13,7 +13,7 @@ from textual.widgets import DataTable, Static
 
 from matchcut.pipeline.sampling import FrameCache, shot_sample_times
 from .. import images
-from ..state import RunState
+from ..state import RunState, file_fingerprint
 from ..widgets.frame import Frame
 
 
@@ -43,14 +43,7 @@ class ShotsView(Horizontal):
 
     # -- data --------------------------------------------------------------
     def _data_fingerprint(self, state: RunState) -> tuple:
-        parts = []
-        for name in ("shots.json", "descriptions.json"):
-            try:
-                st = (state.workspace / name).stat()
-                parts.append((st.st_mtime_ns, st.st_size))
-            except OSError:
-                parts.append(None)
-        return tuple(parts)
+        return tuple(file_fingerprint(state.workspace / name) for name in ("shots.json", "descriptions.json"))
 
     def refresh_from_state(self, state: RunState) -> None:
         self._state = state

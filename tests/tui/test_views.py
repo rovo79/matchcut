@@ -1,4 +1,6 @@
 import json
+import os
+import shutil
 
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.tui.app import MatchcutApp
@@ -270,3 +272,63 @@ async def _cut_idempotent(mock_workspace):
             app.refresh_views()
         await pilot.pause()
         assert len(shown) == before and len(redraws) == 1
+
+
+def _copied_workspace(mock_workspace, tmp_path):
+    """A private copy of the finished run, so a test may rewrite its files."""
+    ws = tmp_path / "ws"
+    shutil.copytree(mock_workspace, ws)
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    cfg.workspace = str(ws)
+    return cfg, ws
+
+
+def _rewrite(path, data):
+    path.write_text(json.dumps(data, indent=2))
+    later = path.stat().st_mtime + 5  # a quick rewrite may land on the same mtime tick
+    os.utime(path, (later, later))
+
+
+def test_story_view_rebuilds_when_the_narrative_changes(mock_workspace, tmp_path):
+    run_async(_story_changed(*_copied_workspace(mock_workspace, tmp_path)))
+
+
+async def _story_changed(cfg, ws):
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("3")
+        await pilot.pause()
+        view = app.query_one(StoryView)
+        before = len(view.query(".beat-card"))
+        assert before > 0
+        narrative = json.loads((ws / "narrative.json").read_text())
+        narrative["beats"].append(dict(narrative["beats"][-1], id="extra", title="An extra beat"))
+        _rewrite(ws / "narrative.json", narrative)
+        app.refresh_views()
+        await wait_for(pilot, lambda: len(view.query(".beat-card")) == before + 1)
+
+
+def test_cut_view_rebuilds_when_the_timeline_changes(mock_workspace, tmp_path):
+    run_async(_cut_changed(*_copied_workspace(mock_workspace, tmp_path)))
+
+
+async def _cut_changed(cfg, ws):
+    app = MatchcutApp(cfg)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("4")
+        await pilot.pause()
+        view = app.query_one(CutView)
+        track = view.query_one("#track", TimelineTrack)
+        redraws = []
+        original = track.set_timeline
+        track.set_timeline = lambda *a, **k: (redraws.append(1), original(*a, **k))[1]
+        app.refresh_views()
+        assert redraws == []  # untouched files: no rebuild
+        final = json.loads((ws / "final.json").read_text())
+        clips = len(app.state.timeline("final").clips)
+        final["clips"] = final["clips"][:-1]
+        _rewrite(ws / "final.json", final)
+        app.refresh_views()
+        await pilot.pause()
+        assert len(redraws) == 1
+        assert len(track.timeline.clips) == clips - 1

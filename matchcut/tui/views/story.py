@@ -1,34 +1,15 @@
 """Story view: logline, theme, beats as cards, music energy curve."""
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Optional
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
-from ..state import RunState
+from ..state import RunState, file_fingerprint
 from ..widgets.sparkline import EnergyCurve
-
-
-def file_fingerprint(paths: Iterable[Path]) -> Tuple[Optional[Tuple[int, int]], ...]:
-    """(mtime_ns, size) per path, None for a missing file: cheap identity of what a view last rendered."""
-    out: List[Optional[Tuple[int, int]]] = []
-    for path in paths:
-        try:
-            st = path.stat()
-            out.append((st.st_mtime_ns, st.st_size))
-        except OSError:
-            out.append(None)
-    return tuple(out)
-
-
-def timeline_files(workspace: Path) -> List[Path]:
-    """Every file a timeline stage can come from, in stage order."""
-    passes = sorted((workspace / "passes").glob("*.json"))
-    return [workspace / "roughcut.json"] + passes + [workspace / "final.json"]
 
 
 class StoryView(VerticalScroll):
@@ -43,8 +24,8 @@ class StoryView(VerticalScroll):
     @staticmethod
     def _data_fingerprint(state: RunState) -> tuple:
         ws = state.workspace
-        files = [ws / "narrative.json", ws / "music.json"] + timeline_files(ws)
-        return (file_fingerprint(files), state.config.music.path, state.config.music.start)
+        files = [ws / "narrative.json", ws / "music.json"] + state.timeline_files()
+        return (tuple(file_fingerprint(f) for f in files), state.config.music.path, state.config.music.start)
 
     def refresh_from_state(self, state: RunState) -> None:
         fingerprint = self._data_fingerprint(state)
