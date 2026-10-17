@@ -31,6 +31,7 @@ class Context:
     narrative: Dict[str, Any] = field(default_factory=dict)
     music: Optional[MusicAnalysis] = None
     notes: Dict[str, List[str]] = field(default_factory=dict)  # director's notes per stage, from checkpoints
+    constraints: List[str] = field(default_factory=list)  # editor constraints for the rough cut (from pins)
 
     @property
     def scorer(self) -> MatchScorer:
@@ -111,11 +112,12 @@ class Context:
         )
 
     def notes_text(self, stage: str) -> str:
-        """Prompt paragraph with the director's notes recorded for ``stage``."""
+        """Prompt paragraph with the director's notes recorded for ``stage`` (plus editor constraints for the rough cut)."""
         notes = self.notes.get(stage, [])
-        if not notes:
-            return "Director's notes: (none)"
-        return "Director's notes:\n" + "\n".join(f"- {n}" for n in notes)
+        text = "Director's notes: (none)" if not notes else "Director's notes:\n" + "\n".join(f"- {n}" for n in notes)
+        if stage == "roughcut" and self.constraints:
+            text += "\nEditor constraints (must hold):\n" + "\n".join(f"- {c}" for c in self.constraints)
+        return text
 
 
 def direction_label(v: np.ndarray) -> str:

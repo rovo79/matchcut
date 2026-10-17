@@ -1,0 +1,116 @@
+"""Editorial pins: junctions the editor has locked or reverted, kept across regenerations.
+
+A pin names a junction by its two shots (clip ids change when a cut is
+regenerated; shots do not) and stores the cut points to hold. Pins are applied
+to the rough cut before any pass runs: both ends of the junction are locked,
+and every pass already leaves locked ends alone.
+"""
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from .timeline import Decision, Timeline
+
+
+@dataclass
+class Pin:
+    out_shot: int
+    in_shot: int
+    out_time: float
+    in_time: float
+    origin: str = "locked"  # "locked": keep the inspected points; "reverted": back to the first cut's points
+    note: str = ""
+
+    @property
+    def key(self) -> Tuple[int, int]:
+        return (self.out_shot, self.in_shot)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Pin":
+        return cls(int(d["out_shot"]), int(d["in_shot"]), float(d["out_time"]), float(d["in_time"]), str(d.get("origin", "locked")), str(d.get("note", "")))
+
+
+class PinStore:
+    """``workspace/editorial.json``: {"pins": [...]}, written atomically."""
+
+    def __init__(self, ws: Path):
+        self.path = Path(ws) / "editorial.json"
+
+    def load(self) -> List[Pin]:
+        try:
+            data = json.loads(self.path.read_text())
+            return [Pin.from_dict(d) for d in data.get("pins", [])]
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return []
+
+    def _save(self, pins: Sequence[Pin]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"pins": [p.to_dict() for p in pins]}, indent=2))
+        os.replace(tmp, self.path)
+
+    def get(self, out_shot: int, in_shot: int) -> Optional[Pin]:
+        return next((p for p in self.load() if p.key == (out_shot, in_shot)), None)
+
+    def put(self, pin: Pin) -> None:
+        pins = self.load()
+        for i, p in enumerate(pins):
+            if p.key == pin.key:
+                pins[i] = pin
+                break
+        else:
+            pins.append(pin)
+        self._save(pins)
+
+    def remove(self, out_shot: int, in_shot: int) -> bool:
+        pins = self.load()
+        kept = [p for p in pins if p.key != (out_shot, in_shot)]
+        if len(kept) == len(pins):
+            return False
+        self._save(kept)
+        return True
+
+
+def _snap(t: float, fps: float) -> float:
+    return round(round(t * fps) / fps, 3) if fps > 0 else round(t, 3)
+
+
+def apply_pins(tl: Timeline, pins: Sequence[Pin], bounds: Dict[int, Tuple[float, float]], min_clip: float) -> Tuple[Timeline, List[Decision]]:
+    """A copy of ``tl`` with every placeable pin applied and locked, plus the decisions taken."""
+    out = tl.copy()
+    decisions: List[Decision] = []
+    for pin in pins:
+        pair = next(((a, b) for a, b in zip(out.clips, out.clips[1:]) if (a.shot_index, b.shot_index) == pin.key), None)
+        if pair is None:
+            decisions.append(Decision("editor", "pin_unplaced", [], f"shot {pin.out_shot} -> shot {pin.in_shot} are not adjacent in this cut", None, pin.to_dict()))
+            continue
+        a, b = pair
+        a_lo = a.source_in + min_clip
+        a_hi = bounds.get(a.shot_index, (a.source_in, a.source_out))[1]
+        b_lo = bounds.get(b.shot_index, (b.source_in, b.source_out))[0]
+        b_hi = b.source_out - min_clip
+        if a_lo > a_hi or b_lo > b_hi:
+            decisions.append(Decision("editor", "pin_unplaced", [a.id, b.id], "not enough room in these clips for the pinned points", None, pin.to_dict()))
+            continue
+        out_t = min(max(_snap(pin.out_time, out.fps), a_lo), a_hi)
+        in_t = min(max(_snap(pin.in_time, out.fps), b_lo), b_hi)
+        a.source_out, b.source_in = round(out_t, 3), round(in_t, 3)
+        a.locked_out = b.locked_in = True
+        for c in (a, b):
+            if "pinned" not in c.tags:
+                c.tags.append("pinned")
+        detail = f"{pin.origin} by the editor: out {a.source_out:.2f}s, in {b.source_in:.2f}s"
+        decisions.append(Decision("editor", "pinned", [a.id, b.id], detail, None, dict(pin.to_dict(), out=a.source_out, in_=b.source_in)))
+    out.history.extend(decisions)
+    return out, decisions
+
+
+def pin_constraints(pins: Sequence[Pin]) -> List[str]:
+    return [f"keep shot {p.out_shot} immediately followed by shot {p.in_shot} (an editor-locked junction)" for p in pins]

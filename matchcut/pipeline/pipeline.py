@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from . import events, stages
+from . import editorial, events, stages
 from .audio import MusicAnalysis, analyse_music
 from .config import PipelineConfig
 from .context import Context
@@ -293,6 +293,7 @@ class Pipeline:
                 log.info("rough cut: cached")
                 return Timeline.load(path)
             log.info("rough cut: assembling")
+            ctx.constraints = editorial.pin_constraints(editorial.PinStore(self.ws).load())
             tl = stages.rough_cut(ctx)
             tl.save(path)
             return tl
@@ -303,6 +304,12 @@ class Pipeline:
     def refine(self, timeline: Optional[Timeline] = None, passes: Optional[List[str]] = None) -> Timeline:
         ctx = self.narrative()
         tl = timeline or self.rough_cut()
+        pins = editorial.PinStore(self.ws).load()
+        if pins:
+            tl, pin_decisions = editorial.apply_pins(tl, pins, ctx.shot_bounds, self.cfg.pacing.min_clip_seconds)
+            for d in pin_decisions:
+                log.info("editor: %s %s", d.action, d.detail)
+                self._emit(events.Decision(pass_name=d.pass_name, action=d.action, clip_ids=list(d.clip_ids), detail=d.detail, score=d.score, data=dict(d.data)))
         names = list(passes or self.cfg.passes)
         passes_dir = self.ws / "passes"
         passes_dir.mkdir(exist_ok=True)
