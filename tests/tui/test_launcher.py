@@ -101,3 +101,17 @@ def test_other_missing_modules_propagate(demo_video, tmp_path, monkeypatch, miss
 
 def test_install_hint_names_the_requirements_file():
     assert "requirements-tui.txt" in launcher.INSTALL_HINT
+
+
+def test_a_terminal_without_a_size_prints_how_to_fix_it_instead_of_crashing(demo_video, tmp_path, monkeypatch, capsys):
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "textual_image.widget":
+            raise ZeroDivisionError("integer division or modulo by zero")  # textual-image's probe on a 0x0 pty
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    assert main([str(demo_video), "-w", str(tmp_path), "--backend", "mock"]) == 1
+    err = capsys.readouterr().err
+    assert err.strip() == 'matchcut: the terminal reports no size (0x0); resize it or run "stty rows 40 cols 120", then try again'

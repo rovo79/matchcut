@@ -10,6 +10,7 @@ from typing import List, Optional
 from matchcut.pipeline.config import PipelineConfig
 
 INSTALL_HINT = "The TUI needs textual and textual-image: pip install -r requirements-tui.txt"
+NO_SIZE_HINT = 'matchcut: the terminal reports no size (0x0); resize it or run "stty rows 40 cols 120", then try again'
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -68,6 +69,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         if not any(missing == pkg or missing.startswith(pkg + ".") for pkg in ("textual", "textual_image")):
             raise  # a real bug elsewhere: show the traceback
         print(f"{INSTALL_HINT}\n({e})", file=sys.stderr)
+        return 1
+    except ZeroDivisionError:  # textual-image's probe divides by the terminal's size, which a 0x0 pty reports
+        print(NO_SIZE_HINT, file=sys.stderr)
         return 1
     app = MatchcutApp(cfg)
     app.run()

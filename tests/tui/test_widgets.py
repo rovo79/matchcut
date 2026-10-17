@@ -312,33 +312,46 @@ def editor_decision(action, out_time, in_time, detail="", **extra):
 
 def test_a_applied_pin_is_not_pending_at_any_inspected_stage():
     j = inspected_junction()
-    j.decisions.append(editor_decision("pinned", 4.88, 7.12, "locked by the editor: out 4.88s, in 7.12s", out=4.88, in_=7.12))
+    applied = editor_decision("pinned", 4.88, 7.12, "locked by the editor: out 4.88s, in 7.12s", out=4.88, in_=7.12)
     for stage in ("roughcut", "final"):
-        plain = render_inspector(j, stage, Pin(1, 3, 4.88, 7.12)).plain
+        plain = render_inspector(j, stage, Pin(1, 3, 4.88, 7.12), pin_decision=applied).plain
         assert "pinned (locked)" in plain and "pending" not in plain and "adjusted" not in plain
+
+
+def test_a_pin_without_a_decision_from_the_latest_stage_is_pending():
+    j = inspected_junction()
+    j.decisions.append(editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12))  # attribution is not what the badge reads
+    assert "pin pending: run again (R) to apply" in render_inspector(j, "final", Pin(1, 3, 4.88, 7.12)).plain
+    assert "pin pending: run again (R) to apply" in render_inspector(j, "final", Pin(1, 3, 4.88, 7.12), pin_decision=None).plain
 
 
 def test_a_clamped_pin_says_where_it_was_placed():
     j = inspected_junction()
-    j.decisions.append(editor_decision("pinned", 4.50, 7.12, out=4.88, in_=7.12))
-    plain = render_inspector(j, "final", Pin(1, 3, 4.50, 7.12)).plain
+    decision = editor_decision("pinned", 4.50, 7.12, out=4.88, in_=7.12)
+    plain = render_inspector(j, "final", Pin(1, 3, 4.50, 7.12), pin_decision=decision).plain
     assert "pinned (locked), adjusted to out 4.88s / in 7.12s to fit the clips" in plain
     assert "pending" not in plain
 
 
 def test_an_unplaced_pin_says_why():
     j = inspected_junction()
-    j.decisions.append(editor_decision("pin_unplaced", 4.70, 7.12, "not enough room in these clips for the pinned points"))
-    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+    decision = editor_decision("pin_unplaced", 4.70, 7.12, "not enough room in these clips for the pinned points")
+    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12), pin_decision=decision).plain
     assert "pin not placed: not enough room in these clips for the pinned points" in plain
     assert "pending" not in plain
 
 
 def test_a_pin_changed_since_the_last_run_is_pending():
     j = inspected_junction()
-    j.decisions.append(editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12))
-    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+    decision = editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12)
+    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12), pin_decision=decision).plain
     assert "pin pending: run again (R) to apply" in plain
+
+
+def test_a_decision_for_other_cut_points_never_counts_as_applied():
+    decision = editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12)
+    plain = render_inspector(inspected_junction(), "final", Pin(1, 3, 4.88, 7.20), pin_decision=decision).plain
+    assert "pin pending" in plain and "pinned (locked)" not in plain
 
 
 def test_match_cut_and_lock_badges_follow_the_inspected_stage():

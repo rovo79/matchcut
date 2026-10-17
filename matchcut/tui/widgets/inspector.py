@@ -6,16 +6,16 @@ from typing import List, Optional
 from rich.text import Text
 
 from matchcut.pipeline.editorial import Pin
-from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frames_delta
+from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frame_delta
+from matchcut.pipeline.timeline import Decision
 
 
 def _same_points(a: float, b: float) -> bool:
     return round(a, 3) == round(b, 3)
 
 
-def _pin_badge(j: Junction, pin: Pin) -> str:
-    """Where the pin stands, judged against the latest stage and the editor's latest decision for this junction."""
-    decision = next((d for d in reversed(j.decisions) if d.pass_name == "editor"), None)
+def _pin_badge(j: Junction, pin: Pin, decision: Optional[Decision]) -> str:
+    """Where the pin stands, judged by the editor's decision in the latest stage's history (``None`` when the latest run has none for this pin)."""
     if decision is None or not (
         _same_points(float(decision.data.get("out_time", float("nan"))), pin.out_time)
         and _same_points(float(decision.data.get("in_time", float("nan"))), pin.in_time)
@@ -26,14 +26,13 @@ def _pin_badge(j: Junction, pin: Pin) -> str:
     if decision.action != "pinned":
         return "pin pending: run again (R) to apply"
     tol = (1.0 / j.fps if j.fps > 0 else 0.04) + 1e-6
-    cur = j.current
-    if abs(cur.out_time - pin.out_time) <= tol and abs(cur.in_time - pin.in_time) <= tol:
+    placed_out, placed_in = float(decision.data.get("out", pin.out_time)), float(decision.data.get("in_", pin.in_time))
+    if abs(placed_out - pin.out_time) <= tol and abs(placed_in - pin.in_time) <= tol:
         return f"pinned ({pin.origin})"
-    placed_out, placed_in = decision.data.get("out", cur.out_time), decision.data.get("in_", cur.in_time)
     return f"pinned ({pin.origin}), adjusted to out {placed_out:.2f}s / in {placed_in:.2f}s to fit the clips"
 
 
-def badges(j: Junction, shown: JunctionState, pin: Optional[Pin]) -> List[str]:
+def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: Optional[Decision] = None) -> List[str]:
     out: List[str] = []
     if j.match_type and shown.locked:
         out.append(f"MATCH CUT ({j.match_type})")
@@ -44,16 +43,16 @@ def badges(j: Junction, shown: JunctionState, pin: Optional[Pin]) -> List[str]:
     if shown.score is not None and shown.score.jump_cut_risk:
         out.append("jump-cut risk")
     if pin is not None:
-        out.append(_pin_badge(j, pin))
+        out.append(_pin_badge(j, pin, pin_decision))
     return out
 
 
-def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool = False) -> Text:
+def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool = False, pin_decision: Optional[Decision] = None) -> Text:
     shown = j.state_at(stage) or j.current
     base = j.baseline
     t = Text()
     t.append(f"Junction {j.index + 1} · {j.out_clip} → {j.in_clip} · shot {j.out_shot} → shot {j.in_shot} · beat {j.out_beat} → {j.in_beat}\n", style="bold")
-    marks = badges(j, shown, pin)
+    marks = badges(j, shown, pin, pin_decision)
     t.append((" · ".join(marks) if marks else "no match cut, lock or pin on this junction") + "\n", style="yellow" if marks else "dim")
     if base.score is None or shown.score is None:
         t.append("scores unavailable (no usable analysis for this workspace)\n", style="dim")
@@ -69,8 +68,8 @@ def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool
             t.append(row + "\n", style="bold" if name == "combined" else "")
         t.append(f"motion type  {shown.score.motion_type}\n", style="dim")
     t.append(
-        f"cut points   out {base.out_time:.2f}s → {shown.out_time:.2f}s [{frames_delta(shown.out_time - base.out_time, j.fps)}]"
-        f"   in {base.in_time:.2f}s → {shown.in_time:.2f}s [{frames_delta(shown.in_time - base.in_time, j.fps)}]\n"
+        f"cut points   out {base.out_time:.2f}s → {shown.out_time:.2f}s [{frame_delta(base.out_time, shown.out_time, j.fps)}]"
+        f"   in {base.in_time:.2f}s → {shown.in_time:.2f}s [{frame_delta(base.in_time, shown.in_time, j.fps)}]\n"
     )
     t.append("why: ", style="bold")
     t.append(j.why() + "\n")

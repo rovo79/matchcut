@@ -4,7 +4,13 @@ from __future__ import annotations
 import json
 import shutil
 
+from types import SimpleNamespace
+
 from matchcut.pipeline.config import PipelineConfig
+from matchcut.pipeline.editorial import Pin, PinStore
+from matchcut.pipeline.junctions import build_junctions, load_stage_timelines
+from matchcut.pipeline.pipeline import Pipeline
+from matchcut.pipeline.sampling import FrameCache
 from matchcut.tui import images
 from matchcut.tui.app import MatchcutApp
 from matchcut.tui.views.edit import EditView
@@ -195,5 +201,144 @@ def test_pins_do_not_re_render_the_frames_of_an_unmoved_junction(mock_workspace,
             await wait_for(pilot, lambda: "pin pending" not in str(app.query_one("#junction-panel").content))
             await pilot.pause()
             assert calls == []  # the workspace was rewritten twice, but the junction and its cut points did not move
+
+    run_async(body())
+
+
+# -- pins judged from the latest stage, whatever stage is inspected ------------------------------
+def refine_in(ws, target=None, pin=None):
+    """Re-run the passes of a workspace copy (mock backend, cached analysis), optionally with a new target and a pin."""
+    cfg = PipelineConfig.load(ws / "config.json")
+    cfg.workspace = str(ws)
+    if target is not None:
+        cfg.target_duration = target
+    if pin is not None:
+        PinStore(ws).put(pin)
+    Pipeline(cfg).refine()
+    return build_junctions(load_stage_timelines(ws))
+
+
+def select_pair(view, key):
+    return next(i for i, j in enumerate(view.junctions) if (j.out_shot, j.in_shot) == key)
+
+
+def test_a_pin_on_a_junction_a_later_pass_created_says_it_was_not_placed(mock_workspace, tmp_path, monkeypatch):
+    ws = own_copy(mock_workspace, tmp_path)
+    made = [j for j in refine_in(ws, target=2.0) if j.baseline.stage != "roughcut"]
+    assert made, "a tight target should drop clips and join their neighbours after the rough cut"
+    j0 = made[0]
+    refine_in(ws, target=2.0, pin=Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3)))
+    notes = []
+
+    async def body():
+        app = app_for(ws)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            await pilot.press(*(["right"] * select_pair(view, (j0.out_shot, j0.in_shot))))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pin not placed:" in panel and "not adjacent in this cut" in panel
+            assert "pin pending" not in panel
+            assert "1 pin(s) not placed" in str(app.query_one("#edit-header").content)
+            await pilot.press("l")
+            assert "not adjacent in the rough cut, so the pin only applies if a regenerated rough cut pairs them" in notes[-1]
+
+    run_async(body())
+
+
+def test_an_applied_pin_reads_pinned_when_the_roughcut_stage_is_inspected(mock_workspace, tmp_path):
+    ws = own_copy(mock_workspace, tmp_path)
+    j0 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j0.out_shot, j0.in_shot)
+    refine_in(ws, pin=Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3)))
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            assert "pinned (locked)" in str(app.query_one("#junction-panel").content)
+            for _ in range(len(view.stages) - 1):
+                await pilot.press("left_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() == "roughcut")
+            assert (view.current_junction().out_shot, view.current_junction().in_shot) == key  # the selection stays on the shot pair
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pinned (locked)" in panel and "pending" not in panel
+
+    run_async(body())
+
+
+def test_the_apply_hint_follows_where_the_run_is(mock_workspace):
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = app.query_one(EditView)
+            idle = view._apply_hint("pinned")
+            assert "next run (R)" in idle and "cached stages are reused" in idle
+            for stage in ("describe", "narrative", "roughcut"):
+                app.bridge = SimpleNamespace(is_running=lambda: True, pending=(stage, {}))
+                assert "applies in this run when you continue" in view._apply_hint("pinned")
+            for pending in (("pass:pacing", {}), None):
+                app.bridge = SimpleNamespace(is_running=lambda: True, pending=pending)
+                hint = view._apply_hint("pinned")
+                assert "applies on the next run (R)" in hint and "continue" not in hint
+            app.bridge = SimpleNamespace(is_running=lambda: False, pending=None)
+            assert view._apply_hint("pinned") == idle
+            app.bridge = None
+
+    run_async(body())
+
+
+def test_the_extracted_frames_sit_on_the_frame_grid(mock_workspace, tmp_path, monkeypatch):
+    ws = own_copy(mock_workspace, tmp_path)
+    asked = []
+
+    class Recording(FrameCache):  # only what the Edit view asks for
+        def frame(self, t, *a, **k):
+            asked.append(t)
+            return super().frame(t, *a, **k)
+
+    monkeypatch.setattr("matchcut.tui.views.edit.FrameCache", Recording)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions) and frames_ready(app))
+            for _ in range(len(view.stages) - 1):
+                await pilot.press("left_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() == "roughcut")
+            await pilot.pause(0.5)
+            fps = view.junctions[0].fps
+            assert len(asked) >= 4 and all(abs(t * fps - round(t * fps)) < 1e-6 for t in asked), asked
+
+    run_async(body())
+
+
+def test_stepping_to_a_stage_without_the_shot_pair_falls_back_to_the_clamped_index(mock_workspace, tmp_path):
+    ws = own_copy(mock_workspace, tmp_path)
+    made = [j for j in refine_in(ws, target=2.0) if j.baseline.stage != "roughcut"]
+    assert made
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            pair = (view.current_junction().out_shot, view.current_junction().in_shot)
+            for _ in range(len(view.stages) - 1):
+                await pilot.press("left_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() == "roughcut")
+            assert 0 <= view.selected < len(view.junctions) and (view.current_junction().out_shot, view.current_junction().in_shot) != pair
+            for _ in range(len(view.stages) - 1):
+                await pilot.press("right_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() == "final")
+            assert 0 <= view.selected < len(view.junctions)
 
     run_async(body())

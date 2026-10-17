@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -10,7 +10,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
-from matchcut.pipeline.editorial import Pin, PinStore
+from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace
 from matchcut.pipeline.sampling import FrameCache
 from .. import images
@@ -47,6 +47,7 @@ class EditView(Vertical):
         self._shown: Optional[tuple] = None  # (fingerprint, stage, junction, expanded) the panel text was rendered for
         self._frames_key: Optional[tuple] = None  # (stage, clips, cut points, media) the three frames were rendered for
         self._blend_image = None
+        self._keep_pair: Optional[Tuple[int, int]] = None  # the shot pair to stay on when the junctions are rebuilt for another stage
 
     def compose(self) -> ComposeResult:
         yield Static("", id="edit-header")
@@ -99,7 +100,9 @@ class EditView(Vertical):
         pairs = [(s, state.timeline(s)) for s in upto]
         pairs = [(s, t) for s, t in pairs if t is not None]
         self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config)) if pairs else []
-        self.selected = min(self.selected, max(0, len(self.junctions) - 1))
+        pair, self._keep_pair = self._keep_pair, None
+        kept = next((i for i, j in enumerate(self.junctions) if (j.out_shot, j.in_shot) == pair), None) if pair is not None else None
+        self.selected = kept if kept is not None else min(self.selected, max(0, len(self.junctions) - 1))
         tl = state.timeline(stage)
         track.set_timeline(tl)
         track.set_junction(self.selected if self.junctions else None)
@@ -140,7 +143,8 @@ class EditView(Vertical):
         key = (self._fingerprint, stage, self.selected, self.expanded)
         if self._shown != key or force:
             self._shown = key
-            panel.update(render_inspector(j, stage, PinStore(self._state.workspace).get(j.out_shot, j.in_shot), self.expanded))
+            pin = PinStore(self._state.workspace).get(j.out_shot, j.in_shot)
+            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin)))
         # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
         shown = j.state_at(stage) or j.current
         media = self._state.media()
@@ -148,6 +152,13 @@ class EditView(Vertical):
         if self._frames_key != frames_key or force:
             self._frames_key = frames_key
             self._show_frames(j, stage)
+
+    def _pin_decision(self, pin: Optional[Pin]):
+        """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
+        if pin is None or self._state is None or not self.stages:
+            return None
+        latest = self._state.timeline(self.stages[-1])
+        return pin_outcome(latest, pin) if latest is not None else None
 
     def _show_frames(self, j: Junction, stage: str) -> None:
         frames = self._frames()
@@ -160,14 +171,16 @@ class EditView(Vertical):
             return
         cache = FrameCache(media.path, self._state.workspace / "frames", self._state.config.sampling)
         fps = media.fps or j.fps or 25.0
-        out_t = max(0.0, shown.out_time - 1.0 / fps)  # the last frame shown before the cut
+        grid = lambda t: round(t * fps) / fps  # rough-cut points are off the frame grid; ask for the frame that is actually shown
+        out_t = max(0.0, grid(shown.out_time - 1.0 / fps))  # the last frame shown before the cut
+        in_t = grid(shown.in_time)
         try:
-            out_img, in_img = cache.frame(out_t), cache.frame(shown.in_time)
+            out_img, in_img = cache.frame(out_t), cache.frame(in_t)
         except Exception:
             out_img = in_img = None
         self._blend_image = images.blend(out_img, in_img) if out_img is not None and in_img is not None else None
         frames[0].show(out_img, caption=f"outgoing · {j.out_clip} @ {out_t:.2f}s")
-        frames[1].show(in_img, caption=f"incoming · {j.in_clip} @ {shown.in_time:.2f}s")
+        frames[1].show(in_img, caption=f"incoming · {j.in_clip} @ {in_t:.2f}s")
         frames[2].show(self._blend_image, caption="overlay · 50% blend")
         mode = next((f.image_mode for f in frames if f.image_mode), "")
         if mode:
@@ -207,6 +220,8 @@ class EditView(Vertical):
         if not self.stages or self._state is None:
             return
         current = self.stages.index(self.current_stage())
+        j = self.current_junction()
+        self._keep_pair = (j.out_shot, j.in_shot) if j is not None else None
         target = max(0, min(len(self.stages) - 1, current + delta))
         self.stage_index = -1 if target == len(self.stages) - 1 else target
         self._fingerprint = None  # rebuild the junctions for the newly inspected stage
@@ -227,7 +242,11 @@ class EditView(Vertical):
     def _apply_hint(self, message: str) -> str:
         bridge = getattr(self.app, "bridge", None)
         if bridge is not None and bridge.is_running():
-            return message + ": takes effect when this run's passes run again (redo the rough cut) or on the next run"
+            pending = getattr(bridge, "pending", None)
+            stage = str(pending[0]) if pending else ""
+            if stage in ("describe", "narrative", "roughcut"):
+                return message + ": applies in this run when you continue (the passes have not run yet)"
+            return message + ": applies on the next run (R); this run's passes have already started"
         return message + ": takes effect on the next run (R); cached stages are reused and only the passes re-run"
 
     def _pin(self, origin: str) -> None:
@@ -238,7 +257,10 @@ class EditView(Vertical):
         source = j.baseline if origin == "reverted" else (j.state_at(stage) or j.current)
         pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin)
         PinStore(self._state.workspace).put(pin)
-        self.app.notify(self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s"))
+        note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
+        if j.baseline.stage != j.first_stage:
+            note += ". these shots are not adjacent in the rough cut, so the pin only applies if a regenerated rough cut pairs them"
+        self.app.notify(note)
         self._fingerprint = None
         self.refresh_from_state(self._state)
 
