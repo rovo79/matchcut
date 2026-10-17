@@ -1,0 +1,9 @@
+Screen { layout: vertical; }
+#status { height: 1; background: $primary-background; color: $text; padding: 0 1; }
+TabbedContent { height: 1fr; }
+#run-top { height: 1fr; }
+#ladder { width: 42; }
+#log { width: 1fr; border-left: solid $primary; }
+#checkpoint { height: auto; max-height: 14; border: round $secondary; padding: 0 1; }
+#checkpoint-summary { height: auto; max-height: 10; }
+#help { padding: 1 2; }
