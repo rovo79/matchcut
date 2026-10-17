@@ -34,14 +34,25 @@ the overlay image, and `l` / `v` / `x` lock, revert and clear a pin.
    junction where you could not.
 4. Lock one junction (`l`) and revert another (`v`). Each badge reads
    `pin pending: run again (R) to apply` and the header counts two pins. Press
-   R. Both junctions now read `pinned (locked)` / `pinned (reverted)` with no
-   `pin pending`; if a badge says `adjusted to out X / in Y to fit the clips`
-   or `pin not placed: <reason>`, note it and whether the reason is right.
+   R: the run goes back through the describe, narrative and rough-cut
+   checkpoints (press `c` at each to continue), then the passes. Both junctions
+   now read `pinned (locked)` / `pinned (reverted)` with no `pin pending`,
+   whichever stage you inspect. A pin holds the cut points, not the
+   transition: a junction on a beat boundary keeps its dissolve (the history
+   line reads `editor (before matchcut)`, not a pass). If a badge says
+   `adjusted to out X / in Y to fit the clips` or `pin not placed: <reason>`,
+   note it and whether the reason is right; the header counts the pins not
+   placed (`N pin(s) not placed`) and the badge says why. A junction that a
+   later pass created (its history starts after the rough cut) cannot be placed
+   until a regenerated rough cut pairs those shots; `l` says so in its
+   notification.
 5. Regenerate the rough cut: run again, choose redo with a note at the rough
    cut checkpoint. After the passes, both pins still hold, or the header
    says which could not be placed and why.
-6. Latency: moving between junctions with `←`/`→` feels immediate after the
-   first visit (frames are cached). Note the first-visit delay.
+6. Latency: the first visit to a junction extracts its frames synchronously, so
+   the tab pauses for a moment; later visits are cached and `←`/`→` feels
+   immediate. Note the first-visit delay. It is an implementation limit of
+   this view (the extraction runs on the UI thread), not a Textual limit.
 
 ## Verdict
 | Question | Answer |

@@ -69,7 +69,15 @@ prompt is told to keep the two shots adjacent). It takes effect on the next run:
 until then the badge reads `pin pending: run again (R) to apply`. After a run
 it reads `pinned (locked|reverted)`, or `pinned (...), adjusted to out X / in Y
 to fit the clips` when the points had to be clamped, or `pin not placed:
-<reason>` when the shots are no longer adjacent or the clips have no room.
+<reason>` when the shots are not adjacent or the clips have no room. The badge
+is judged from the latest stage's history, so it reads the same whichever stage
+you inspect, and the header counts the pins not placed. A junction a later pass
+created (its baseline is not the rough cut) cannot be placed until a
+regenerated rough cut pairs those shots; `l` and `v` say so. A pin holds the
+cut points, not the transition: a pinned beat boundary keeps its dissolve.
+A pin made while a run waits at the describe, narrative or rough-cut checkpoint
+applies in that run when you continue; at a pass checkpoint it applies on the
+next run (`R`).
 Pacing never drops a pinned clip. The file format and how pins are applied are
 in [PIPELINE.md](PIPELINE.md#editorial-pins).
 

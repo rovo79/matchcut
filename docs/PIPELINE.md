@@ -208,6 +208,12 @@ How a pin takes effect:
   have no room for the points). These show in the event stream, in
   `report.md`, in the TUI log, and in the junction inspector's badge.
 
+A pin holds the cut points, not the transition: a pinned junction on a beat
+boundary still gets the beat's dissolve, and only a match cut (tagged
+`match_out:*` / `match_in:*` by the match-cut pass) is forced to a hard cut.
+Because the pin is applied to the rough cut before the first pass, a junction's
+history credits the move to `editor (before matchcut)`, not to the first pass.
+
 A pin written during a run is read when the passes next start, so it applies
 on the next run. The TUI shows `pin pending: run again (R) to apply` until
 then.
@@ -223,8 +229,8 @@ python -m matchcut.pipeline junctions WORKSPACE --index 1  # one junction in ful
 ```
 
 Each line gives the junction number, the two clips and shots, the cut points
-in source seconds, the transition, the combined score and badges (`match`
-type, `locked`, `pinned`, `beat`). Junctions are followed across stages by
+in source seconds, the transition, the combined score and badges
+(`match:<type>`, `locked`, `pinned`, `beat`). Junctions are followed across stages by
 lineage (same shot, overlapping source range), so the scores before and after
 the passes describe the same cut even when clips were renumbered. The scores
 are rebuilt from `analysis.npz` with the deterministic scorer, the same one the
@@ -252,7 +258,6 @@ scores (roughcut -> final):
   motion       0.200 -> 0.200
   combined     0.232 -> 0.232
 decisions:
-  roughcut:notes  mock rough cut
   transitions:dissolve  beat b1 -> b2: dissolve 0.75s
 ```
 
