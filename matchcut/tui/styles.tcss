@@ -4,8 +4,11 @@ TabbedContent { height: 1fr; }
 #run-top { height: 1fr; }
 #ladder { width: 42; }
 #log { width: 1fr; border-left: solid $primary; }
-#checkpoint { height: auto; max-height: 14; border: round $secondary; padding: 0 1; }
-#checkpoint-summary { height: auto; max-height: 10; }
+#checkpoint { height: auto; max-height: 12; border: round $secondary; padding: 0 1; }
+#checkpoint-summary { height: auto; max-height: 8; overflow: hidden; }
+#checkpoint-foot { height: auto; }
+#checkpoint-hint { height: 1; color: $text-muted; }
+#note { height: 1; border: none; padding: 0 1; }
 #help { padding: 1 2; }
 #shots-table { width: 1fr; }
 #shot-detail { width: 60%; border-left: solid $primary; padding: 0 1; }
@@ -16,8 +19,9 @@ TabbedContent { height: 1fr; }
 #story-head { height: auto; padding: 0 1; }
 #cut-header { height: 1; padding: 0 1; }
 #clip-row { height: 1fr; }
-#clip-frame { width: 40%; }
+#clip-frame { width: 40%; height: 1fr; min-height: 14; }
+#clip-frame > .frame-image { width: 100%; height: auto; }
 #clip-detail { width: 1fr; padding: 0 1; }
 #config-hint { height: 1; padding: 0 1; color: $text-muted; }
 #config-tree { height: 1fr; }
-#config-edit { height: 3; }
+#config-edit { dock: bottom; height: 3; }

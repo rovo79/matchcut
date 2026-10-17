@@ -9,6 +9,7 @@ from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Static, TabbedContent, TabPane
 
+from matchcut.pipeline import events
 from matchcut.pipeline.config import PipelineConfig
 from . import images
 from .bridge import PipelineBridge
@@ -18,6 +19,8 @@ from .views.cut import CutView
 from .views.run import RunView
 from .views.shots import ShotsView
 from .views.story import StoryView
+
+QUIT_CONFIRM_SECONDS = 3.0  # how long a warned `q` stays armed
 
 HELP_TEXT = """Control room keys
 
@@ -59,6 +62,7 @@ class MatchcutApp(App):
         self.bridge: Optional[PipelineBridge] = None
         self._bridge_factory = bridge_factory or (lambda c: PipelineBridge(c, interactive=True))
         self._quit_armed = False
+        self._quit_timer = None
         self._image_notice_shown = False
 
     # -- layout --------------------------------------------------------------
@@ -112,6 +116,8 @@ class MatchcutApp(App):
         if self.bridge is not None:
             for e in self.bridge.drain():
                 self.state.apply(e)
+                if isinstance(e, (events.RunStarted, events.RunFinished, events.RunFailed)):
+                    self._disarm_quit()  # a warning about one run must not carry over to the next
                 changed = True
         self._update_status()
         if self.state.image_mode and not self._image_notice_shown:
@@ -153,8 +159,18 @@ class MatchcutApp(App):
         if self.bridge is not None and self.bridge.is_running():
             self.notify("a run is already in progress", severity="warning")
             return
-        self.bridge = self._bridge_factory(self.state.config)
-        self.bridge.start()
+        self._disarm_quit()
+        try:
+            bridge = self._bridge_factory(self.state.config)
+            bridge.start()
+        except Exception as exc:  # empty source, unwritable workspace, unknown backend ...
+            self.bridge = None
+            self.state.last_error = str(exc)
+            self.state.run_status = "failed"
+            self.notify(str(exc), severity="error")
+            self.refresh_views()
+            return
+        self.bridge = bridge
         self.action_show_tab("tab-run")
         self._focus_run_view()
 
@@ -194,9 +210,16 @@ class MatchcutApp(App):
     def action_help(self) -> None:
         self.push_screen(HelpScreen(name="help"))
 
+    def _disarm_quit(self) -> None:
+        self._quit_armed = False
+        if self._quit_timer is not None:
+            self._quit_timer.stop()
+            self._quit_timer = None
+
     def action_quit(self) -> None:
         if self.bridge is not None and self.bridge.is_running() and not self._quit_armed:
             self._quit_armed = True
+            self._quit_timer = self.set_timer(QUIT_CONFIRM_SECONDS, self._disarm_quit)
             self.notify("a run is active: press q again to quit anyway", severity="warning")
             return
         if self.bridge is not None:

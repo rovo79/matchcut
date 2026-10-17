@@ -28,6 +28,18 @@ async def _opens(mock_workspace):
             assert app.query_one("TabbedContent").active == tab
 
 
+def _assert_checkpoint_controls_visible(app):
+    """The summary never pushes the hint line and the note field out of the panel."""
+    panel = app.query_one("#checkpoint")
+    assert panel.region.height <= 12
+    for selector in ("#checkpoint-summary", "#checkpoint-hint", "#note"):
+        widget = app.query_one(selector)
+        assert widget.display and widget.region.height > 0, selector
+        assert panel.region.contains_region(widget.region), f"{selector} {widget.region} outside {panel.region}"
+    assert "[c] continue" in str(app.query_one("#checkpoint-hint").content)
+    assert app.query_one("#note").region.y > app.query_one("#checkpoint-summary").region.y
+
+
 def test_run_with_checkpoints_advances_the_ladder(demo_video, tmp_path):
     run_async(_run_with_checkpoints(demo_video, tmp_path))
 
@@ -44,6 +56,8 @@ async def _run_with_checkpoints(demo_video, tmp_path):
         assert run_view.query_one("#checkpoint").display is True
         assert "describe" in run_view.pending_text() and "shots" in run_view.pending_text()
         assert app.state.stages["describe"].state == "waiting"
+        _assert_checkpoint_controls_visible(app)
+        assert "deterministic" not in run_view.pending_text()  # describe takes a prompt: no pass hint
         await pilot.press("c")
         await wait_for(pilot, lambda: app.state.checkpoint is not None and app.state.checkpoint.stage == "narrative")
         # type a note and redo
@@ -260,7 +274,7 @@ async def _image_notice(mock_workspace, monkeypatch):
     real_notify = app.notify
     monkeypatch.setattr(app, "notify", lambda message, *a, **k: messages.append(str(message)) or real_notify(message, *a, **k))
     async with app.run_test(size=(120, 40)) as pilot:
-        await wait_for(pilot, lambda: app.state.image_mode is not None)
+        await wait_for(pilot, lambda: app.state.image_mode != "")
         await pilot.pause(0.2)
         await pilot.press("4")
         await pilot.pause(0.2)
@@ -268,3 +282,171 @@ async def _image_notice(mock_workspace, monkeypatch):
         await pilot.pause(0.2)
         assert app.state.image_mode == "half-block"
         assert [m for m in messages if "images rendered" in m] == ["images rendered as half-block"]
+
+
+def _mock_cfg(demo_video, tmp_path) -> PipelineConfig:
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    return cfg
+
+
+def _record_notifications(app, monkeypatch):
+    seen = []
+    real_notify = app.notify
+    monkeypatch.setattr(app, "notify", lambda message, *a, **k: seen.append((str(message), k.get("severity", "information"))) or real_notify(message, *a, **k))
+    return seen
+
+
+def test_a_failing_run_start_is_reported_not_fatal(demo_video, tmp_path, monkeypatch):
+    run_async(_run_start_fails(demo_video, tmp_path, monkeypatch))
+
+
+async def _run_start_fails(demo_video, tmp_path, monkeypatch):
+    cfg = _mock_cfg(demo_video, tmp_path)
+    cfg.llm.backend = "nope"
+    app = MatchcutApp(cfg)
+    seen = _record_notifications(app, monkeypatch)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("R")
+        await pilot.pause()
+        assert app.is_running
+        assert app.state.run_status == "failed"
+        assert "nope" in app.state.last_error
+        assert app.bridge is None
+        assert any(sev == "error" and "nope" in msg for msg, sev in seen)
+        cfg.llm.backend = "mock"  # the typo is fixed in the Config view
+        await pilot.press("R")
+        await wait_for(pilot, lambda: app.state.checkpoint is not None)
+        assert app.state.run_status == "waiting"
+        await pilot.press("S")
+        await wait_for(pilot, lambda: app.state.run_status == "failed")
+
+
+def test_a_start_error_in_the_bridge_is_reported(demo_video, tmp_path, monkeypatch):
+    run_async(_bridge_start_fails(demo_video, tmp_path, monkeypatch))
+
+
+async def _bridge_start_fails(demo_video, tmp_path, monkeypatch):
+    class Boom:
+        def start(self):
+            raise OSError("workspace is not writable")
+
+    app = MatchcutApp(_mock_cfg(demo_video, tmp_path), bridge_factory=lambda cfg: Boom())
+    seen = _record_notifications(app, monkeypatch)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("R")
+        await pilot.pause()
+        assert app.is_running and app.bridge is None
+        assert app.state.run_status == "failed" and app.state.last_error == "workspace is not writable"
+        assert ("workspace is not writable", "error") in seen
+
+
+def test_quit_confirmation_is_reset_between_runs(demo_video, tmp_path, monkeypatch):
+    run_async(_quit_confirmation_resets(demo_video, tmp_path, monkeypatch))
+
+
+async def _quit_confirmation_resets(demo_video, tmp_path, monkeypatch):
+    app = MatchcutApp(_mock_cfg(demo_video, tmp_path))
+    seen = _record_notifications(app, monkeypatch)
+    warned = lambda: len([m for m, _ in seen if "press q again" in m])  # noqa: E731
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("R")
+        await wait_for(pilot, lambda: app.state.checkpoint is not None)
+        await pilot.press("q")
+        await pilot.pause()
+        assert app.is_running and warned() == 1
+        await pilot.press("S")
+        await wait_for(pilot, lambda: app.state.run_status == "failed")
+        assert app._quit_armed is False  # the run ended: the warning is spent
+        await pilot.press("R")
+        await wait_for(pilot, lambda: app.state.checkpoint is not None)
+        await pilot.press("q")
+        await pilot.pause()
+        assert app.is_running and warned() == 2  # warned again instead of quitting
+        await pilot.press("S")
+        await wait_for(pilot, lambda: app.state.run_status == "failed")
+
+
+def test_quit_confirmation_expires_after_a_few_seconds(demo_video, tmp_path, monkeypatch):
+    run_async(_quit_confirmation_expires(demo_video, tmp_path, monkeypatch))
+
+
+async def _quit_confirmation_expires(demo_video, tmp_path, monkeypatch):
+    from matchcut.tui import app as app_module
+
+    monkeypatch.setattr(app_module, "QUIT_CONFIRM_SECONDS", 1.5)
+    app = MatchcutApp(_mock_cfg(demo_video, tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("R")
+        await wait_for(pilot, lambda: app.state.checkpoint is not None)
+        await pilot.press("q")
+        await pilot.pause()
+        assert app._quit_armed is True
+        await wait_for(pilot, lambda: app._quit_armed is False, timeout=10)
+        assert app.is_running
+        await pilot.press("S")
+        await wait_for(pilot, lambda: app.state.run_status == "failed")
+
+
+def test_pass_checkpoints_say_they_are_deterministic(demo_video, tmp_path):
+    run_async(_pass_checkpoint_hint(demo_video, tmp_path))
+
+
+async def _pass_checkpoint_hint(demo_video, tmp_path):
+    from matchcut.tui.views.run import DETERMINISTIC_HINT
+
+    app = MatchcutApp(_mock_cfg(demo_video, tmp_path))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("R")
+        run_view = app.query_one(RunView)
+        while not (app.state.checkpoint is not None and app.state.checkpoint.stage.startswith("pass:")):
+            await wait_for(pilot, lambda: app.state.checkpoint is not None)
+            stage = app.state.checkpoint.stage
+            assert DETERMINISTIC_HINT not in run_view.pending_text(), stage
+            await pilot.press("c")
+            await wait_for(pilot, lambda: app.state.checkpoint is None or app.state.checkpoint.stage != stage)
+        await pilot.pause()
+        assert DETERMINISTIC_HINT in run_view.pending_text()
+        assert app.state.checkpoint.stage in run_view.pending_text()
+        _assert_checkpoint_controls_visible(app)
+        await pilot.press("S")
+        await wait_for(pilot, lambda: app.state.run_status == "failed")
+
+
+def test_the_log_clears_when_a_new_run_starts(mock_workspace):
+    run_async(_log_clears_per_run(mock_workspace))
+
+
+async def _log_clears_per_run(mock_workspace):
+    app = MatchcutApp(load_cfg(mock_workspace))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.pause()
+        log = app.query_one("#log")
+        app.state.apply(events.RunStarted())
+        app.state.apply(events.Log(message="first-run-line"))
+        app.refresh_views()
+        await pilot.pause()
+        assert "first-run-line" in "\n".join(strip.text for strip in log.lines)
+        app.state.apply(events.RunStarted())
+        app.state.apply(events.Log(message="second-run-line"))
+        app.refresh_views()
+        await pilot.pause()
+        text = "\n".join(strip.text for strip in log.lines)
+        assert "second-run-line" in text and "first-run-line" not in text
+
+
+def test_checkpoint_text_is_compact():
+    from matchcut.tui.views.run import DETERMINISTIC_HINT, checkpoint_text
+
+    beats = [{"id": f"b{i}", "title": f"Beat {i}", "pace": "slow", "target_duration_s": 3} for i in range(40)]
+    text = checkpoint_text("narrative", {"logline": "A day by the sea " * 30, "beats": beats, "clips": 12})
+    lines = text.plain.splitlines()
+    assert lines[0] == "Checkpoint after narrative"
+    assert any(line.startswith("beats: 40 items") and "Beat 0" in line for line in lines)
+    assert "clips: 12" in lines
+    assert all(len(line) <= 100 for line in lines) and "{" not in text.plain
+    many = {f"key{i}": i for i in range(30)}
+    capped = checkpoint_text("pass:pace", many).plain.splitlines()
+    assert len(capped) == 8 and capped[-1] == DETERMINISTIC_HINT and "more" in capped[-2]
+    assert len(checkpoint_text("describe", many).plain.splitlines()) == 8

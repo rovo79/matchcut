@@ -233,6 +233,14 @@ Two plans, in order, each shippable on its own:
 2. **The TUI** (`matchcut/tui/`, views, widgets, images, launcher, docs,
    `requirements-tui.txt`, `tests/tui/`), built on plan 1's interfaces.
 
+## Deferred from the first implementation
+
+- `t` to expand a collapsed traceback: the Run log shows the last 800
+  characters of a failure's traceback.
+- An LLMError panel with `R` to retry: model errors currently go to the log and
+  the status bar.
+- A spinner on the running stage in the ladder.
+
 ## Open follow-ups (not in this spec)
 
 Approach B (pipeline behind a local socket for detached/remote runs); the

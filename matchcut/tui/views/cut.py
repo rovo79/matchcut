@@ -103,7 +103,7 @@ class CutView(Vertical):
         lines = [
             f"{c.id}  shot {c.shot_index}  beat {c.beat_id}",
             f"source {c.source_in:.2f}-{c.source_out:.2f}s  ({c.duration:.2f}s)  record in {tl.record_start(i):.2f}s",
-            f"transition in: {c.transition_in.kind} {c.transition_in.duration:.2f}s   locked: {'in ' if c.locked_in else ''}{'out' if c.locked_out else ''}".rstrip(),
+            f"transition in: {c.transition_in.kind} {c.transition_in.duration:.2f}s" + self._locked_note(c),
             f"tags: {', '.join(c.tags) or '-'}   purpose: {c.purpose or '-'}",
             "",
             f"decisions ({len(decisions)}):",
@@ -121,6 +121,11 @@ class CutView(Vertical):
         frame.show(img, caption=f"{c.id} @ {c.source_in:.2f}s")
         if frame.image_mode:
             self._state.image_mode = frame.image_mode
+
+    @staticmethod
+    def _locked_note(clip) -> str:
+        ends = [name for name, locked in (("in", clip.locked_in), ("out", clip.locked_out)) if locked]
+        return f"   locked: {' + '.join(ends)}" if ends else ""
 
     def open_target(self) -> Optional[Path]:
         """The frame file of the selected clip, as shown in the clip row."""

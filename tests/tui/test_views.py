@@ -17,31 +17,36 @@ def test_shots_view_lists_shots_and_toggles_usable(mock_workspace):
 
 
 async def _shots(mock_workspace):
-    cfg = PipelineConfig.load(mock_workspace / "config.json")
-    app = MatchcutApp(cfg)
-    async with app.run_test(size=(140, 44)) as pilot:
-        await pilot.press("2")
-        await pilot.pause()
-        view = app.query_one(ShotsView)
-        table = view.query_one("#shots-table")
-        assert table.row_count == 8
-        table.focus()
-        await pilot.press("down")
-        await wait_for(pilot, lambda: view.current_shot_index() == 1)
-        await wait_for(pilot, lambda: view.query_one("#shot-mid").image_mode == "half-block")
-        assert app.state.image_mode == "half-block"
-        desc = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["description"]
-        assert desc and desc in str(view.query_one("#shot-desc").content)
-        assert "Shot 1" in str(view.query_one("#shot-desc").content)
-        before = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"]
-        await pilot.press("u")
-        await pilot.pause()
-        after = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"]
-        assert after is (not before)
-        assert ("no" if not after else "yes") in str(table.get_row("1")[8])
-        await pilot.press("u")  # restore
-        await pilot.pause()
-        assert json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"] is before
+    path = mock_workspace / "descriptions.json"
+    original = path.read_text()
+    try:
+        cfg = PipelineConfig.load(mock_workspace / "config.json")
+        app = MatchcutApp(cfg)
+        async with app.run_test(size=(140, 44)) as pilot:
+            await pilot.press("2")
+            await pilot.pause()
+            view = app.query_one(ShotsView)
+            table = view.query_one("#shots-table")
+            assert table.row_count == 8
+            table.focus()
+            await pilot.press("down")
+            await wait_for(pilot, lambda: view.current_shot_index() == 1)
+            await wait_for(pilot, lambda: view.query_one("#shot-mid").image_mode == "half-block")
+            assert app.state.image_mode == "half-block"
+            desc = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["description"]
+            assert desc and desc in str(view.query_one("#shot-desc").content)
+            assert "Shot 1" in str(view.query_one("#shot-desc").content)
+            before = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"]
+            await pilot.press("u")
+            await pilot.pause()
+            after = json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"]
+            assert after is (not before)
+            assert ("no" if not after else "yes") in str(table.get_row("1")[8])
+            await pilot.press("u")  # restore
+            await pilot.pause()
+            assert json.loads((mock_workspace / "descriptions.json").read_text())["1"]["usable"] is before
+    finally:
+        path.write_text(original)  # the workspace is session-scoped: leave it as found
 
 
 class StubBridge:
@@ -592,3 +597,67 @@ async def _config_declared_types(demo_video, tmp_path):
         await pilot.pause()
         assert cfg.brief == "" and edit.display is False
         assert cfg.workspace_path == tmp_path  # non-Optional strings never become None
+
+
+def test_cut_view_gives_the_clip_frame_real_room(mock_workspace):
+    run_async(_cut_layout(mock_workspace))
+
+
+async def _cut_layout(mock_workspace):
+    from matchcut.tui.views.cut import CutView
+    from matchcut.tui.widgets.timeline import TimelineTrack
+
+    app = MatchcutApp(PipelineConfig.load(mock_workspace / "config.json"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("4")
+        await pilot.pause()
+        view = app.query_one(CutView)
+        frame = view.query_one("#clip-frame")
+        await wait_for(pilot, lambda: frame.image_mode == "half-block")
+        await pilot.pause()
+        assert frame.region.height >= 12, frame.region
+        assert frame.region.width >= 30, frame.region
+        assert view.query_one("#clip-detail").region.width > 0
+        # the locked field only appears when an end is locked
+        track = view.query_one("#track", TimelineTrack)
+        for i in range(len(track.timeline.clips)):
+            clip = track.timeline.clips[track.selected]
+            detail = str(view.query_one("#clip-detail").content)
+            assert ("locked:" in detail) == bool(clip.locked_in or clip.locked_out), detail
+            await pilot.press("right")
+            await pilot.pause()
+
+
+def test_config_edit_field_sits_above_the_footer(mock_workspace):
+    run_async(_config_layout(mock_workspace))
+
+
+async def _config_layout(mock_workspace):
+    from textual.widgets import Footer
+
+    app = MatchcutApp(PipelineConfig.load(mock_workspace / "config.json"))
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        node = next(n for n in tree.root.children if str(n.label).startswith("target_duration"))
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        edit = view.query_one("#config-edit")
+        footer = app.query_one(Footer)
+        assert edit.display and edit.region.height > 0 and footer.region.height > 0
+        assert view.region.contains_region(edit.region), (view.region, edit.region)
+        assert edit.region.bottom <= footer.region.y, (edit.region, footer.region)
+        assert tree.region.height > 0 and tree.region.bottom <= edit.region.y
+
+
+def test_locked_note_names_the_locked_ends():
+    from matchcut.pipeline.timeline import Clip
+    from matchcut.tui.views.cut import CutView
+
+    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1")) == ""
+    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_in=True)) == "   locked: in"
+    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_out=True)) == "   locked: out"
+    assert CutView._locked_note(Clip("c1", 0, 0.0, 1.0, "b1", locked_in=True, locked_out=True)) == "   locked: in + out"

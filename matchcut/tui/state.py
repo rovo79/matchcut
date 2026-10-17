@@ -57,6 +57,7 @@ class RunState:
         self.stages: Dict[str, StageStatus] = {n: StageStatus(n) for n in self.stage_names()}
         self.events: Deque[events.Event] = deque(maxlen=5000)
         self.event_count = 0  # events applied in this run; keeps counting once the deque is full
+        self.run_serial = 0  # incremented on every RunStarted: views clear per-run state when it changes
         self.checkpoint: Optional[PendingCheckpoint] = None
         self.run_status = "idle"
         self.started_at: Optional[float] = None
@@ -83,6 +84,7 @@ class RunState:
     def apply(self, event: events.Event) -> None:
         if isinstance(event, events.RunStarted):
             self.event_count = 0
+            self.run_serial += 1
         self.events.append(event)
         self.event_count += 1
         if isinstance(event, events.RunStarted):
@@ -160,10 +162,11 @@ class RunState:
 
     def _load(self, path: Path, loader):
         key = str(path)
-        if not path.exists():
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:  # missing, or unlinked by a redo on the pipeline thread between check and use
             self._cache.pop(key, None)
             return None
-        mtime = path.stat().st_mtime
         cached = self._cache.get(key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
