@@ -97,3 +97,10 @@ def cached_frame_path(source: str, root: Path, sampling, t: float) -> Optional[P
         return None
     path = cache.root / f"t{int(round(t * 1000)):09d}_w{sampling.tile_width}.jpg"
     return path if path.exists() else None
+
+
+def blend(a: PILImage.Image, b: PILImage.Image, alpha: float = 0.5) -> PILImage.Image:
+    """The two frames mixed, at the first frame's size: the classic match-cut alignment check."""
+    a = a.convert("RGB")
+    b = b.convert("RGB").resize(a.size)
+    return PILImage.blend(a, b, alpha)

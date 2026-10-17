@@ -4,13 +4,18 @@ from PIL import Image as PILImage
 from textual.app import App, ComposeResult
 
 from matchcut.pipeline.config import PipelineConfig
+from matchcut.pipeline.editorial import Pin
+from matchcut.pipeline.junctions import Junction, JunctionState
+from matchcut.pipeline.matching import MatchScore
+from matchcut.pipeline.timeline import Decision
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
 from matchcut.tui import images
 from matchcut.tui.state import RunState, StageStatus
 from matchcut.tui.widgets.frame import Frame
 from matchcut.tui.widgets.ladder import StageLadder
+from matchcut.tui.widgets.inspector import render_inspector
 from matchcut.tui.widgets.sparkline import EnergyCurve
-from matchcut.tui.widgets.timeline import TimelineTrack, render_track
+from matchcut.tui.widgets.timeline import TimelineTrack, junction_columns, render_track
 from tests.tui.conftest import run_async
 
 
@@ -199,3 +204,101 @@ def test_render_track_never_exceeds_width_for_many_clips():
 
 def test_render_track_tolerates_zero_width():
     render_track(make_tl(), 0, 0, beats=[0.0])
+
+
+def test_blend_is_the_average_of_the_two_frames_at_the_first_size():
+    a = PILImage.new("RGB", (40, 20), (200, 0, 0))
+    b = PILImage.new("RGB", (80, 40), (0, 0, 200))
+    out = images.blend(a, b)
+    assert out.size == (40, 20) and out.mode == "RGB"
+    assert out.getpixel((5, 5)) == (100, 0, 100)
+
+
+def five_clips():
+    tl = Timeline(source="s.mp4", fps=25.0)
+    tl.clips = [Clip(f"c00{i}", i, 0.0, 1.0 + i * 0.1, "b1" if i < 3 else "b2") for i in range(1, 6)]
+    return tl
+
+
+def test_junction_columns_sit_between_the_spans():
+    tl = five_clips()
+    cols = junction_columns(tl, 60, center=0)
+    assert sorted(cols) == [0, 1, 2, 3]
+    plain = render_track(tl, 60, selected=-1, selected_junction=2).plain
+    for j, col in cols.items():
+        assert plain[col] in "|~#L"
+
+
+def test_the_selected_junction_glyph_is_highlighted_and_no_clip_is():
+    text = render_track(five_clips(), 60, selected=0, selected_junction=1)
+    col = junction_columns(five_clips(), 60, center=1)[1]
+    styles = [str(span.style) for span in text.spans if span.start <= col < span.end]
+    assert any("yellow" in s for s in styles)
+    assert not any("reverse" in str(span.style) for span in text.spans)
+
+
+class TrackApp(App):
+    def __init__(self):
+        super().__init__()
+        self.clicked = []
+
+    def compose(self) -> ComposeResult:
+        yield TimelineTrack(id="t")
+
+    def on_timeline_track_junction_clicked(self, message):
+        self.clicked.append(message.index)
+
+
+def test_clicking_a_junction_glyph_posts_its_index():
+    async def body():
+        app = TrackApp()
+        async with app.run_test(size=(60, 6)) as pilot:
+            track = app.query_one("#t", TimelineTrack)
+            track.set_timeline(five_clips())
+            track.set_junction(0)
+            await pilot.pause()
+            col = junction_columns(five_clips(), track.size.width, center=0)[2]
+            await pilot.click("#t", offset=(col, 0))
+            await pilot.pause()
+            assert app.clicked == [2]
+            track.set_junction(99)
+            assert track.selected_junction == 3
+
+    run_async(body())
+
+
+def inspected_junction() -> Junction:
+    s0 = MatchScore(0.41, 0.38, 0.50, 0.60, 0.45, 0.40, 0.44, False, "static")
+    s1 = MatchScore(0.63, 0.71, 0.55, 0.62, 0.66, 0.75, 0.69, False, "moving")
+    j = Junction(1, "c002", "c003", 1, 3, "b1", "b2", 25.0)
+    j.states = [
+        JunctionState("roughcut", 5.0, 7.0, score=s0),
+        JunctionState("matchcut", 4.88, 7.12, locked_out=True, locked_in=True, score=s1),
+        JunctionState("final", 4.88, 7.12, "cut", 0.0, True, True, s1),
+    ]
+    j.decisions = [Decision("matchcut", "match_cut", ["c002", "c003"], "motion match cut (trimmed to best junction): accepted on feature score alone", 0.69, {"match_type": "motion"})]
+    return j
+
+
+def test_the_inspector_explains_the_junction():
+    plain = render_inspector(inspected_junction(), "final", None).plain
+    assert "Junction 2 · c002 → c003 · shot 1 → shot 3 · beat b1 → b2" in plain
+    assert "MATCH CUT (motion)" in plain and "locked by matchcut" in plain and "beat boundary" in plain
+    assert "combined" in plain and "0.44" in plain and "0.69" in plain and "+0.25" in plain
+    assert "out 5.00s → 4.88s [-0.12s (-3f)]" in plain and "in 7.00s → 7.12s [+0.12s (+3f)]" in plain
+    assert "why: matchcut: motion match cut" in plain
+    assert "matchcut: out -0.12s (-3f), in +0.12s (+3f), locked" in plain
+
+
+def test_the_inspector_flags_a_pending_pin_and_missing_scores():
+    j = inspected_junction()
+    plain = render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+    assert "pinned (locked)" in plain and "pin pending" in plain
+    for s in j.states:
+        s.score = None
+    assert "scores unavailable" in render_inspector(j, "final", None).plain
+
+
+def test_the_expanded_inspector_lists_every_decision():
+    plain = render_inspector(inspected_junction(), "final", None, expanded=True).plain
+    assert "decisions:" in plain and "matchcut:match_cut" in plain
