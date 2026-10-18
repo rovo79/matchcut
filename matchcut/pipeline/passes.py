@@ -290,10 +290,11 @@ class ContinuityPass(Pass):
         while i < len(tl.clips):
             a, b = tl.clips[i - 1], tl.clips[i]
             risky = a.shot_index == b.shot_index or "jump_cut_risk" in b.tags
-            if not risky or b.locked_in:
+            if not risky or is_match_cut(a, b):
                 i += 1
                 continue
-            sep = self._find_separator(tl, i)
+            held = a.locked_out or b.locked_in  # an editor's pin holds these cut points: never split the pair
+            sep = None if held else self._find_separator(tl, i)
             if sep is not None:
                 clip = tl.clips.pop(sep)
                 tl.clips.insert(i, clip)
