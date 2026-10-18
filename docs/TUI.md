@@ -67,15 +67,18 @@ junction in [mpv](https://mpv.io):
 
 | Key | Does |
 |---|---|
-| `p` | Play the inspected stage's window around the junction (2 s before the cut to 2 s after the transition by default), looping. |
+| `p` | Play the inspected stage's window around the junction (2 s before the cut to 2 s after the transition by default), looping (`loop-file`; verified headless only, see [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md)). |
 | `a` | A/B. The first press prepares and plays **A**, the same junction at its baseline stage (the first stage where its two clips are adjacent, usually the rough cut). Later presses on the same junction toggle A and B at the same offset from the cut. When the junction first appears at the inspected stage there is nothing earlier to compare and the status line says so. |
 | `s` | Stop: pause what was played. |
 
 One line under the frames, `#review-status`, shows what is happening:
 `p play · a compare with roughcut` when idle, then `preparing the junction for
-review...`, `playing B  final  shot 0 -> shot 1  dissolve 0.75s (rendered,
-cached)` or `playing A  roughcut  shot 0 -> shot 1  cut (exact source)`,
-`paused`, or `review failed: <message>`. Preparation and every mpv command run
+review...`, then after `p` `playing final  shot 0 -> shot 1  dissolve 0.75s
+(rendered, cached)` (no A/B prefix). After `a` it reads `playing A  roughcut
+shot 0 -> shot 1  cut (exact source)` and, after the next `a`, `playing B  final
+shot 0 -> shot 1  dissolve 0.75s (rendered)`: the `A` / `B` prefixes appear only
+in an A/B comparison. Other lines are
+`paused` and `review failed: <message>`. Preparation and every mpv command run
 in a thread worker, so `←`/`→` and `[`/`]` keep working; a second request for
 the junction being prepared is ignored (`already preparing this junction`). A
 result for a junction you have since left still plays, because you asked for

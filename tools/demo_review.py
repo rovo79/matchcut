@@ -5,7 +5,7 @@ saved as an image) until just after A's cut, toggles to B at the same offset fro
 the top half is A, the bottom half is B. Nothing is shown on screen and there is no sound; the sheet proves what
 mpv displayed, not how it looks or feels in a window (that is the human checklist in docs/M2B-ACCEPTANCE.md).
 
-    python3 tools/demo_review.py WORKSPACE OUTDIR --index 1 --index 2 [--stage final] [--seconds 4.75]
+    python3 tools/demo_review.py WORKSPACE OUTDIR --index 1 --index 2 [--stage final] [--seconds 2.2]
     python3 tools/demo_review.py WORKSPACE OUTDIR --index 1 --svg m2b-edit-review.svg
     python3 tools/demo_review.py WORKSPACE OUTDIR --make-synthetic --index 3 --index 4   # builds WORKSPACE/ws first, then uses it
 
@@ -174,7 +174,7 @@ def demo_junction(ws: Path, cfg: PipelineConfig, index: int, stage: Optional[str
         try:
             cap = _play_once(cfg, pair, frames_dir, a_seconds)
             break
-        except MpvError as e:
+        except (MpvError, ReviewError) as e:  # a crashed session surfaces as either, depending on which call met it
             print(f"  attempt {attempt}: mpv stopped ({e})")
     if cap is None:
         raise ReviewError("mpv kept stopping under vo=image; no frames to show")
@@ -194,6 +194,7 @@ def demo_junction(ws: Path, cfg: PipelineConfig, index: int, stage: Optional[str
     )
     print(summary)
     print(f"  {sheet}")
+    shutil.rmtree(work, ignore_errors=True)  # the captured frames and strips are scratch; only the sheet is kept
     return sheet, summary
 
 
@@ -260,7 +261,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--index", type=int, action="append", help="junction number, 1-based (repeatable)")
     p.add_argument("--make-synthetic", action="store_true", help="build the synthetic demo workspace at WORKSPACE/ws first (WORKSPACE/demo.mp4 is the footage)")
     p.add_argument("--stage", default=None, help="stage to inspect (default: the last one)")
-    p.add_argument("--seconds", type=float, default=None, help="seconds A plays before the toggle, and B after it (default: the longer item's duration, so each loops once)")
+    p.add_argument("--seconds", type=float, default=None, help="seconds A plays before the toggle (default: until 0.15 s after its cut; keep it below A's duration, a longer run loops and may crash vo=image); B always plays to the end of its window")
     p.add_argument("--svg", default=None, help="also save the Edit tab after p (junction 1 selected) under this name in OUTDIR")
     a = p.parse_args(argv)
     ws, out_dir = Path(a.workspace), Path(a.outdir)

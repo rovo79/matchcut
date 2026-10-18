@@ -48,7 +48,7 @@ toggle.
 
 | Image | Footage | What it shows |
 |---|---|---|
-| ![](screenshots/m2b-review-synthetic-j3.jpg) `m2b-review-synthetic-j3.jpg` | Synthetic, junction 3 (shot 3 to shot 6) | A is the rough cut's hard cut from colour bars to a gradient, played from the source by EDL; B is the final cut's 0.75 s dissolve, a rendered window: the bars blend into the gradient over three tiles. A's one green tile is a frame of the footage itself: the cut-in of shot 6 is at 14.00 s, but the source content changes one frame later (14.04 s), so frame 350 still shows the previous shot. |
+| ![](screenshots/m2b-review-synthetic-j3.jpg) `m2b-review-synthetic-j3.jpg` | Synthetic, junction 3 (shot 3 to shot 6) | A is the rough cut's hard cut from colour bars to a gradient, played from the source by EDL; B is the final cut's 0.75 s dissolve, a rendered window: the bars blend into the gradient over three tiles. A's one green tile is a frame of the footage itself: the cut-in of shot 6 is at 14.00 s, but the source content changes one frame later (14.04 s), so frame 350 still shows shot 5, the shot before shot 6 in the source. |
 | ![](screenshots/m2b-review-synthetic-j4.jpg) `m2b-review-synthetic-j4.jpg` | Synthetic, junction 4 (shot 6 to shot 7) | A hard cut from a gradient to a fractal on **both** sides: A and B are both exact-source EDLs (nothing rendered); A plays up to 0.17 s after the cut, B continues from 0.24 s after its cut to the end of its window, so B shows only the incoming shot. |
 | ![](screenshots/m2b-review-bbb-j1.jpg) `m2b-review-bbb-j1.jpg` | Big Buck Bunny (20 s clip, mock backend) junction 1 (shot 0 to shot 1) | A is the rough cut's hard cut from the clouds to the grass; B is the final cut's 0.75 s dissolve between them, rendered; B was toggled in 0.21 s into the dissolve, so its first tiles are the rest of the blend. The first tiles of A are dim because the source itself fades in. |
 | [`m2b-edit-review.svg`](screenshots/m2b-edit-review.svg) | Big Buck Bunny, final stage, junction 1 | The Edit tab after `p`: the footer lists `p Play`, `a A/B`, `s Stop`, and the `#review-status` line reads `playing final  shot 0 -> shot 1  dissolve 0.75s (rendered, cached)`. The controller is the real one but its mpv session is a stub, so nothing was played; the line shows the controller's own status text. |
@@ -70,7 +70,9 @@ What the headless run proves:
   dissolve.
 - The toggle moved to B at the same offset from the cut: in the runs behind these
   images A was left at +0.17 s (Big Buck Bunny) and B read +0.21 s from its cut
-  right after, one frame later.
+  right after, one frame later. B's reading is taken after playback has resumed, so
+  it runs a little ahead of the toggle point (+0.24 s against +0.17 s on the
+  synthetic hard-cut junction, about two frames).
 - mpv's `--vo=image` frames do not include the OSD label: the label is shown for
   2 s after each load and none of the frames in that period shows text. The
   caption bars in the sheets are drawn by the tool, not by mpv.
@@ -84,16 +86,24 @@ What it does not prove:
   display, no colour management.
 - Sound: audio was off (`--ao=null`); whether the audio of a window matches the
   final cut is unchecked.
+- Looping under a visible VO. The controller sets `loop-file=inf` for all real
+  playback, but the loop is only tested with `--vo=null`. Wrap-around, and
+  toggling A/B across a loop boundary, were not exercised with a window or any
+  other visible VO; under mpv 0.37 `--vo=image` crashed now and then when a
+  looping file restarted, and what a real window does is unknown.
+- That the OSD label (the item's name for 2 s after each load) appears in a real
+  window: `--vo=image` frames do not include it.
 - Real-time smoothness, input lag, or how `←`/`→` feel while a window prepares.
 - The editor's judgement: whether watching these windows lets someone assess
   motion and timing is the question below.
 
 Two things about the tool itself. With mpv 0.37, `--vo=image` crashed now and
-then when a looping file restarted, so the tool never lets a file loop (A stops
+then when a looping file restarted (the open question above), so the tool never lets a file loop (A stops
 shortly after its cut, B stops at the end of its window) and retries a crashed
 run up to three times; the frames that mpv writes while B loads and seeks (the
 start of the file, before the seek) are dropped from the sheet. The tool's
-sheets show A only up to the toggle and B only after it.
+sheets show A only up to the toggle and B only after it. The scratch frames of
+each run (`OUTDIR/work-j<N>/`) are deleted when the sheet is built.
 
 ## Human checklist
 
@@ -103,23 +113,28 @@ with the Edit tab open (`4`).
 
 1. On three junctions, including one with a dissolve and one a pass moved, press
    `p`, then `a`, then `a` again, then `s`. Each press does what the footer says;
-   the status line reads `playing B ...`, `playing A ...`, `playing B ...`,
-   `paused`.
-2. Latency of the first prepare: a hard-cut window that plays from an EDL, and a
+   the status line reads `playing final ...` (after `p` the label has no prefix),
+   `playing A  roughcut ...`, `playing B  final ...`, `paused`. The item's name
+   also appears as a label in the mpv window for about 2 s after each load
+   (never verified in a real window).
+2. Let a window loop at least three times in the real mpv window, with `p` and
+   again after `a`, and press `a` just before and just after the wrap: no crash,
+   stutter or lost position (looping was never exercised with a visible VO).
+3. Latency of the first prepare: a hard-cut window that plays from an EDL, and a
    window that has to be rendered. Note both delays and whether the tab stays
    usable meanwhile.
-3. The transition and the sound in mpv match `final.mp4` played around the same
+4. The transition and the sound in mpv match `final.mp4` played around the same
    cut (the window starts `review.pre_seconds`, 2 s by default, before the cut,
    so the cut is 2 s into the window; `python -m matchcut.review WORKSPACE
    --index N` prints it as `cut=`).
-4. `←`/`→` and `[`/`]` respond immediately while a junction is still preparing,
+5. `←`/`→` and `[`/`]` respond immediately while a junction is still preparing,
    and a second `p` on the same junction says `already preparing this junction`.
-5. Make mpv unavailable (uninstall it, rename the binary, or set
+6. Make mpv unavailable (uninstall it, rename the binary, or set
    `"review": {"mpv": "no-such-mpv"}` in `ws_m2b/config.json`) and press `p`: the
    window is rendered and opened in the system player, and the status line reads
    `mpv not found: opened <file> in the system player (no A/B toggle)`. Press `a`:
    the A/B file with both halves and burned-in labels opens.
-6. Rename the source footage and press `p`: the status line reads
+7. Rename the source footage and press `p`: the status line reads
    `review failed: source footage not found: <path>` and the app keeps running.
 
 ## Verdict
@@ -142,5 +157,8 @@ with the Edit tab open (`4`).
   controller falls back to the system opener.
 - The fallback has no A/B toggle beyond the concat file (A, half a second of
   black and silence, B, with burned-in labels).
+- Looping is open under a real window: `loop-file=inf` is set for all playback
+  but was only tested headless (`--vo=null`); mpv 0.37's `--vo=image` crashed on
+  loop restarts and real-window behaviour is unknown (checklist item 2).
 - Previews are never deleted automatically: `workspace/review/` grows by one file
   per distinct junction window; delete the folder to clear it.
