@@ -6,7 +6,7 @@ from typing import List, Optional
 from rich.text import Text
 
 from matchcut.pipeline.editorial import Pin
-from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frame_delta
+from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frame_delta, signed
 from matchcut.pipeline.timeline import Decision
 
 
@@ -37,7 +37,10 @@ def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: 
     if j.match_type and shown.locked:
         out.append(f"MATCH CUT ({j.match_type})")
     if shown.locked:
-        out.append("locked by the editor" if j.pinned else "locked by matchcut")
+        if j.pinned:
+            out.append(f"{j.pin_origin or 'locked'} by the editor")
+        else:
+            out.append("locked by matchcut")
     if j.beat_boundary:
         out.append("beat boundary")
     if shown.score is not None and shown.score.jump_cut_risk:
@@ -64,7 +67,7 @@ def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool
             t.append(f"{'':<13}{base.stage:>10}{shown.stage:>10}{'Δ':>8}\n", style="dim")
         for name in SCORE_ROWS:
             v0, v1 = getattr(base.score, name), getattr(shown.score, name)
-            row = f"{name:<13}{v1:>10.2f}" if single else f"{name:<13}{v0:>10.2f}{v1:>10.2f}{v1 - v0:>+8.2f}"
+            row = f"{name:<13}{v1:>10.2f}" if single else f"{name:<13}{v0:>10.2f}{v1:>10.2f}{signed(v1 - v0):>8}"
             t.append(row + "\n", style="bold" if name == "combined" else "")
         t.append(f"motion type  {shown.score.motion_type}\n", style="dim")
     t.append(

@@ -5,7 +5,7 @@ from textual.app import App, ComposeResult
 
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import Pin
-from matchcut.pipeline.junctions import Junction, JunctionState
+from matchcut.pipeline.junctions import Junction, JunctionState, build_junctions
 from matchcut.pipeline.matching import MatchScore
 from matchcut.pipeline.timeline import Decision
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
@@ -372,3 +372,33 @@ def test_the_inspector_survives_a_zero_fps_junction():
     j = inspected_junction()
     j.fps = 0.0
     assert "Junction 2" in render_inspector(j, "final", Pin(1, 3, 4.70, 7.12)).plain
+
+
+def _pinned_junction(origin):
+    def t(stage, clips, history=()):
+        return Timeline(source="s.mp4", fps=25.0, clips=clips, stage=stage, history=list(history))
+    rough = t("roughcut", [Clip("c001", 0, 0.0, 2.0, "b1"), Clip("c002", 1, 3.0, 5.0, "b2")])
+    d = Decision("editor", "pinned", ["c001", "c002"], f"{origin} by the editor: out 2.00s, in 3.00s", None,
+                 {"out_shot": 0, "in_shot": 1, "out_time": 2.0, "in_time": 3.0, "origin": origin, "note": "", "out": 2.0, "in_": 3.0})
+    final = t("final", [Clip("c001", 0, 0.0, 2.0, "b1", locked_out=True), Clip("c002", 1, 3.0, 5.0, "b2", locked_in=True)], [d])
+    return build_junctions([("roughcut", rough), ("final", final)])[0], d
+
+
+def test_a_reverted_pin_is_badged_reverted_by_the_editor():
+    j, d = _pinned_junction("reverted")
+    plain = render_inspector(j, "final", Pin(0, 1, 2.0, 3.0, "reverted"), pin_decision=d).plain
+    assert "reverted by the editor" in plain and "locked by the editor" not in plain
+    assert "pinned (reverted)" in plain
+
+
+def test_a_locked_pin_is_badged_locked_by_the_editor():
+    j, d = _pinned_junction("locked")
+    plain = render_inspector(j, "final", Pin(0, 1, 2.0, 3.0, "locked"), pin_decision=d).plain
+    assert "locked by the editor" in plain and "pinned (locked)" in plain
+
+
+def test_the_inspector_never_prints_negative_zero():
+    j, d = _pinned_junction("locked")
+    j.states[-1].in_time = 2.99995  # a sub-frame rounding difference
+    plain = render_inspector(j, "final", None).plain
+    assert "-0.00" not in plain

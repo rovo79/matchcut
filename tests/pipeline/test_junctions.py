@@ -16,6 +16,7 @@ from matchcut.pipeline.junctions import (
     frames_delta,
     load_stage_timelines,
     scorer_for_workspace,
+    signed,
     stage_timeline_paths,
 )
 from matchcut.pipeline.passes import run_passes
@@ -392,3 +393,43 @@ def test_a_pass_that_moves_a_pinned_junction_later_keeps_its_own_label():
     j = build_junctions(stages[:2] + [("final", moved)])[0]
     assert j.history()[-1].startswith("final: out -0.38s")
     assert j.history()[1].startswith("editor (before matchcut):")
+
+
+def test_signed_never_prints_negative_zero():
+    assert signed(-0.001) == "+0.00"
+    assert signed(-0.004) == "+0.00"
+    assert signed(0.0) == "+0.00"
+    assert signed(-0.006) == "-0.01"
+    assert signed(0.25) == "+0.25"
+    assert signed(-1.5, 1) == "-1.5"
+
+
+def test_frame_delta_of_a_tiny_negative_move_is_plus_zero():
+    assert frame_delta(16.21, 16.2099, 25.0) == "+0.00s (+0f)"
+    assert frames_delta(-0.0001, 25.0) == "+0.00s (+0f)"
+
+
+def _pinned_stages(origin):
+    """roughcut -> matchcut where the editor pinned c001/c002 before the matchcut pass."""
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    pin = Decision("editor", "pinned", ["c001", "c002"], f"{origin} by the editor: out 2.00s, in 3.00s", None,
+                   {"out_shot": 0, "in_shot": 1, "out_time": 2.0, "in_time": 3.0, "origin": origin, "note": "", "out": 2.0, "in_": 3.0})
+    passed = tl("matchcut", [clip("c001", 0, 0.0, 2.0, locked_out=True), clip("c002", 1, 3.0, 5.0, locked_in=True)], history=[pin])
+    return [("roughcut", rough), ("matchcut", passed)]
+
+
+def test_a_reverted_pin_reads_reverted_in_the_history_and_the_origin():
+    j = build_junctions(_pinned_stages("reverted"))[0]
+    assert j.pin_origin == "reverted"
+    assert j.history()[-1] == "editor (before matchcut): reverted"
+
+
+def test_a_locked_pin_still_reads_locked():
+    j = build_junctions(_pinned_stages("locked"))[0]
+    assert j.pin_origin == "locked"
+    assert j.history()[-1] == "editor (before matchcut): locked"
+
+
+def test_a_junction_without_a_pin_has_no_origin():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
+    assert build_junctions([("roughcut", rough)])[0].pin_origin is None

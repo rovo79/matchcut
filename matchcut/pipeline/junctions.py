@@ -53,15 +53,23 @@ def scorer_for_workspace(ws: Path, cfg: PipelineConfig) -> Optional[MatchScorer]
         return None
 
 
+def signed(value: float, places: int = 2) -> str:
+    """``value`` with an explicit sign, never ``-0.00``: a value that rounds to zero prints as ``+0.00``."""
+    v = round(value, places)
+    if v == 0:
+        v = 0.0  # drops the sign of -0.0
+    return f"{v:+.{places}f}"
+
+
 def frames_delta(seconds: float, fps: float) -> str:
     frames = int(round(seconds * fps)) if fps > 0 else 0
-    return f"{seconds:+.2f}s ({frames:+d}f)"
+    return f"{signed(seconds)}s ({frames:+d}f)"
 
 
 def frame_delta(t0: float, t1: float, fps: float) -> str:
     """The move from ``t0`` to ``t1`` in seconds and in whole frames on the frame grid (round(t1*fps) - round(t0*fps))."""
     frames = int(round(t1 * fps)) - int(round(t0 * fps)) if fps > 0 else 0
-    return f"{t1 - t0:+.2f}s ({frames:+d}f)"
+    return f"{signed(t1 - t0)}s ({frames:+d}f)"
 
 
 def _noise(fps: float) -> float:
@@ -84,7 +92,7 @@ class JunctionState:
     def locked(self) -> bool:
         return self.locked_out and self.locked_in
 
-    def change_from(self, prev: "JunctionState", fps: float) -> str:
+    def change_from(self, prev: "JunctionState", fps: float, lock_word: str = "locked") -> str:
         parts: List[str] = []
         floor = _noise(fps) - 1e-6
         if abs(self.out_time - prev.out_time) >= floor:
@@ -94,7 +102,7 @@ class JunctionState:
         if (self.transition, round(self.transition_seconds, 3)) != (prev.transition, round(prev.transition_seconds, 3)):
             parts.append(self.transition if self.transition == "cut" else f"{self.transition} {self.transition_seconds:.2f}s")
         if self.locked and not prev.locked:
-            parts.append("locked")
+            parts.append(lock_word)
         return ", ".join(parts)
 
 
@@ -145,6 +153,15 @@ class Junction:
     def pinned(self) -> bool:
         return any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
 
+    @property
+    def pin_origin(self) -> Optional[str]:
+        """How the editor pinned this junction ("locked" or "reverted"), from the latest pinned decision; None without one."""
+        for d in reversed(self.decisions):
+            if d.pass_name == "editor" and d.action == "pinned":
+                origin = d.data.get("origin")
+                return str(origin) if origin else "locked"
+        return None
+
     def _is_clip_level(self, i: int) -> bool:
         return i < len(self.clip_level) and self.clip_level[i]
 
@@ -171,8 +188,9 @@ class Junction:
     def _changes(self) -> List[Tuple[str, str]]:
         """(stage, change) for every stage after the baseline that moved something, in stage order."""
         out: List[Tuple[str, str]] = []
+        origin = self.pin_origin or "locked"
         for prev, cur in zip(self.states, self.states[1:]):
-            change = cur.change_from(prev, self.fps)
+            change = cur.change_from(prev, self.fps, lock_word=origin if self._pinned_in(cur.stage) else "locked")
             if change:
                 out.append((cur.stage, change))
         return out
