@@ -155,6 +155,18 @@ class RenderConfig:
 
 
 @dataclass
+class ReviewConfig:
+    """Temporal editorial review in mpv (``matchcut.review``)."""
+
+    pre_seconds: float = 2.0  # shown before the cut
+    post_seconds: float = 2.0  # shown after the transition
+    width: int = 640  # width of rendered windows
+    crf: int = 23  # quality of rendered windows
+    mpv: str = "mpv"  # the mpv binary
+    always_render: bool = False  # render every window instead of playing hard cuts from an EDL
+
+
+@dataclass
 class PipelineConfig:
     source: str = ""
     workspace: str = "workspace"
@@ -173,6 +185,7 @@ class PipelineConfig:
     music: MusicConfig = field(default_factory=MusicConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
+    review: ReviewConfig = field(default_factory=ReviewConfig)
 
     # ------------------------------------------------------------------ io
     @property
