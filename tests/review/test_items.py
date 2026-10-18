@@ -257,3 +257,21 @@ def test_the_key_depends_on_the_review_config_the_source_and_the_kind(tmp_path):
     assert k != review_key(moved, w, str(src), cfg, "edl")
     src.write_bytes(b"y" * 11)  # the footage changed
     assert k != review_key(sub, w, str(src), cfg, "edl")
+
+
+def test_a_sub_frame_edit_gives_a_new_edl_not_a_stale_cached_one(demo_video, tmp_path):
+    ws = workspace(tmp_path, demo_video, final=two_shots())
+    cfg = small_cfg()
+    first = prepare_review(ws, cfg, "final", 0).b
+    two_shots(inn=5.01).save(ws / "final.json")  # 0.01 s at 25 fps: below the frame grid
+    second = prepare_review(ws, cfg, "final", 0).b
+    assert second.kind == "edl" and second.cached is False and second.path != first.path
+    assert ",5.0100," in second.path.read_text() and ",5.0100," not in first.path.read_text()
+
+
+def test_the_item_stage_is_the_loaded_stage_name_even_if_the_timeline_has_none(demo_video, tmp_path):
+    ws = workspace(tmp_path, demo_video, final=two_shots(stage=""))
+    cfg = small_cfg()
+    b = prepare_review(ws, cfg, "final", 0).b
+    assert b.stage == "final" and b.path.name.startswith("final_s0-s2_")
+    assert prepare_review(ws, cfg, b.stage, b.index, force_render=True).b.kind == "render"

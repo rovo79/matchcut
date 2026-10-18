@@ -124,6 +124,7 @@ def _write_edl(text: str, path: Path) -> None:
 
 def _item(
     tl: Timeline,
+    stage: str,
     junction: int,
     media: MediaInfo,
     cfg: PipelineConfig,
@@ -136,10 +137,11 @@ def _item(
     if w.duration <= 0:
         raise ReviewError("the review window is empty: raise review.pre_seconds or review.post_seconds")
     kind = "render" if force_render or needs_render(tl, w, cfg) else "edl"
-    sub = snap_to_frames(sub_timeline(tl, w), bounds)
+    sub = sub_timeline(tl, w)
+    if kind == "render":  # a render snaps to frames; an EDL plays the unsnapped window, so it must be keyed on that
+        sub = snap_to_frames(sub, bounds)
     key = review_key(sub, w, media.path, cfg, kind)
     a, b = tl.clips[junction], tl.clips[junction + 1]
-    stage = tl.stage or "cut"
     path = out_dir / f"{stage}_s{a.shot_index}-s{b.shot_index}_{key}.{'edl' if kind == 'edl' else 'mp4'}"
     transition = _transition_text(tl, junction)
     label = f"{prefix}{stage}  shot {a.shot_index} -> shot {b.shot_index}  {transition}"
@@ -179,19 +181,19 @@ def prepare_review(
     bounds = _bounds(ws)
     out_dir = ws / "review"
     if not ab:
-        return ReviewPair(_item(tl, index, media, cfg, out_dir, "", force_render, bounds))
+        return ReviewPair(_item(tl, stage, index, media, cfg, out_dir, "", force_render, bounds))
     a_ref, b_ref = tl.clips[index], tl.clips[index + 1]
-    base: Optional[Tuple[Timeline, int]] = None
-    for _, timeline in stages[:k]:
+    base: Optional[Tuple[str, Timeline, int]] = None
+    for base_stage, timeline in stages[:k]:
         found = locate_junction(timeline, a_ref, b_ref)
         if found is not None:
-            base = (timeline, found)
+            base = (base_stage, timeline, found)
             break
     if base is None:
         note = f"nothing earlier to compare: this junction first appears at {stage}"
-        return ReviewPair(_item(tl, index, media, cfg, out_dir, "", force_render, bounds), None, note)
-    b = _item(tl, index, media, cfg, out_dir, "B  ", force_render, bounds)
-    a = _item(base[0], base[1], media, cfg, out_dir, "A  ", force_render, bounds)
+        return ReviewPair(_item(tl, stage, index, media, cfg, out_dir, "", force_render, bounds), None, note)
+    b = _item(tl, stage, index, media, cfg, out_dir, "B  ", force_render, bounds)
+    a = _item(base[1], base[0], base[2], media, cfg, out_dir, "A  ", force_render, bounds)
     return ReviewPair(b, a)
 
 

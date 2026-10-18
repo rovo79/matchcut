@@ -62,6 +62,8 @@ def _encode_tail(cfg: PipelineConfig, dst: Path, has_audio: bool) -> list:
     return tail
 
 
+# Note: the window times come from the unsnapped stage timeline while the render is snapped to frames,
+# so on unsnapped stages the trim can drift by under one frame.
 def _trim_and_label(src: Path, dst: Path, w: Window, has_audio: bool, label: str, cfg: PipelineConfig) -> None:
     ffmpeg = _require("ffmpeg")
     v = f"[0:v]trim=start={w.offset:.4f}:duration={w.duration:.4f},setpts=PTS-STARTPTS"
