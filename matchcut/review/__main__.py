@@ -55,8 +55,10 @@ def _play(ws: Path, cfg: PipelineConfig, args: argparse.Namespace, pair: ReviewP
             controller.stop()
         elif key == "":
             if not controller.toggle():
-                print(pair.note or "nothing to toggle")
-                continue
+                if controller.running():
+                    print(pair.note or "nothing to toggle")
+                    continue
+                controller.play_pair(pair)  # the mpv window was closed: Enter plays the junction again
         else:
             continue
         print(controller.status)
@@ -88,6 +90,9 @@ def main(
         return 1
     except KeyboardInterrupt:
         return 130
+    except Exception as e:  # malformed workspace data and the like: one line, not a traceback
+        print(f"review failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
     finally:
         if controller is not None:
             controller.close()

@@ -42,7 +42,7 @@ class EditView(Vertical):
         Binding("enter", "toggle_history", "History"),
         Binding("p", "play", "Play"),
         Binding("a", "ab", "A/B"),
-        Binding("s", "stop_play", "Stop"),
+        Binding("s", "stop_play", "Pause"),
     ]
 
     def __init__(self, **kwargs) -> None:

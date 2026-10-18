@@ -99,7 +99,7 @@ from mpv's OSD; the A/B concat for players without IPC keeps burned-in labels).
 ## Playback (mpv)
 
 `MpvSession` starts `mpv --idle=yes --force-window=yes --keep-open=yes --no-terminal
---input-ipc-server=<socket> [extra args]` once and reuses it; a headless session adds
+--hr-seek=yes --no-resume-playback --input-ipc-server=<socket> [extra args]` once and reuses it; a headless session adds
 `--vo=null --ao=null` (tests) or caller-supplied `--vo=image …` (the demo). The client
 speaks the documented JSON IPC: one JSON object per line, integer `request_id`, replies
 matched by id, events skipped; every request has a timeout (default 2 s; loading a file
@@ -109,14 +109,23 @@ falls back to the system opener (a named pipe would be the way to add it).
 
 `ReviewController`:
 
-- `play(item, from_cut=None)`: load the item (`loadfile <path> replace`), wait for
-  `file-loaded`, set `loop-file=inf`, seek to `item.cut + from_cut` (or the item's
-  start when `from_cut` is None), unpause, and show the label for 2 s
-  (`show-text`); remembers the item as current.
+- `play(item, from_cut=None)`: open the item AT its target: set the `start` property
+  to `item.cut + from_cut` (0 when `from_cut` is None, clamped into the item), load it
+  (`loadfile <path> replace`), wait for `file-loaded`, reset `start` to `none` (so a
+  looping file wraps to 0), set `loop-file=inf`, unpause, and show the label for 2 s
+  (`show-text`); remembers the item as current. (Loading and then seeking showed one or two frames
+  of the window's start before the seek; per-file `loadfile` options are avoided because their
+  argument position changed in mpv 0.38.)
 - `play_pair(pair)`: plays A when there is one, else B; `toggle()` switches between
   A and B, reading `time-pos` of the current item and seeking the other to the same
   offset from its own cut (clamped into the item), and shows the other label.
-- `stop()`: pause and keep the window (`keep-open`); `close()`: quit mpv.
+- `stop()`: pause and keep the window (`keep-open`); with no live mpv it sets the status
+  `mpv is not running` and returns False; `close()`: quit mpv.
+- A failed mpv start is remembered only for 30 s (injectable clock) or until `review.mpv`
+  changes; then it is tried again.
+- On Linux mpv is started with `PR_SET_PDEATHSIG(SIGTERM)` (ctypes, from a thread that lives as
+  long as the session, since the signal follows the forking thread), so it dies with the app even
+  when the app is killed; elsewhere an orphan may remain. The user's `mpv.conf` and scripts are honoured.
 - When mpv is missing or fails to start: the controller renders (forcing
   `always_render`) and opens the file with the system opener (`open` / `xdg-open`);
   for an A/B it renders the A/B concat file (A, 0.5 s black and silence, B, labels
@@ -130,7 +139,7 @@ falls back to the system opener (a named pipe would be the way to add it).
 
 Keys while the Edit view has focus (footer): `p` **Play** (B = the inspected stage,
 looping), `a` **A/B** (first press: prepare and play A; later presses on the same
-junction toggle A/B at the same offset from the cut), `s` **Stop** (pause). One line
+junction toggle A/B at the same offset from the cut), `s` **Pause**. One line
 `#review-status` under the frames shows the controller's status, or when idle
 `p play · a compare with <baseline stage>` (or `p play` when the junction first
 appears at the inspected stage). Preparation and every IPC call run in a Textual
@@ -162,3 +171,11 @@ displayed; plus an Edit-tab screenshot with the review status. Committed as imag
 Human acceptance (`docs/M2B-ACCEPTANCE.md`, pending a desktop): watch three junctions
 in a real mpv window, toggle A/B, compare with `final.mp4`, judge whether motion and
 timing can be assessed — the question M1's verdict table left open.
+
+## Amendments after the whole-branch review
+
+- Items are opened at their target (`start` property), never loaded and then seeked: no frame from before the target is shown after a toggle.
+- A window that stops mid-cut renders its music with a 1 ms fade-out (`render.NO_FADE_SECONDS`; `afade` with `d=0` falls back to a default length) and the probed music length; only a window reaching the last clip keeps the cut's fade. `loudnorm` on a short excerpt can pump (documented).
+- Rendered windows are derived from the frame-snapped stage timeline, so `cut` and `offset` are frame-exact; EDL windows keep the unsnapped timeline. The cache key covers the snapped sub-timeline and whether the window ends the cut.
+- `workspace/review/.tmp/` files older than an hour are removed when a window is prepared.
+- The `s` key is labelled Pause. `python -m matchcut.review`: Enter after the window was closed plays the pair again; unexpected data errors print `review failed: <type>: <message>` and exit 1.

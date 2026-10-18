@@ -131,3 +131,18 @@ def test_window_edl_escapes_a_path_with_special_characters():
     text = window_edl(CUTS, w, "/media/a,b;c.mp4")
     path = "/media/a,b;c.mp4"
     assert f"%{len(path.encode('utf-8'))}%{path},12.0000" in text
+
+
+def test_a_window_reaching_into_the_fade_out_needs_a_render():
+    t = tl((0, 0.0, 3.0, "cut", 0), (1, 10.0, 13.0, "cut", 0), (2, 20.0, 23.0, "cut", 0), fade_out=1.0)  # the cut is 9.0 s; the fade starts at 8.0
+    cfg = PipelineConfig()
+    assert needs_render(t, review_window(t, 1, 1.0, 3.0), cfg)      # the window runs to 9.0, through the fade
+    assert not needs_render(t, review_window(t, 1, 1.0, 1.9), cfg)  # it stops at 7.9, before the fade
+    assert not needs_render(t, review_window(t, 0, 1.0, 1.0), cfg)  # a window nowhere near the end of the cut
+
+
+def test_a_zero_pre_starts_exactly_at_the_cut_and_the_edl_skips_the_empty_outgoing_segment():
+    w = review_window(CUTS, 1, 0.0, 2.0)
+    assert (w.start, w.cut, w.end) == (6.0, 6.0, 8.0)
+    assert (w.first, w.last, w.offset, w.duration) == (1, 2, 3.0, 2.0)  # the window begins at the end of clip 1: nothing of it is played
+    assert window_edl(CUTS, w, "/media/src.mp4") == "# mpv EDL v0\n/media/src.mp4,20.0000,2.0000,title=final s2 c003\n"

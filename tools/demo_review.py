@@ -98,6 +98,13 @@ def caption_text(item: ReviewItem, tag: str, frames: int, extra: str) -> str:
 
 def build_strip(frames_dir: Path, first: int, count: int, caption: str, out: Path, scratch: Path, drawtext: bool) -> int:
     """One half of a sheet: ``count`` frames from number ``first`` (1-based), every Nth, tiled, with a caption bar. Returns the tiles."""
+    # only this half's frames go to ffmpeg: it restarts ``trim`` when the picture size changes (A and B can differ in
+    # size), which would let the other half's frames into the strip
+    part = scratch / (out.stem + "-frames")
+    shutil.rmtree(part, ignore_errors=True)
+    part.mkdir(parents=True)
+    for k in range(count):
+        (part / f"{k + 1:08d}.jpg").symlink_to((frames_dir / f"{first + k:08d}.jpg").resolve())
     step = max(1, math.ceil(count / (MAX_TILES // 2)))
     tiles = len(range(0, count, step))
     rows = max(1, math.ceil(tiles / COLUMNS))
@@ -107,7 +114,7 @@ def build_strip(frames_dir: Path, first: int, count: int, caption: str, out: Pat
         text = scratch / (out.stem + ".txt")
         text.write_text(caption.format(tiled="every frame" if step == 1 else f"1 in {step} frames"), encoding="utf-8")
         vf += f",drawtext=textfile={text}:fontcolor=white:fontsize=15:x=8:y=7"
-    _ffmpeg(["-framerate", "24", "-start_number", str(first), "-i", str(frames_dir / "%08d.jpg"), "-vf", vf, "-frames:v", "1", str(out)])
+    _ffmpeg(["-framerate", "24", "-i", str(part / "%08d.jpg"), "-vf", vf, "-frames:v", "1", str(out)])
     return tiles
 
 
@@ -116,8 +123,7 @@ class Capture:
 
     def __init__(self) -> None:
         self.n_a = 0  # frames 1..n_a were displayed while A played
-        self.n_load = 0  # frames written while B loaded and seeked (the start of the file, before the seek): dropped
-        self.n_b = 0  # frames n_a + n_load + 1 .. are B after the seek
+        self.n_b = 0  # frames n_a + 1 .. are B, from its target to the end of its window
         self.a_pos = 0.0
         self.b_pos = 0.0
         self.status_a = ""
@@ -142,18 +148,19 @@ def _play_once(cfg: PipelineConfig, pair: Any, frames_dir: Path, a_seconds: floa
         controller.play_pair(pair)
         cap.status_a = controller.status
         time.sleep(a_seconds)
+        session[0].set("pause", True)  # hold A, so no A frame can be written while B opens
+        time.sleep(0.2)
         cap.n_a = len(_frames(frames_dir))
         cap.a_pos = float(session[0].get("time-pos"))
         if not controller.toggle():
             raise ReviewError("toggle did nothing")
         cap.status_b = controller.status
-        after_toggle = len(_frames(frames_dir))
-        cap.n_load = after_toggle - cap.n_a
         cap.b_pos = float(session[0].get("time-pos"))
+        target = pair.b.cut + (cap.a_pos - pair.a.cut)
         time.sleep(max(0.3, pair.b.duration - cap.b_pos - 0.15))  # to the end of B's window, short of the loop restart
         fps = float(session[0].get("container-fps") or 24)
         # frames past the end of B's window are the loop restarting (the sleep can overshoot by a frame): not part of the window
-        cap.n_b = min(len(_frames(frames_dir)) - after_toggle, int((pair.b.duration - cap.b_pos) * fps))
+        cap.n_b = min(len(_frames(frames_dir)) - cap.n_a, int((pair.b.duration - target) * fps))
         session[0].get("time-pos")  # raises if mpv died meanwhile
     finally:
         controller.close()
@@ -185,12 +192,12 @@ def demo_junction(ws: Path, cfg: PipelineConfig, index: int, stage: Optional[str
     sheet = out_dir / f"review-j{index}.jpg"
     strip_a, strip_b = work / "a.png", work / "b.png"
     ta = build_strip(frames_dir, 1, cap.n_a, caption_text(pair.a, "A", cap.n_a, f"; played from the start to {offset:+.2f} s from the cut"), strip_a, work, drawtext)
-    first_b = cap.n_a + cap.n_load + 1
+    first_b = cap.n_a + 1
     tb = build_strip(frames_dir, first_b, cap.n_b, caption_text(pair.b, "B", cap.n_b, f"; from {cap.b_pos - pair.b.cut:+.2f} s from the cut to the end of the window"), strip_b, work, drawtext)
     _ffmpeg(["-i", str(strip_a), "-i", str(strip_b), "-filter_complex", "[0:v][1:v]vstack=inputs=2", "-q:v", "5", "-frames:v", "1", str(sheet)])
     summary = (
         f"  A: {pair.a.kind} {pair.a.transition}, {cap.n_a} frames ({ta} tiles); B: {pair.b.kind} {pair.b.transition}, {cap.n_b} frames ({tb} tiles), "
-        f"{cap.n_load} frames written while B loaded and seeked were dropped; caption text {'drawn' if drawtext else 'skipped (no drawtext filter)'}"
+        f"no frames dropped (B is opened at its target); caption text {'drawn' if drawtext else 'skipped (no drawtext filter)'}"
     )
     print(summary)
     print(f"  {sheet}")

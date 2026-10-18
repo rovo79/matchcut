@@ -30,7 +30,7 @@ HELP_TEXT = """Control room keys
  c/r/a continue / redo with note / abort a checkpoint (Run view)
  f     cycle the log filter (Run view)           o  open the current image or render externally
  u     toggle a shot's usable flag (Shots)       ←/→ junction · [ ] stage · l lock · v revert · x clear pin · Enter history (Edit)
- p/a/s play the junction / A/B against the baseline / stop, in mpv (Edit)
+ p/a/s play the junction / A/B against the baseline / pause, in mpv (Edit)
  Enter edit a config value (Config)              ?  this help      Esc  close      q  quit
 
 Press Escape to close."""

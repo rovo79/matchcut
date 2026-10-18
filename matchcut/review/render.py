@@ -25,6 +25,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 CUT_TAG_SECONDS = 0.3
 AB_GAP_SECONDS = 0.5
+# The music fade belongs to the end of the whole cut. A window that stops mid-cut gets a fade this short instead (1 ms is
+# inaudible; afade with d=0 falls back to a default length, so "no fade" cannot be 0).
+NO_FADE_SECONDS = 0.001
 _SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ._->")
 
 
@@ -62,8 +65,8 @@ def _encode_tail(cfg: PipelineConfig, dst: Path, has_audio: bool) -> list:
     return tail
 
 
-# Note: the window times come from the unsnapped stage timeline while the render is snapped to frames,
-# so on unsnapped stages the trim can drift by under one frame.
+# Note: ``w`` must come from the frame-snapped stage timeline (items.py derives rendered windows from one), so the
+# trim below lands on the cut exactly; snapping the sub-timeline again here is then a no-op.
 def _trim_and_label(src: Path, dst: Path, w: Window, has_audio: bool, label: str, cfg: PipelineConfig) -> None:
     ffmpeg = _require("ffmpeg")
     v = f"[0:v]trim=start={w.offset:.4f}:duration={w.duration:.4f},setpts=PTS-STARTPTS"
@@ -74,6 +77,15 @@ def _trim_and_label(src: Path, dst: Path, w: Window, has_audio: bool, label: str
         graph.append(f"[0:a]atrim=start={w.offset:.4f}:duration={w.duration:.4f},asetpts=PTS-STARTPTS[a]")
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-i", str(src), "-filter_complex", ";".join(graph), "-map", "[v]"]
     run(cmd + _encode_tail(cfg, dst, has_audio), capture=False)
+
+
+def _audio_duration(path: str) -> Optional[float]:
+    """Length of an audio file in seconds, or None when ffprobe cannot tell."""
+    try:
+        out = run([_require("ffprobe"), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)])
+        return float(out.stdout.decode("utf-8", "replace").strip())
+    except (MediaError, ValueError):
+        return None
 
 
 def _tmp(out_dir: Path, suffix: str) -> Path:
@@ -104,14 +116,17 @@ def render_window(
     """Render the window of ``tl`` to ``out_path`` (mp4). ``label`` is burned in only when given."""
     out_path = Path(out_path)
     sub = snap_to_frames(sub_timeline(tl, w), bounds)
-    music = None
+    music, music_duration = None, None
     if cfg.music.path:
         music = dataclasses.replace(cfg.music, start=music_start(tl, w, cfg.music.start))
+        if w.last != len(tl.clips) - 1:  # the window stops mid-cut: the full cut has no fade here
+            music = dataclasses.replace(music, fade_out=NO_FADE_SECONDS)
+        music_duration = _audio_duration(cfg.music.path)  # as the full render: the music cannot run past its own end
     has_audio = media.has_audio or music is not None
     rcfg = RenderConfig(enabled=True, width=cfg.review.width, crf=cfg.review.crf, preset="veryfast", audio_bitrate=cfg.render.audio_bitrate)
     full, trimmed = _tmp(out_path.parent, ".full.mp4"), _tmp(out_path.parent, ".mp4")
     try:
-        render(sub, media, rcfg, full, music=music)
+        render(sub, media, rcfg, full, music=music, music_duration=music_duration)
         use_label = label if label and _has_drawtext(_require("ffmpeg")) else ""
         try:
             _trim_and_label(full, trimmed, w, has_audio, use_label, cfg)

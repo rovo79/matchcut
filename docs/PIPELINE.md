@@ -319,7 +319,7 @@ can be watched rather than inferred from stills. The Edit tab drives it with `p`
 
 ```shell
 python -m matchcut.review WORKSPACE --index 1 --ab           # prepare A (first cut) and B (final)
-python -m matchcut.review WORKSPACE --index 1 --ab --play    # play in mpv; Enter flips A/B, s pauses, q quits
+python -m matchcut.review WORKSPACE --index 1 --ab --play    # play in mpv; Enter flips A/B, s pauses, q quits (Enter after closing the window plays it again)
 python -m matchcut.review WORKSPACE --index 2 --stage polish --render   # always render the window
 ```
 
@@ -344,7 +344,11 @@ holds a transition, overlaps the timeline's fade-in or fade-out, or music is
 configured; the render is the clips around the junction, as a short timeline through
 the normal renderer, trimmed to the window. Errors are one line on
 stderr and exit code 1 (`no stage X in WS`, `junction 3 is out of range 1..2`,
-`source footage not found: ...`, `ffmpeg not found on PATH`).
+`source footage not found: ...`, `ffmpeg not found on PATH`); an unexpected
+problem with the workspace data prints `review failed: <type>: <message>` and
+exits 1. Rendered windows are cut on the frame-snapped timeline, so `cut=` is on
+the frame grid. A render killed half way leaves a file in `workspace/review/.tmp/`;
+files there older than an hour are removed the next time a window is prepared.
 
 The `review` section of the workspace's `config.json` (the command reads it from
 there; a pipeline command's `--set review.pre_seconds=3` writes it):

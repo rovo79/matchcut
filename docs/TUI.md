@@ -44,7 +44,7 @@ cut against the inspected stage; one column when the inspected stage is the
 baseline), the cut points with deltas in seconds and frames, the why line and
 the history. `Enter` expands the full history and every decision. The footer
 shows the keys that apply: `l Lock`, `v Revert`, `x Clear pin`, `⏎ History`,
-`p Play`, `a A/B`, `s Stop`; `o` opens the blend image in the system viewer.
+`p Play`, `a A/B`, `s Pause`; `o` opens the blend image in the system viewer.
 
 ![Junction 1 of the Big Buck Bunny clip: a beat boundary with a 0.75 s dissolve](screenshots/edit-junction-1.svg)
 
@@ -69,7 +69,7 @@ junction in [mpv](https://mpv.io):
 |---|---|
 | `p` | Play the inspected stage's window around the junction (2 s before the cut to 2 s after the transition by default), looping (`loop-file`; verified headless only, see [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md)). |
 | `a` | A/B. The first press prepares and plays **A**, the same junction at its baseline stage (the first stage where its two clips are adjacent, usually the rough cut). Later presses on the same junction toggle A and B at the same offset from the cut. When the junction first appears at the inspected stage there is nothing earlier to compare and the status line says so. |
-| `s` | Stop: pause what was played. |
+| `s` | Pause what was played (press `p` or `a` to play again; the mpv window stays open). When the mpv window has been closed the status line reads `mpv is not running`. |
 
 One line under the frames, `#review-status`, shows what is happening:
 `p play · a compare with roughcut` when idle, then `preparing the junction for
@@ -80,11 +80,13 @@ shot 0 -> shot 1  dissolve 0.75s (rendered)`: the `A` / `B` prefixes appear only
 in an A/B comparison. Other lines are
 `paused` and `review failed: <message>`. Preparation and every mpv command run
 in a thread worker, so `←`/`→` and `[`/`]` keep working; a second request for
-the junction being prepared is ignored (`already preparing this junction`). A
+the junction being prepared is ignored (`already preparing this junction`),
+whichever of `p` and `a` asked first: an `a` pressed while `p` is still preparing
+the same junction is rejected the same way. A
 result for a junction you have since left still plays, because you asked for
 it, but does not overwrite the selected junction's status line.
 
-![The Edit tab after p on junction 1: the status line under the frames and the Play, A/B and Stop keys in the footer](screenshots/m2b-edit-review.svg)
+![The Edit tab after p on junction 1: the status line under the frames and the Play, A/B and Pause keys in the footer](screenshots/m2b-edit-review.svg)
 
 *The Edit tab after `p`: the controller is the real one, its mpv session a stub
 (a headless capture), so nothing was played.*
@@ -104,7 +106,20 @@ mpv must be on `PATH` (or named in `review.mpv`); it is started on the first
 opened in the system player (`open` / `xdg-open`), the status line says `mpv not
 found: opened <file> in the system player (no A/B toggle)`, and `a` opens one
 file with A, half a second of black and silence, and B, with the labels burned in.
-mpv control is not implemented on Windows (the same fallback applies there). The
+mpv control is not implemented on Windows (the same fallback applies there).
+
+How mpv is started: `--idle=yes --keep-open=yes --hr-seek=yes --no-resume-playback`
+plus the IPC socket, and nothing else is switched off, so your own `mpv.conf`,
+key bindings, scripts and OSC are honoured (a script that changes seeking or
+looping can change what you see). Every item is opened *at* its target position
+(`start` is set before the load and reset after it), so a toggle never flashes
+the start of the other window. If starting mpv fails (not installed, wrong
+`review.mpv`), the app falls back to the system player and tries mpv again after
+30 s or as soon as `review.mpv` changes, so installing mpv does not need a restart.
+Closing the mpv window is fine: the next `p` or `a` opens a new one. On Linux
+mpv is told to exit when the app dies, even when the app is killed; on macOS and
+Windows an mpv left open by a killed app stays open until you close it (a normal
+quit closes it). The
 same review runs outside the TUI with `python -m matchcut.review`
 ([PIPELINE.md](PIPELINE.md#reviewing-a-junction-in-motion)), and
 [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md) is the procedure and the evidence so far.

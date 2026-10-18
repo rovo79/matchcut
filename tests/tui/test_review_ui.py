@@ -183,7 +183,7 @@ def test_s_pauses_the_played_junction_not_the_selected_one(mock_workspace, fakes
 def test_a_stop_that_leaves_no_status_does_not_blank_the_line(mock_workspace, fakes, monkeypatch):
     def quiet_stop(self):
         self.calls.append("stop")
-        self.status = ""  # what the real controller reports when nothing was started
+        self.status = ""  # a controller with nothing to report
 
     monkeypatch.setattr(FakeController, "stop", quiet_stop)
 
@@ -480,3 +480,29 @@ def test_a_real_headless_mpv_plays_a_junction(mock_workspace, tmp_path, monkeypa
 
     run_async(body())
     assert subprocess.run(["pgrep", "-x", "mpv"], capture_output=True).returncode != 0
+
+
+def test_the_s_key_is_labelled_pause_because_it_pauses():
+    from matchcut.tui.views.edit import EditView
+
+    labels = {b.key: b.description for b in EditView.BINDINGS if b.key in ("p", "a", "s")}
+    assert labels == {"p": "Play", "a": "A/B", "s": "Pause"}
+
+
+def test_s_after_the_mpv_window_was_closed_shows_that_mpv_is_not_running(mock_workspace, fakes, monkeypatch):
+    def closed_stop(self):
+        self.calls.append("stop")
+        self.status = "mpv is not running"  # what the real controller reports when the window is gone
+
+    monkeypatch.setattr(FakeController, "stop", closed_stop)
+
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            await pilot.press("p")
+            await wait_for(pilot, lambda: status_of(app).startswith("playing"))
+            await pilot.press("s")
+            await wait_for(pilot, lambda: status_of(app) == "mpv is not running")
+
+    run_async(body())

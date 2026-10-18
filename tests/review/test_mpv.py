@@ -4,11 +4,15 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from matchcut.review.items import prepare_review
+from matchcut.review import mpv as mpv_mod
 from matchcut.review.mpv import MpvError, MpvSession
 
 from .test_items import small_cfg, two_shots, workspace
@@ -42,6 +46,7 @@ def test_a_headless_session_loads_an_edl_window_with_its_chapters(session, edl_i
     assert len(chapters) == len(lines) == 2
     for ch, line in zip(chapters, lines):
         assert "title=" in line and ch["title"] == line.split("title=", 1)[1]
+    assert abs(chapters[1]["time"] - edl_item.cut) <= 0.05  # the second chapter starts at the cut
 
 
 def test_loop_file_wraps_the_window(session, edl_item):
@@ -141,3 +146,86 @@ def test_close_without_a_usable_socket_kills_at_once(edl_item):
     s.close()
     assert time.monotonic() - t0 < 1.5 and not s.alive()
     assert s._proc is None
+
+
+def test_the_session_args_do_not_resume_playback_and_seek_exactly(monkeypatch):
+    seen = []
+
+    def fake_popen(cmd, **kw):
+        seen.append(cmd)
+        raise OSError(2, "No such file or directory")
+
+    monkeypatch.setattr(mpv_mod.subprocess, "Popen", fake_popen)
+    with pytest.raises(MpvError, match="not found"):
+        MpvSession("mpv", headless=True).start()
+    assert "--no-resume-playback" in seen[0] and "--hr-seek=yes" in seen[0]
+    assert "--no-config" not in seen[0]  # the editor's own mpv.conf and scripts are honoured
+
+
+def test_the_death_signal_hook_is_linux_only_and_never_raises(monkeypatch):
+    import ctypes
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert mpv_mod._death_signal_hook() is None
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    def broken(*a, **k):
+        raise OSError("no libc")
+
+    monkeypatch.setattr(ctypes, "CDLL", broken)
+    assert mpv_mod._death_signal_hook() is None
+
+
+def _gone(pid):
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return True
+    return state in ("Z", "X")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux only")
+def test_mpv_dies_with_the_app_even_when_the_app_is_killed(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    code = (
+        "import time\n"
+        "from matchcut.review.mpv import MpvSession\n"
+        "s = MpvSession(headless=True)\n"
+        "s.start()\n"
+        "print(s._proc.pid, flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    app = subprocess.Popen([sys.executable, "-c", code], cwd=str(root), env={**os.environ, "PYTHONPATH": str(root)}, stdout=subprocess.PIPE, text=True)
+    pid = 0
+    try:
+        pid = int(app.stdout.readline())
+        assert not _gone(pid)
+        app.kill()  # SIGKILL: no atexit, no close()
+        app.wait(timeout=5)
+        deadline = time.time() + 5
+        while not _gone(pid) and time.time() < deadline:
+            time.sleep(0.05)
+        assert _gone(pid), "mpv outlived the app that started it"
+    finally:
+        app.kill()
+        app.wait(timeout=5)
+        if pid and not _gone(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_mpv_started_from_a_worker_thread_survives_the_thread(edl_item):
+    """PDEATHSIG fires when the *thread* that started mpv exits (the TUI starts it from worker threads)."""
+    import threading
+
+    s = MpvSession(headless=True)
+    try:
+        t = threading.Thread(target=s.start)
+        t.start()
+        t.join()
+        time.sleep(0.5)
+        assert s.alive()
+        s.load(str(edl_item.path))
+        assert s.get("duration") > 0
+    finally:
+        s.close()
+    assert not s.alive()

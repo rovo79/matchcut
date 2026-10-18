@@ -11,6 +11,7 @@ import pytest
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.demo import make_click_track
 from matchcut.pipeline.media import MediaError, MediaInfo, extract_frame, probe
+from matchcut.pipeline.render import snap_to_frames
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
 from matchcut.review import items as it
 from matchcut.review import render as rv
@@ -98,11 +99,11 @@ def test_a_forced_render_of_a_hard_cut_cuts_from_blue_to_red(demo_video, tmp_pat
 
 
 def test_a_dissolve_junction_renders_and_blends_mid_transition(demo_video, tmp_path):
-    # clip 1 lasts 1.5 s, so the incoming clip fades in from 1.5 - 0.6 = 0.9; the cut lasts 2.4 s
+    # clip 1 lasts 1.52 s once snapped to the 25 fps grid (0.48 to 2.00), so the incoming clip fades in from 1.52 - 0.6 = 0.92
     ws = workspace(tmp_path, demo_video, final=two_shots("dissolve", 0.6))
     b = prepare_review(ws, small_cfg(), "final", 0).b
     assert b.kind == "render" and b.transition == "dissolve 0.60s"
-    assert abs(b.cut - 0.9) < 1e-6 and abs(duration(b.path) - 2.4) < 0.1
+    assert abs(b.cut - 0.92) < 1e-6 and abs(duration(b.path) - 2.42) < 0.1
     blue_red, blue_blue = rgb(b.path, 0.3)  # pure blue shot
     red_red, red_blue = rgb(b.path, 2.2)  # pure red shot
     mid_red, mid_blue = rgb(b.path, 1.2)
@@ -233,8 +234,9 @@ def test_music_is_offset_to_the_first_rendered_clip_without_touching_the_config(
     monkeypatch.setattr(rv, "render", record)
     b = prepare_review(ws, cfg, "final", 1).b  # junction between clip 2 and clip 3: window starts inside clip 2
     assert b.kind == "render"
-    w = review_window(cuts, 1, 1.0, 1.0)
-    assert len(seen) == 1 and seen[0].start == 4.0 + cuts.record_start(w.first) and seen[0].start > 4.0
+    snapped = snap_to_frames(cuts)  # rendered windows are cut on the frame-snapped timeline
+    w = review_window(snapped, 1, 1.0, 1.0)
+    assert len(seen) == 1 and seen[0].start == 4.0 + snapped.record_start(w.first) and seen[0].start > 4.0
     assert cfg.music.start == 4.0
     assert has_audio_stream(b.path)
 
@@ -275,3 +277,117 @@ def test_the_item_stage_is_the_loaded_stage_name_even_if_the_timeline_has_none(d
     b = prepare_review(ws, cfg, "final", 0).b
     assert b.stage == "final" and b.path.name.startswith("final_s0-s2_")
     assert prepare_review(ws, cfg, b.stage, b.index, force_render=True).b.kind == "render"
+
+
+# the rendered window is cut on the frame-snapped timeline ------------------------------------------
+
+def test_a_render_item_is_cut_on_the_frame_snapped_timeline_and_an_edl_item_on_the_unsnapped_one(demo_video, tmp_path):
+    tl = two_shots(out=2.013)  # 1.513 s of clip 1 unsnapped; on the 25 fps grid it is 1.52 s (0.48 to 2.00)
+    ws = workspace(tmp_path, demo_video, final=tl)
+    cfg = small_cfg(pre=5.0, post=1.0)  # the window starts at 0: its cut is clip 1's whole length
+    snapped = snap_to_frames(tl).record_start(1)
+    assert abs(snapped - tl.record_start(1)) > 0.005
+    edl = prepare_review(ws, cfg, "final", 0).b
+    assert edl.kind == "edl" and edl.cut == round(tl.record_start(1), 4)
+    render = prepare_review(ws, cfg, "final", 0, force_render=True).b
+    assert render.cut == round(snapped, 4)  # frame-exact: the trim of the rendered file lands on the cut
+    assert abs(render.cut * 25 - round(render.cut * 25)) < 1e-6
+
+
+def test_a_sub_frame_edit_reuses_the_cached_render_because_the_rendered_window_is_the_same(demo_video, tmp_path):
+    ws = workspace(tmp_path, demo_video, final=two_shots())
+    cfg = small_cfg()
+    first = prepare_review(ws, cfg, "final", 0, force_render=True).b
+    two_shots(inn=5.01).save(ws / "final.json")  # below the frame grid: the snapped timeline is the same
+    second = prepare_review(ws, cfg, "final", 0, force_render=True).b
+    assert second.cached is True and second.path == first.path
+
+
+# music in a mid-cut window ----------------------------------------------------------------------
+
+def audio_samples(path):
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-vn", "-ac", "1", "-ar", "22050", "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype="<f4")
+
+
+def rms(x):
+    return float(np.sqrt((x.astype(float) ** 2).mean()))
+
+
+def music_ratio(path, seconds=0.5):
+    """RMS of the last ``seconds`` of the file's audio over the RMS of ``seconds`` around its middle."""
+    x = audio_samples(path)
+    n = int(seconds * 22050)
+    mid = len(x) // 2
+    return rms(x[-n:]) / rms(x[mid - n // 2 : mid + n // 2])
+
+
+def music_cuts():
+    return Timeline(source="demo.mp4", fps=25.0, stage="final", clips=[
+        Clip("c001", 0, 0.5, 2.0, "b1"), Clip("c002", 1, 2.5, 4.0, "b2"), Clip("c003", 2, 5.0, 6.5, "b3")])
+
+
+def music_cfg(click, start, pre=1.0, post=1.0):
+    cfg = small_cfg(pre, post)
+    # music only and no loudnorm, so the level of the excerpt is the music's own; the start puts the click track's
+    # bar thump (a louder sound every 2 s) outside the two half-second windows compared
+    cfg.music.path, cfg.music.start, cfg.music.only, cfg.music.loudnorm = str(click), start, True, False
+    return cfg
+
+
+def test_a_mid_cut_window_has_no_music_fade_out(demo_video, tmp_path, monkeypatch):
+    click = make_click_track(tmp_path / "click.wav", seconds=20.0)
+    ws = workspace(tmp_path, demo_video, final=music_cuts())
+    cfg = music_cfg(click, 1.5)
+    seen = []
+    real = rv.render
+
+    def record(tl, media, rcfg, output, **kw):
+        seen.append(kw)
+        return real(tl, media, rcfg, output, **kw)
+
+    monkeypatch.setattr(rv, "render", record)
+    b = prepare_review(ws, cfg, "final", 0).b  # clips 1-2 of 3: the window ends mid-cut, 0.5 s before the end of the sub-timeline
+    assert b.kind == "render"
+    ratio = music_ratio(b.path)
+    print(f"mid-cut window: RMS(last 0.5 s) / RMS(middle 0.5 s) = {ratio:.3f}")
+    assert 0.8 <= ratio <= 1.2
+    assert seen[0]["music"].fade_out == rv.NO_FADE_SECONDS and abs(seen[0]["music_duration"] - 20.0) < 0.1
+    assert cfg.music.fade_out == 2.0  # the editor's config is untouched
+
+
+def test_a_window_that_reaches_the_end_of_the_cut_still_fades_the_music_out(demo_video, tmp_path):
+    click = make_click_track(tmp_path / "click.wav", seconds=20.0)
+    ws = workspace(tmp_path, demo_video, final=music_cuts())
+    b = prepare_review(ws, music_cfg(click, 1.5, pre=1.0, post=5.0), "final", 1).b  # the last junction, window to the end of the cut
+    assert b.kind == "render"
+    ratio = music_ratio(b.path)
+    print(f"end-of-cut window: RMS(last 0.5 s) / RMS(middle 0.5 s) = {ratio:.3f}")
+    assert ratio < 0.5
+
+
+def test_the_key_tells_a_window_that_ends_the_cut_from_one_that_does_not(tmp_path):
+    src = tmp_path / "s.mp4"
+    src.write_bytes(b"x" * 10)
+    tl = two_shots()
+    w = review_window(tl, 0, 2.0, 2.0)
+    sub = sub_timeline(tl, w)
+    cfg = PipelineConfig()
+    assert review_key(sub, w, str(src), cfg, "render", True) != review_key(sub, w, str(src), cfg, "render", False)
+
+
+# the temporary files of failed renders -------------------------------------------------------------
+
+def test_old_files_in_the_review_tmp_dir_are_swept_and_recent_ones_kept(demo_video, tmp_path):
+    import os
+    import time
+
+    ws = workspace(tmp_path, demo_video, final=two_shots())
+    tmp = ws / "review" / ".tmp"
+    tmp.mkdir(parents=True)
+    old, fresh = tmp / "old.full.mp4", tmp / "fresh.mp4"
+    old.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    os.utime(old, (time.time() - 2 * 3600, time.time() - 2 * 3600))
+    prepare_review(ws, small_cfg(), "final", 0)
+    assert not old.exists() and fresh.exists()

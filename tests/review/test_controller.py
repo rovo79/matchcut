@@ -97,6 +97,66 @@ def test_has_mpv_is_false_when_start_fails_and_never_raises():
     assert ReviewController(small_cfg(), session_factory=lambda b: 1 / 0).has_mpv() is False
 
 
+def test_stop_with_the_mpv_window_closed_says_so_instead_of_keeping_the_stale_status():
+    c = ReviewController(small_cfg(), session_factory=Fake)
+    try:
+        c.play(item())
+        assert c.status.startswith("playing ")
+        c._session.up = False  # the editor closed the mpv window
+        assert c.stop() is False
+        assert c.status == "mpv is not running"
+        assert ReviewController(small_cfg(), session_factory=Fake).stop() is False  # never started
+    finally:
+        c.close()
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_a_failed_start_is_retried_after_30_seconds_or_when_the_mpv_setting_changes():
+    clock, made = Clock(), []
+
+    class Fails(Fake):
+        def start(self):
+            made.append(self)
+            raise MpvError("boom")
+
+    cfg = small_cfg()
+    c = ReviewController(cfg, session_factory=Fails, clock=clock)
+    assert c.has_mpv() is False and len(made) == 1
+    clock.now += 29.0
+    assert c.has_mpv() is False and len(made) == 1  # too soon: not retried
+    clock.now += 2.0
+    assert c.has_mpv() is False and len(made) == 2  # 31 s after the failure
+    clock.now += 5.0
+    assert c.has_mpv() is False and len(made) == 2
+    cfg.review.mpv = "/opt/mpv/bin/mpv"  # the editor fixed the setting
+    assert c.has_mpv() is False and len(made) == 3
+
+
+def test_a_retry_that_works_starts_mpv_and_forgets_the_failure():
+    clock, tries = Clock(), []
+
+    def factory(binary):
+        tries.append(binary)
+        return Fake(binary) if len(tries) > 1 else Dead(binary)
+
+    c = ReviewController(small_cfg(), session_factory=factory, clock=clock)
+    try:
+        assert c.has_mpv() is False
+        clock.now += 31.0
+        assert c.has_mpv() is True and c.has_mpv() is True and len(tries) == 2
+        c._session.up = False  # the window is closed again: a new session starts at once (no 30 s wait)
+        assert c.has_mpv() is True and len(tries) == 3
+    finally:
+        c.close()
+
+
 @pytest.mark.parametrize("kind,cached,tail", [
     ("edl", False, "(exact source)"),
     ("edl", True, "(exact source, cached)"),
@@ -116,7 +176,7 @@ def test_the_status_strings(kind, cached, tail):
         c.close()
 
 
-def test_play_loads_loops_seeks_unpauses_and_labels_in_order():
+def test_play_opens_the_file_at_the_target_then_loops_unpauses_and_labels():
     made = []
 
     def factory(binary):
@@ -128,15 +188,16 @@ def test_play_loads_loops_seeks_unpauses_and_labels_in_order():
         it = item(cut=1.0, duration=2.0, label="B $x")
         c.play(it, from_cut=0.3)
         assert made[0].calls == [
-            ("load", str(it.path)), ("set", "loop-file", "inf"),
-            ("seek", 1.3, "absolute+exact"), ("set", "pause", False), ("show-text", "B $$x", 2000),
+            ("set", "start", "1.3000"), ("load", str(it.path)), ("set", "start", "none"), ("set", "loop-file", "inf"),
+            ("set", "pause", False), ("show-text", "B $$x", 2000),
         ]
         c.play(it, from_cut=5.0)  # clamped to the end of the item
-        assert ("seek", 1.95, "absolute+exact") in made[0].calls
+        assert ("set", "start", "1.9500") in made[0].calls
         c.play(it, from_cut=-5.0)
-        assert ("seek", 0, "absolute+exact") in made[0].calls
+        assert ("set", "start", "0.0000") in made[0].calls
         c.play(it)
-        assert made[0].calls[-3] == ("seek", 0, "absolute+exact")
+        assert made[0].calls[-6] == ("set", "start", "0.0000")  # the file is opened at its own start, never seeked
+        assert not [x for x in made[0].calls if x[0] == "seek"]
     finally:
         c.close()
 
@@ -155,7 +216,7 @@ def test_play_pair_plays_a_when_present_and_toggle_keeps_the_offset_from_the_cut
         assert c.current is a and c.pair.b is b
         assert c.toggle() is True
         assert c.current is b
-        assert ("seek", pytest.approx(1.8), "absolute+exact") in made[0].calls
+        assert ("set", "start", "1.8000") in made[0].calls
         made[0].props["time-pos"] = 1.8
         assert c.toggle() is True and c.current is a
     finally:
@@ -277,6 +338,82 @@ def test_toggling_a_and_b_keeps_the_same_offset_from_the_cut(demo_video, tmp_pat
     assert c._session is None
 
 
+# no frame of the wrong place after a toggle (vo=image writes every frame mpv shows) ----------------
+
+RAMP_SECONDS = 6.0
+RAMP_PER_SECOND = 40  # left half's luma = 40 * t: a frame says when it is from; the right half says which file it is
+
+
+def ramp_video(path, marker):
+    """6 s at 25 fps; the left half's luma is 40 * t and the right half is ``marker`` (so A and B frames tell apart)."""
+    graph = f"color=c=black:size=64x48:rate=25:duration={RAMP_SECONDS},format=yuv420p,geq=lum='if(gte(X,W/2),{marker},{RAMP_PER_SECOND}*T)':cb=128:cr=128"
+    cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", graph, "-f", "lavfi", "-i", f"sine=frequency=440:duration={RAMP_SECONDS}"]
+    # (with an audio track mpv plays in real time under --ao=null; without one vo=image runs unpaced)
+    subprocess.run(cmd + ["-c:v", "libx264", "-qp", "0", "-g", "250", "-c:a", "aac", "-shortest", str(path)], check=True)
+    return path
+
+
+def frame_times(frames_dir, first):
+    """(marker, seconds) of every frame mpv wrote from number ``first`` on, read back through a 2x1 downscale."""
+    names = sorted(frames_dir.glob("*.png"))[first:]
+    if not names:
+        return []
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-start_number", str(first + 1), "-i", str(frames_dir / "%08d.png"), "-vf", "scale=2:1:flags=area,format=gray", "-f", "rawvideo", "-"],
+        capture_output=True, check=True).stdout
+    return [(raw[2 * k + 1], raw[2 * k] / RAMP_PER_SECOND) for k in range(len(raw) // 2)]
+
+
+@needs_mpv
+def test_a_toggle_shows_no_frame_from_before_the_target(tmp_path):
+    a_path, b_path = ramp_video(tmp_path / "a.mp4", 0), ramp_video(tmp_path / "b.mp4", 255)
+    a = ReviewItem("final", 0, "A", a_path, "render", 3.0, RAMP_SECONDS, "cut", False)
+    b = ReviewItem("final", 0, "B", b_path, "render", 3.0, RAMP_SECONDS, "cut", False)
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    cfg = small_cfg()
+    for attempt in range(3):  # this mpv build's vo=image sometimes aborts at a file start: try again
+        for old in frames.glob("*"):
+            old.unlink()
+        c = ReviewController(cfg, session_factory=lambda binary: MpvSession(binary, headless=True, video_args=["--vo=image", "--vo-image-format=png", "--ao=null", "--vf=format=rgb24", f"--vo-image-outdir={frames}"]))
+        try:
+            c.play_pair(ReviewPair(b, a))
+            c._session.set("pause", True)
+            c._session.command("seek", a.cut + 0.3, "absolute+exact")  # A at cut + 0.3, held there
+            time.sleep(0.3)
+            before = len(list(frames.glob("*.png")))
+            assert c.toggle() is True and c.current is b
+            deadline = time.time() + 5
+            while time.time() < deadline and len([f for f in frame_times(frames, before) if f[0] > 200]) < 6:
+                time.sleep(0.1)
+            seen = [t for marker, t in frame_times(frames, before) if marker > 200]  # the B frames after the toggle
+            start_prop = c._session.get("start")
+            break
+        except MpvError:
+            continue
+        finally:
+            c.close()
+    else:
+        pytest.fail("mpv kept stopping under vo=image")
+    assert len(seen) >= 6, seen
+    assert min(seen) >= 3.3 - 0.05, f"a frame from before the target was shown: {sorted(seen)[:4]}"
+    assert abs(seen[0] - 3.3) <= 0.1
+    assert start_prop == "none"  # later loops start at 0 again
+    print(f"B frames after the toggle start at t={seen[0]:.2f} (target {b.cut + 0.3:.2f})")
+
+
+@needs_mpv
+def test_a_looping_item_wraps_to_its_own_start_after_being_opened_at_a_target(tmp_path):
+    a = ReviewItem("final", 0, "A", ramp_video(tmp_path / "a.mp4", 0), "render", 3.0, RAMP_SECONDS, "cut", False)
+    c = ReviewController(small_cfg(), session_factory=headless)
+    try:
+        c.play(a, from_cut=2.5)  # opened 0.5 s before its end
+        time.sleep(1.2)
+        assert float(c._session.get("time-pos")) < 2.0  # it looped to 0 (not to 5.5)
+    finally:
+        c.close()
+
+
 @needs_mpv
 def test_the_session_survives_pause_and_silence_and_no_second_mpv_is_spawned(demo_video, tmp_path):
     ws = ab_workspace(tmp_path, demo_video)
@@ -379,6 +516,69 @@ def test_cli_play_toggles_pauses_and_quits(demo_video, tmp_path, capsys):
     assert code == 0, err
     assert out.count("playing A") == 2 and out.count("playing B") == 1 and "paused" in out
     assert made[0]._session is None
+
+
+class Keys:
+    """A stdin that runs ``before(n)`` ahead of handing out its n-th line (0-based)."""
+
+    def __init__(self, lines, before):
+        self.lines, self.before, self.n = list(lines), before, 0
+
+    def readline(self):
+        if self.n >= len(self.lines):
+            return ""
+        self.before(self.n)
+        line = self.lines[self.n]
+        self.n += 1
+        return line
+
+
+def test_cli_enter_after_the_mpv_window_was_closed_plays_the_pair_again(demo_video, tmp_path, capsys):
+    ws = ab_workspace(tmp_path, demo_video)
+    (ws / "config.json").write_text('{"review": {"pre_seconds": 1.0, "post_seconds": 1.0, "width": 160}}')
+    sessions, controllers = [], []
+
+    def make_session(binary):
+        sessions.append(Fake(binary, {"time-pos": 1.0}))
+        return sessions[-1]
+
+    def factory(cfg):
+        controllers.append(ReviewController(cfg, session_factory=make_session))
+        return controllers[0]
+
+    def before(n):
+        if n == 1:
+            sessions[0].up = False  # the editor closes the mpv window before the second Enter
+
+    code, out, err = run_cli(capsys, ws, "--index", "1", "--ab", "--play", stdin=Keys(["\n", "\n", "\n", "q\n"], before), controller_factory=factory)
+    assert code == 0, err
+    assert "nothing to toggle" not in out
+    played = [ln for ln in out.splitlines() if ln.startswith("playing ")]
+    assert [ln.split()[1] for ln in played] == ["A", "B", "A", "B"]  # A, toggle to B; closed; Enter replays A; toggle to B
+    assert len(sessions) == 2
+
+
+def test_cli_enter_with_a_single_item_and_a_live_window_still_says_there_is_nothing_to_toggle(demo_video, tmp_path, capsys):
+    ws = workspace(tmp_path, demo_video, final=two_shots())
+    controllers = []
+
+    def factory(cfg):
+        controllers.append(ReviewController(cfg, session_factory=Fake))
+        return controllers[0]
+
+    code, out, _ = run_cli(capsys, ws, "--index", "1", "--play", stdin=io.StringIO("\nq\n"), controller_factory=factory)
+    assert code == 0 and "nothing to toggle" in out
+
+
+def test_cli_a_malformed_timeline_prints_one_line_and_exits_1(demo_video, tmp_path, capsys, monkeypatch):
+    ws = workspace(tmp_path, demo_video, final=two_shots())
+
+    def boom(*a, **k):
+        raise KeyError("shot_index")
+
+    monkeypatch.setattr(cli, "prepare_review", boom)
+    code, out, err = run_cli(capsys, ws, "--index", "1")
+    assert (code, out, err) == (1, "", "review failed: KeyError: 'shot_index'\n")
 
 
 def test_cli_ab_play_without_mpv_opens_the_ab_file_through_the_controller_opener(demo_video, tmp_path, capsys):

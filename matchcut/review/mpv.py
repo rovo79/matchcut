@@ -10,6 +10,7 @@ import json
 import os
 import select
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -17,11 +18,36 @@ import tempfile
 import threading
 import time
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Sequence
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence
 
 
 class MpvError(RuntimeError):
     """mpv is missing, not answering, or refused a command; the message is one line."""
+
+
+def _death_signal_hook() -> Optional[Callable[[], None]]:
+    """A ``preexec_fn`` asking Linux to SIGTERM mpv when its parent thread dies (``PR_SET_PDEATHSIG``), else None.
+
+    ctypes and stdlib only; any failure to set it up just means no hook. Other platforms have no equivalent here, so
+    there an mpv window can outlive an app that was killed (a normal exit closes it through ``close``/atexit).
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except Exception:
+        return None
+    sigterm = int(signal.SIGTERM)
+
+    def hook() -> None:  # runs in the child between fork and exec
+        try:
+            prctl(1, sigterm, 0, 0, 0)  # PR_SET_PDEATHSIG = 1
+        except Exception:
+            pass
+
+    return hook
 
 
 class MpvSession:
@@ -42,6 +68,7 @@ class MpvSession:
         self._next_id = 0
         self._eof = True  # no connection yet
         self._closing = False
+        self._parent_done: Optional[threading.Event] = None  # ends the thread that started mpv (see ``_spawn``)
 
     # -- lifecycle ----------------------------------------------------------------------------------
 
@@ -53,9 +80,12 @@ class MpvSession:
             raise MpvError("mpv control is not supported on Windows yet")
         tmp = tempfile.mkdtemp(prefix="matchcut-mpv-")
         self._sock_path = os.path.join(tmp, "ipc.sock")
-        cmd = [self.binary, "--idle=yes", "--keep-open=yes", "--no-terminal", f"--input-ipc-server={self._sock_path}", *self.video_args]
+        cmd = [
+            self.binary, "--idle=yes", "--keep-open=yes", "--no-terminal", "--hr-seek=yes", "--no-resume-playback",
+            f"--input-ipc-server={self._sock_path}", *self.video_args,
+        ]
         try:
-            self._proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._proc = self._spawn(cmd)
         except OSError as e:
             self._cleanup()
             raise MpvError(f"mpv not found: cannot run {self.binary} ({e.strerror or e})") from e
@@ -72,6 +102,32 @@ class MpvSession:
             self._eof = False
         self._reader = threading.Thread(target=self._read_loop, args=(self._sock,), name="mpv-ipc", daemon=True)
         self._reader.start()
+
+    def _spawn(self, cmd: List[str]) -> "subprocess.Popen[bytes]":
+        """Start mpv. On Linux it is started from a thread of its own that lives until ``close``: the kernel's
+        parent-death signal follows the *thread* that forked, and callers start sessions from short-lived worker threads."""
+        quiet = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        hook = _death_signal_hook()
+        if hook is None:
+            return subprocess.Popen(cmd, **quiet)  # type: ignore[call-overload]
+        done, ready = threading.Event(), threading.Event()
+        box: Dict[str, Any] = {}
+
+        def parent() -> None:
+            try:
+                box["proc"] = subprocess.Popen(cmd, preexec_fn=hook, **quiet)  # type: ignore[call-overload]
+            except BaseException as e:  # reported to the caller below
+                box["error"] = e
+            ready.set()
+            if "proc" in box:
+                done.wait()
+
+        threading.Thread(target=parent, name="mpv-parent", daemon=True).start()
+        ready.wait()
+        if "error" in box:
+            raise box["error"]
+        self._parent_done = done
+        return box["proc"]  # type: ignore[no-any-return]
 
     def _connect(self) -> None:
         deadline = time.monotonic() + 5.0
@@ -136,6 +192,9 @@ class MpvSession:
                 self._eof = True
                 self._cond.notify_all()
             self._proc = self._sock = self._reader = None
+            if self._parent_done is not None:
+                self._parent_done.set()
+                self._parent_done = None
             self._cleanup()
             try:
                 atexit.unregister(self.close)

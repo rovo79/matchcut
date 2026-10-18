@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional, Tuple
 
@@ -19,6 +20,7 @@ from .window import ReviewError
 
 _SEEK_MARGIN = 0.05
 _LABEL_MS = 2000
+RETRY_SECONDS = 30.0  # a failed mpv start is tried again after this long (or at once when ``review.mpv`` changes)
 
 
 def open_with_system(path: Path) -> Tuple[bool, str]:
@@ -48,13 +50,16 @@ class ReviewController:
         cfg: PipelineConfig,
         session_factory: Callable[[str], Any] = MpvSession,
         opener: Callable[[Path], Tuple[bool, str]] = open_with_system,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.cfg = cfg
         self._factory = session_factory
         self._opener = opener
         self._lock = threading.Lock()
         self._session: Any = None
-        self._failed = False
+        self._clock = clock
+        self._failed_at: Optional[float] = None  # when starting mpv last failed, and with which binary
+        self._failed_mpv = ""
         self.status: str = ""
         self.current: Optional[ReviewItem] = None
         self.pair: Optional[ReviewPair] = None  # the pair last given to play_pair; None after play() of a single item
@@ -72,13 +77,15 @@ class ReviewController:
             return s
         if s is not None:  # the editor closed the mpv window: start a new one on next use
             self._drop()
-        if self._failed:
-            return None
+        if self._failed_at is not None:
+            if self.cfg.review.mpv == self._failed_mpv and self._clock() - self._failed_at < RETRY_SECONDS:
+                return None
+            self._failed_at = None  # the setting changed, or it has been a while: try again
         try:
             s = self._factory(self.cfg.review.mpv)
             s.start()
         except Exception:
-            self._failed = True
+            self._failed_at, self._failed_mpv = self._clock(), self.cfg.review.mpv
             try:
                 s.close()  # type: ignore[union-attr]
             except Exception:
@@ -128,20 +135,25 @@ class ReviewController:
                 raise ReviewError(str(e2)) from e2
 
     def _play_in(self, s: Any, item: ReviewItem, from_cut: Optional[float]) -> None:
-        s.load(str(item.path))
-        s.set("loop-file", "inf")
-        wait = getattr(s, "wait_restart", None)
-        if wait is not None:
-            wait(1.0)  # the restart of the file's own start, so it cannot be taken for the seek's
         target = item.cut + from_cut if from_cut is not None else 0
         if from_cut is not None:
             target = min(max(target, 0), max(item.duration - _SEEK_MARGIN, 0))
-        clear = getattr(s, "clear_events", None)
-        if clear is not None:
-            clear()
-        s.command("seek", target, "absolute+exact")
+        # Open the file AT the target: ``start`` is read when the file opens, so no frame before it is ever shown
+        # (loading and then seeking flashed the start of the window). It is a global option, so it is reset
+        # afterwards and a looping file wraps to 0. A per-file loadfile option would do the same, but the loadfile
+        # argument position changed in mpv 0.38.
+        s.set("start", f"{target:.4f}")
+        try:
+            s.load(str(item.path))
+        finally:
+            try:
+                s.set("start", "none")
+            except MpvError:
+                pass
+        s.set("loop-file", "inf")
+        wait = getattr(s, "wait_restart", None)
         if wait is not None:
-            wait(1.0)  # the seek's restart: time-pos already reads the new position
+            wait(1.0)  # playback restarted at the target: time-pos already reads it
         s.set("pause", False)
         s.command("show-text", item.label.replace("$", "$$"), _LABEL_MS)
         how = "exact source" if item.kind == "edl" else "rendered"
@@ -176,16 +188,24 @@ class ReviewController:
                 self.status += " (position unknown: started at the cut)"
             return True
 
-    def stop(self) -> None:
+    def running(self) -> bool:
+        """True while an mpv window is open (does not start one)."""
+        with self._lock:
+            return self._session is not None and self._session.alive()
+
+    def stop(self) -> bool:
+        """Pause; False (and a status saying so) when the mpv window is closed, so no stale ``playing ...`` is left."""
         with self._lock:
             s = self._session
             if s is None or not s.alive():
-                return
+                self.status = "mpv is not running"
+                return False
             try:
                 s.set("pause", True)
             except MpvError as e:
                 raise ReviewError(str(e)) from e
             self.status = "paused"
+            return True
 
     def close(self) -> None:
         with self._lock:

@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Optional, Sequence, Tuple
@@ -22,7 +23,7 @@ from ..pipeline.timeline import Timeline
 from .render import _discard, _ffmpeg_error, _tmp, render_ab, render_window
 from .window import ReviewError, Window, needs_render, review_window, sub_timeline, window_edl
 
-REVIEW_VERSION = 1
+REVIEW_VERSION = 2  # 2: rendered windows come from the frame-snapped timeline and their music fades only at the cut's end
 
 
 @dataclass
@@ -53,7 +54,7 @@ def _stat(path: str) -> list:
         return [None, None]
 
 
-def review_key(sub: Timeline, w: Window, source: str, cfg: PipelineConfig, kind: str) -> str:
+def review_key(sub: Timeline, w: Window, source: str, cfg: PipelineConfig, kind: str, ends_cut: bool = True) -> str:
     music = asdict(cfg.music)
     if cfg.music.path:
         music["file"] = _stat(str(cfg.music.path))
@@ -64,6 +65,7 @@ def review_key(sub: Timeline, w: Window, source: str, cfg: PipelineConfig, kind:
         "fades": [sub.fade_in, sub.fade_out],
         "fps": sub.fps,
         "window": asdict(w),
+        "ends_cut": ends_cut,  # whether the window reaches the last clip: the music fades out only then
         "source": [str(Path(source).resolve()), *_stat(source)],
         "audio_bitrate": cfg.render.audio_bitrate,
         "review": asdict(cfg.review),
@@ -133,14 +135,18 @@ def _item(
     force_render: bool,
     bounds: Optional[Dict[int, Sequence[float]]],
 ) -> ReviewItem:
-    w = review_window(tl, junction, cfg.review.pre_seconds, cfg.review.post_seconds)
+    pre, post = cfg.review.pre_seconds, cfg.review.post_seconds
+    w = review_window(tl, junction, pre, post)
+    kind = "render" if force_render or needs_render(tl, w, cfg) else "edl"
+    if kind == "render":
+        # A render snaps to frames while an EDL plays the unsnapped window. Derive a rendered window from the snapped
+        # timeline, so its cut and offsets are frame-exact in the rendered file; the key then covers what is rendered.
+        tl = snap_to_frames(tl, bounds)
+        w = review_window(tl, junction, pre, post)
     if w.duration <= 0:
         raise ReviewError("the review window is empty: raise review.pre_seconds or review.post_seconds")
-    kind = "render" if force_render or needs_render(tl, w, cfg) else "edl"
     sub = sub_timeline(tl, w)
-    if kind == "render":  # a render snaps to frames; an EDL plays the unsnapped window, so it must be keyed on that
-        sub = snap_to_frames(sub, bounds)
-    key = review_key(sub, w, media.path, cfg, kind)
+    key = review_key(sub, w, media.path, cfg, kind, w.last == len(tl.clips) - 1)
     a, b = tl.clips[junction], tl.clips[junction + 1]
     path = out_dir / f"{stage}_s{a.shot_index}-s{b.shot_index}_{key}.{'edl' if kind == 'edl' else 'mp4'}"
     transition = _transition_text(tl, junction)
@@ -155,6 +161,20 @@ def _item(
     return ReviewItem(stage, junction, label, path, kind, round(w.cut - w.start, 4), w.duration, transition, cached)
 
 
+def _sweep_tmp(tmp_dir: Path, max_age: float = 3600.0) -> None:
+    """Remove what a killed render left in ``<review>/.tmp`` more than ``max_age`` seconds ago (best effort)."""
+    try:
+        now = time.time()
+        for f in tmp_dir.iterdir():
+            try:
+                if f.is_file() and now - f.stat().st_mtime > max_age:
+                    f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def prepare_review(
     ws: Path,
     cfg: PipelineConfig,
@@ -165,6 +185,7 @@ def prepare_review(
 ) -> ReviewPair:
     """The playable item(s) for junction ``index`` (0-based) of ``stage`` (default: the last stage)."""
     ws = Path(ws)
+    _sweep_tmp(ws / "review" / ".tmp")
     stages = load_stage_timelines(ws)
     if not stages:
         raise ReviewError(f"no timelines in {ws}: run the pipeline first")
