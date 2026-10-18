@@ -69,11 +69,15 @@ prompt is told to keep the two shots adjacent). It takes effect on the next run:
 until then the badge reads `pin pending: run again (R) to apply`. After a run
 it reads `pinned (locked|reverted)`, or `pinned (...), adjusted to out X / in Y
 to fit the clips` when the points had to be clamped, or `pin not placed:
-<reason>` when the shots are not adjacent or the clips have no room. The badge
+<reason>` when the pin cannot be placed (a shot is not in the cut, another pin
+holds a clip it would have to move, moving a clip would split or reorder the
+beats, or the clips have no room). The badge
 is judged from the latest stage's history, so it reads the same whichever stage
 you inspect, and the header counts the pins not placed. A junction a later pass
-created (its baseline is not the rough cut) cannot be placed until a
-regenerated rough cut pairs those shots; `l` and `v` say so. A pin holds the
+created (its baseline is not the rough cut) is placed by moving one of its clips
+next to the other in the rough cut before the passes run, unless that would
+split or reorder the beats or another pin holds a clip; `l` and `v` say so. A
+beat that holds a pinned clip is not reordered by the match-cut pass. A pin holds the
 cut points, not the transition: a pinned beat boundary keeps its dissolve.
 A pin made while a run waits at the describe, narrative or rough-cut checkpoint
 applies in that run when you continue; at a pass checkpoint it applies on the

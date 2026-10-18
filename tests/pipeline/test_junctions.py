@@ -323,6 +323,15 @@ def test_why_for_a_junction_a_drop_made_adjacent_names_the_dropping_stage_and_it
     assert build_junctions([("roughcut", rough), ("pacing", bare)])[0].why() == "made adjacent by pacing"
 
 
+def test_a_junction_made_adjacent_by_the_editors_pin_move_names_the_move():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    move = Decision("editor", "pin_moved", ["c003", "c001"], "moved shot 2 next to shot 0 to hold the editor's pin")
+    moved = tl("matchcut", [clip("c001", 0, 0.0, 2.0), clip("c003", 2, 6.0, 8.0), clip("c002", 1, 3.0, 5.0)], [move])
+    j = build_junctions([("roughcut", rough), ("matchcut", moved)])[0]
+    assert j.adjacent_detail == "moved shot 2 next to shot 0 to hold the editor's pin"
+    assert j.why() == "made adjacent by matchcut: moved shot 2 next to shot 0 to hold the editor's pin"
+
+
 def test_nothing_changed_is_only_said_for_one_history_line_from_the_first_stage():
     rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
     j = build_junctions([("roughcut", rough), ("final", tl("final", rough.clips))])[0]

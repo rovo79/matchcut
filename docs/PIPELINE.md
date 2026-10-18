@@ -200,13 +200,26 @@ How a pin takes effect:
   both clips get the pinned points (snapped to frames, clamped to the shot and
   to `pacing.min_clip_seconds`), the facing ends are locked (`locked_out` /
   `locked_in`) and both clips are tagged `pinned`. The passes already leave
-  locked ends alone, and `pacing` never drops a clip tagged `pinned`.
-- **Decisions.** Each pin leaves one decision with pass name `editor`:
+  locked ends alone, and `pacing` never drops a clip tagged `pinned`. A beat
+  that holds a pinned clip is not reordered by the match-cut pass.
+- **Shots that are not adjacent.** A pin on a junction a later pass would have
+  made (a pacing drop, a continuity insert, a match-cut reorder) names two
+  shots that are not neighbours in the rough cut. `apply_pins` then moves one
+  clip next to the other: first the incoming clip to just after the outgoing
+  one, otherwise the outgoing clip to just before the incoming one. A move never
+  splits or reorders the beats and never moves a clip, or the end of an anchor
+  clip, that another pin already holds. The move is recorded as
+  `editor:pin_moved` (detail `moved shot 3 next to shot 0 to hold the editor's
+  pin`) before the pin's `editor:pinned` decision, and the junction inspector
+  explains the junction as made adjacent by it.
+- **Decisions.** Each pin leaves a decision with pass name `editor`:
   `editor:pinned` (detail `locked by the editor: out 4.00s, in 11.88s`; the
-  data holds the pin plus the points actually placed) or
-  `editor:pin_unplaced` (the shots are not adjacent in this cut, or the clips
-  have no room for the points). These show in the event stream, in
-  `report.md`, in the TUI log, and in the junction inspector's badge.
+  data holds the pin plus the points actually placed) or `editor:pin_unplaced`.
+  The unplaced detail is exactly one of `shot N is not in this cut`, `shot N is
+  held by another pin`, `moving shot N would split or reorder the beats`, or
+  `not enough room in these clips for the pinned points`. These show in the
+  event stream, in `report.md`, in the TUI log, and in the junction inspector's
+  badge.
 
 A pin holds the cut points, not the transition: a pinned junction on a beat
 boundary still gets the beat's dissolve, and only a match cut (tagged

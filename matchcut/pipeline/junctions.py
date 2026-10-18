@@ -251,7 +251,7 @@ def _adjacency_detail(considered: Sequence[Tuple[str, Timeline]], k: int, a_ref:
     if pa is not None and pb is not None and pa < pb:
         named |= {c.id for c in prev.clips[pa + 1 : pb]}
     new = timeline.history[len(prev.history):]
-    d = next((d for d in new if d.action in ("drop", "insert") and named & set(d.clip_ids)), None)
+    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved") and named & set(d.clip_ids)), None)
     return d.detail if d is not None else ""
 
 

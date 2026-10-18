@@ -222,7 +222,7 @@ def select_pair(view, key):
     return next(i for i, j in enumerate(view.junctions) if (j.out_shot, j.in_shot) == key)
 
 
-def test_a_pin_on_a_junction_a_later_pass_created_says_it_was_not_placed(mock_workspace, tmp_path, monkeypatch):
+def test_a_pin_on_a_junction_a_later_pass_created_that_would_split_the_beats_is_not_placed(mock_workspace, tmp_path, monkeypatch):
     ws = own_copy(mock_workspace, tmp_path)
     made = [j for j in refine_in(ws, target=2.0) if j.baseline.stage != "roughcut"]
     assert made, "a tight target should drop clips and join their neighbours after the rough cut"
@@ -239,11 +239,14 @@ def test_a_pin_on_a_junction_a_later_pass_created_says_it_was_not_placed(mock_wo
             await wait_for(pilot, lambda: bool(view.junctions))
             await pilot.press(*(["right"] * select_pair(view, (j0.out_shot, j0.in_shot))))
             panel = str(app.query_one("#junction-panel").content)
-            assert "pin not placed:" in panel and "not adjacent in this cut" in panel
-            assert "pin pending" not in panel
+            # The mock data's pass-made junction is a pacing drop that removed a whole beat (b1 -> b3 with b2 gone), so
+            # the move is rejected: moving shot {in} next to shot {out} would put a b3 clip back between b1 clips
+            # (splitting or reordering the beats). The pin is therefore unplaced with the new beat reason, not moved.
+            assert "pin not placed: moving shot {} would split or reorder the beats".format(j0.in_shot) in panel
+            assert "pinned (" not in panel and "pin pending" not in panel and "not adjacent in this cut" not in panel
             assert "1 pin(s) not placed" in str(app.query_one("#edit-header").content)
             await pilot.press("l")
-            assert "not adjacent in the rough cut, so the pin only applies if a regenerated rough cut pairs them" in notes[-1]
+            assert f"these shots are not adjacent in the rough cut: the next run moves shot {j0.in_shot} next to shot {j0.out_shot}, unless that would split or reorder the beats or another pin holds them" in notes[-1]
 
     run_async(body())
 

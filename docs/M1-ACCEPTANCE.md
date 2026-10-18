@@ -43,9 +43,10 @@ the overlay image, and `l` / `v` / `x` lock, revert and clear a pin.
    `adjusted to out X / in Y to fit the clips` or `pin not placed: <reason>`,
    note it and whether the reason is right; the header counts the pins not
    placed (`N pin(s) not placed`) and the badge says why. A junction that a
-   later pass created (its history starts after the rough cut) cannot be placed
-   until a regenerated rough cut pairs those shots; `l` says so in its
-   notification.
+   later pass created (its history starts after the rough cut) is placed by moving
+   one clip next to the other (the junction's why line then reads `made
+   adjacent by <pass>: moved shot N next to shot M to hold the editor's pin`), unless that would split or reorder the beats or
+   another pin holds a clip; `l` says so in its notification.
 5. Regenerate the rough cut: run again, choose redo with a note at the rough
    cut checkpoint. After the passes, both pins still hold, or the header
    says which could not be placed and why.

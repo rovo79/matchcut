@@ -58,11 +58,53 @@ def test_apply_pins_clamps_to_the_shots_and_the_minimum_clip():
     assert (out.clips[0].source_out, out.clips[1].source_in) == (1.25, 5.05)
 
 
-def test_a_pin_whose_shots_are_not_adjacent_is_reported_not_applied():
+def four() -> Timeline:
+    """b1: shot0, shot2, shot3 | b2: shot1."""
+    return Timeline(source="s.mp4", fps=25.0, clips=[
+        Clip("c001", 0, 0.5, 2.0, "b1"), Clip("c002", 2, 4.6, 5.8, "b1"), Clip("c003", 3, 6.2, 7.6, "b1"), Clip("c004", 1, 2.6, 4.0, "b2"),
+    ])
+
+
+FOUR_BOUNDS = {0: (0.0, 2.5), 1: (2.5, 4.5), 2: (4.5, 6.0), 3: (6.0, 8.0)}
+
+
+def test_a_pin_moves_the_incoming_clip_next_to_the_outgoing_one():
+    out, decisions = apply_pins(four(), [Pin(0, 3, 2.0, 6.2)], FOUR_BOUNDS, min_clip=0.5)
+    assert [c.shot_index for c in out.clips] == [0, 3, 2, 1]
+    assert [d.action for d in decisions] == ["pin_moved", "pinned"]
+    assert decisions[0].detail == "moved shot 3 next to shot 0 to hold the editor's pin"
+    assert decisions[0].clip_ids == ["c003", "c001"]
+    a, b = out.clips[0], out.clips[1]
+    assert a.locked_out and b.locked_in and (a.source_out, b.source_in) == (2.0, 6.2)
+    assert [c.beat_id for c in out.clips] == ["b1", "b1", "b1", "b2"]
+
+
+def test_a_pin_moves_the_outgoing_clip_when_moving_the_incoming_one_would_split_a_beat():
+    # pin shot2 -> shot1: moving shot1 (b2) after shot2 splits b1; moving shot2 (b1) to just before shot1 keeps the beats
+    out, decisions = apply_pins(four(), [Pin(2, 1, 5.8, 2.6)], FOUR_BOUNDS, min_clip=0.5)
+    assert [c.shot_index for c in out.clips] == [0, 3, 2, 1]
+    assert [d.action for d in decisions] == ["pin_moved", "pinned"]
+    assert decisions[0].detail == "moved shot 2 next to shot 1 to hold the editor's pin"
+
+
+def test_a_pin_that_would_reorder_the_beats_is_not_placed():
     out, decisions = apply_pins(cut(), [Pin(1, 0, 3.0, 1.0)], BOUNDS, min_clip=0.75)
     assert [d.action for d in decisions] == ["pin_unplaced"]
-    assert "not adjacent" in decisions[0].detail
-    assert [(c.source_in, c.source_out) for c in out.clips] == [(c.source_in, c.source_out) for c in cut().clips]
+    assert decisions[0].detail == "moving shot 0 would split or reorder the beats"
+    assert [c.id for c in out.clips] == ["c001", "c002", "c003"]
+
+
+def test_a_pin_on_a_missing_shot_is_not_placed():
+    _, decisions = apply_pins(cut(), [Pin(0, 7, 2.0, 1.0)], BOUNDS, min_clip=0.75)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", "shot 7 is not in this cut")]
+
+
+def test_a_clip_held_by_an_earlier_pin_is_never_moved():
+    # first pin holds shot0 -> shot2; the second wants shot3 right after shot0, which would need shot0's out-point
+    out, decisions = apply_pins(four(), [Pin(0, 2, 2.0, 4.6), Pin(0, 3, 2.0, 6.2)], FOUR_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pinned", "pin_unplaced"]
+    assert decisions[1].detail == "shot 0 is held by another pin"
+    assert [c.shot_index for c in out.clips] == [0, 2, 3, 1]
 
 
 def test_pin_store_skips_a_malformed_entry_and_keeps_the_rest(tmp_path):
@@ -236,7 +278,7 @@ def mc_ctx_beats(matchcut_video, tmp_path_factory):
 
 
 # -- I3: refine records what became of a pin whose shots the rough cut does not pair ---------------
-def test_a_pin_on_shots_the_rough_cut_does_not_pair_is_recorded_as_not_placed(demo_video, tmp_path):
+def test_a_pin_on_shots_the_rough_cut_does_not_pair_is_placed_by_moving_a_clip(demo_video, tmp_path):
     cfg = mock_cfg(demo_video, tmp_path / "ws")
     cfg.target_duration = 8.0
     ws = Path(cfg.workspace)
@@ -248,8 +290,14 @@ def test_a_pin_on_shots_the_rough_cut_does_not_pair_is_recorded_as_not_placed(de
     PinStore(ws).put(pin)
     final = Pipeline(cfg).refine()
     outcome = pin_outcome(final, pin)
-    assert outcome is not None and outcome.action == "pin_unplaced" and "not adjacent" in outcome.detail
+    assert outcome is not None and outcome.action == "pinned"  # the demo cut keeps both shots in one beat, so the move is allowed
+    moves = [d for d in final.history if d.pass_name == "editor" and d.action == "pin_moved"]
+    assert len(moves) == 1 and moves[0].data["out_shot"] == pin.out_shot and moves[0].data["in_shot"] == pin.in_shot
+    assert moves[0].detail.endswith("to hold the editor's pin")
+    shot_order = [c.shot_index for c in final.clips]
+    assert pin.key in set(zip(shot_order, shot_order[1:]))
     assert pin_outcome(final, Pin(pin.out_shot, pin.in_shot, 1.5, 14.0)) is None  # a pin edited since the run has no outcome yet
+    assert PinStore(ws).remove(*pin.key)  # the moved pin now holds shot 0's out-point, so the next pin starts from a clean store
     placed = Pin(shots[0], shots[1], rough.clips[0].source_out, rough.clips[1].source_in)
     PinStore(ws).put(placed)
     assert pin_outcome(Pipeline(cfg).refine(), placed).action == "pinned"

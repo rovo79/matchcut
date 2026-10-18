@@ -259,7 +259,8 @@ class EditView(Vertical):
         PinStore(self._state.workspace).put(pin)
         note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
         if j.baseline.stage != j.first_stage:
-            note += ". these shots are not adjacent in the rough cut, so the pin only applies if a regenerated rough cut pairs them"
+            note += (f". these shots are not adjacent in the rough cut: the next run moves shot {j.in_shot} next to shot {j.out_shot}, "
+                     "unless that would split or reorder the beats or another pin holds them")
         self.app.notify(note)
         self._fingerprint = None
         self.refresh_from_state(self._state)

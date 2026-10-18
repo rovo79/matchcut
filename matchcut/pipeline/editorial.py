@@ -3,7 +3,10 @@
 A pin names a junction by its two shots (clip ids change when a cut is
 regenerated; shots do not) and stores the cut points to hold. Pins are applied
 to the rough cut before any pass runs: both ends of the junction are locked,
-the passes leave locked ends alone, and pacing never drops a pinned clip.
+the passes leave locked ends alone, and pacing never drops a pinned clip. When
+the two shots are not adjacent in the rough cut (a later pass would have joined
+them), one clip is moved next to the other, never splitting or reordering the
+beats and never moving a clip another pin holds.
 """
 from __future__ import annotations
 
@@ -14,7 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .timeline import Decision, Timeline
+from .timeline import Clip, Decision, Timeline
 
 log = logging.getLogger(__name__)
 
@@ -92,15 +95,58 @@ def _snap(t: float, fps: float) -> float:
     return round(round(t * fps) / fps, 3) if fps > 0 else round(t, 3)
 
 
+def _beat_runs(clips: Sequence[Clip]) -> List[str]:
+    runs: List[str] = []
+    for c in clips:
+        if not runs or runs[-1] != c.beat_id:
+            runs.append(c.beat_id)
+    return runs
+
+
+def _make_adjacent(out: Timeline, pin: Pin) -> Tuple[Optional[Tuple[Clip, Clip]], Optional[Decision], str]:
+    """The (outgoing, incoming) clips of ``pin``, moving one of them when they are not adjacent.
+
+    Returns (pair, move decision or None, "") on success, or (None, None, reason) when the pin cannot be placed.
+    """
+    for a, b in zip(out.clips, out.clips[1:]):
+        if (a.shot_index, b.shot_index) == pin.key:
+            return (a, b), None, ""
+    a = next((c for c in out.clips if c.shot_index == pin.out_shot), None)
+    b = next((c for c in out.clips if c.shot_index == pin.in_shot), None)
+    if a is None or b is None:
+        return None, None, f"shot {pin.out_shot if a is None else pin.in_shot} is not in this cut"
+    runs = _beat_runs(out.clips)
+    reason = ""
+    for moved, anchor, after in ((b, a, True), (a, b, False)):
+        if moved.locked_in or moved.locked_out:
+            reason = reason or f"shot {moved.shot_index} is held by another pin"
+            continue
+        if (after and anchor.locked_out) or (not after and anchor.locked_in):
+            reason = reason or f"shot {anchor.shot_index} is held by another pin"
+            continue
+        order = [c for c in out.clips if c is not moved]
+        at = order.index(anchor) + (1 if after else 0)
+        order.insert(at, moved)
+        if _beat_runs(order) != runs:
+            reason = reason or f"moving shot {moved.shot_index} would split or reorder the beats"
+            continue
+        out.clips = order
+        detail = f"moved shot {moved.shot_index} next to shot {anchor.shot_index} to hold the editor's pin"
+        return (a, b), Decision("editor", "pin_moved", [moved.id, anchor.id], detail, None, pin.to_dict()), ""
+    return None, None, reason
+
+
 def apply_pins(tl: Timeline, pins: Sequence[Pin], bounds: Dict[int, Tuple[float, float]], min_clip: float) -> Tuple[Timeline, List[Decision]]:
     """A copy of ``tl`` with every placeable pin applied and locked, plus the decisions taken."""
     out = tl.copy()
     decisions: List[Decision] = []
     for pin in pins:
-        pair = next(((a, b) for a, b in zip(out.clips, out.clips[1:]) if (a.shot_index, b.shot_index) == pin.key), None)
+        pair, moved, reason = _make_adjacent(out, pin)
         if pair is None:
-            decisions.append(Decision("editor", "pin_unplaced", [], f"shot {pin.out_shot} -> shot {pin.in_shot} are not adjacent in this cut", None, pin.to_dict()))
+            decisions.append(Decision("editor", "pin_unplaced", [], reason, None, pin.to_dict()))
             continue
+        if moved is not None:
+            decisions.append(moved)
         a, b = pair
         a_lo = a.source_in + min_clip
         a_hi = bounds.get(a.shot_index, (a.source_in, a.source_out))[1]
