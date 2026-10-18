@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -161,6 +162,21 @@ def test_play_pair_plays_a_when_present_and_toggle_keeps_the_offset_from_the_cut
         c.close()
 
 
+def test_toggle_still_switches_when_the_position_cannot_be_read():
+    class NoPos(Fake):
+        def get(self, name, timeout=2.0):
+            raise MpvError("get_property time-pos: property unavailable")
+
+    a, b = item(label="A", cut=1.0), item(label="B", cut=1.5)
+    c = ReviewController(small_cfg(), session_factory=NoPos)
+    try:
+        c.play_pair(ReviewPair(b, a))
+        assert c.toggle() is True and c.current is b
+        assert c.status.endswith("(position unknown: started at the cut)") and c.status.startswith("playing B")
+    finally:
+        c.close()
+
+
 def test_toggle_without_a_pair_or_with_only_b_returns_false_and_keeps_the_status():
     c = ReviewController(small_cfg(), session_factory=Fake)
     try:
@@ -262,6 +278,39 @@ def test_toggling_a_and_b_keeps_the_same_offset_from_the_cut(demo_video, tmp_pat
 
 
 @needs_mpv
+def test_the_session_survives_pause_and_silence_and_no_second_mpv_is_spawned(demo_video, tmp_path):
+    ws = ab_workspace(tmp_path, demo_video)
+    cfg = small_cfg(1.0, 1.0)
+    pair = prepare_review(ws, cfg, "final", 0, ab=True)
+    made = []
+
+    def factory(binary):
+        made.append(headless(binary))
+        return made[-1]
+
+    c = ReviewController(cfg, session_factory=factory)
+    try:
+        c.play_pair(pair)
+        pid = c._session._proc.pid
+        c.stop()
+        assert c.status == "paused"
+        c._session.command("seek", pair.a.cut + 0.3, "absolute+exact")
+        c._session.wait_restart(1.0)
+        time.sleep(2.5)  # mpv is silent while paused; the connection must stay up
+        assert c._session.alive()
+        assert c.toggle() is True
+        assert c.current is pair.b and c.status.startswith("playing B")
+        assert abs(c._session.get("time-pos") - (pair.b.cut + 0.3)) < 0.1
+        c.stop()
+        assert c.status == "paused"
+        time.sleep(2.5)
+        assert c.toggle() is True and c.current is pair.a
+        assert len(made) == 1 and c._session._proc.pid == pid
+    finally:
+        c.close()
+
+
+@needs_mpv
 def test_the_controller_closes_mpv(demo_video, tmp_path):
     ws = workspace(tmp_path, demo_video, final=two_shots())
     cfg = small_cfg()
@@ -330,6 +379,20 @@ def test_cli_play_toggles_pauses_and_quits(demo_video, tmp_path, capsys):
     assert code == 0, err
     assert out.count("playing A") == 2 and out.count("playing B") == 1 and "paused" in out
     assert made[0]._session is None
+
+
+def test_cli_ab_play_without_mpv_opens_the_ab_file_through_the_controller_opener(demo_video, tmp_path, capsys):
+    ws = ab_workspace(tmp_path, demo_video)
+    (ws / "config.json").write_text('{"review": {"pre_seconds": 1.0, "post_seconds": 1.0, "width": 160}}')
+    opened = []
+
+    def factory(cfg):
+        return ReviewController(cfg, session_factory=Dead, opener=lambda p: (opened.append(p) or (True, f"opened {p.name} in the system player")))
+
+    code, out, err = run_cli(capsys, ws, "--index", "1", "--ab", "--play", stdin=io.StringIO(""), controller_factory=factory)
+    assert code == 0, err
+    assert len(opened) == 1 and opened[0].name.startswith("ab_")
+    assert out.strip().splitlines()[-1] == f"mpv not found: opened {opened[0].name} in the system player (no A/B toggle)"
 
 
 @needs_mpv

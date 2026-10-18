@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence, TextIO
 
 from ..pipeline.config import PipelineConfig
-from .controller import ReviewController, open_with_system
+from .controller import ReviewController
 from .items import ReviewItem, ReviewPair, ab_file, prepare_review
 from .mpv import MpvError
 from .window import ReviewError
@@ -32,8 +32,8 @@ def _parser() -> argparse.ArgumentParser:
 def _play(ws: Path, cfg: PipelineConfig, args: argparse.Namespace, pair: ReviewPair, controller: ReviewController, stdin: TextIO) -> None:
     if not controller.has_mpv():
         if pair.a is not None:
-            ok, message = open_with_system(ab_file(pair, ws, cfg))
-            print(f"mpv not found: {message}" + (" (A, a short black gap, then B)" if ok else ""))
+            controller.open_file(ab_file(pair, ws, cfg))
+            print(controller.status)
             return
         item = pair.b
         if item.kind == "edl":

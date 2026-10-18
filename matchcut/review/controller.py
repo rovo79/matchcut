@@ -130,6 +130,9 @@ class ReviewController:
     def _play_in(self, s: Any, item: ReviewItem, from_cut: Optional[float]) -> None:
         s.load(str(item.path))
         s.set("loop-file", "inf")
+        wait = getattr(s, "wait_restart", None)
+        if wait is not None:
+            wait(1.0)  # the restart of the file's own start, so it cannot be taken for the seek's
         target = item.cut + from_cut if from_cut is not None else 0
         if from_cut is not None:
             target = min(max(target, 0), max(item.duration - _SEEK_MARGIN, 0))
@@ -137,9 +140,8 @@ class ReviewController:
         if clear is not None:
             clear()
         s.command("seek", target, "absolute+exact")
-        wait = getattr(s, "wait_restart", None)
         if wait is not None:
-            wait(1.0)  # so time-pos already reads the new position
+            wait(1.0)  # the seek's restart: time-pos already reads the new position
         s.set("pause", False)
         s.command("show-text", item.label.replace("$", "$$"), _LABEL_MS)
         how = "exact source" if item.kind == "edl" else "rendered"
@@ -149,8 +151,12 @@ class ReviewController:
     def _open(self, item: ReviewItem) -> None:
         if item.kind == "edl":
             raise ReviewError("cannot play an EDL window without mpv: prepare it with force_render")
-        ok, message = self._opener(item.path)
+        self.open_file(item.path)
         self.current = item
+
+    def open_file(self, path: Path) -> None:
+        """Hand a file to the system opener (no mpv); the status says what happened."""
+        ok, message = self._opener(Path(path))
         self.status = f"mpv not found: {message}" + (" (no A/B toggle)" if ok else "")
 
     def toggle(self) -> bool:
@@ -160,11 +166,14 @@ class ReviewController:
             if pair is None or pair.a is None or cur is None or s is None or not s.alive():
                 return False
             other = pair.b if cur is pair.a else pair.a
+            known = True
             try:
                 offset = float(s.get("time-pos")) - cur.cut
             except (MpvError, TypeError, ValueError):
-                offset = 0.0
+                offset, known = 0.0, False
             self._play(other, offset)
+            if not known:
+                self.status += " (position unknown: started at the cut)"
             return True
 
     def stop(self) -> None:

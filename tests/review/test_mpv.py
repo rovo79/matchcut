@@ -112,3 +112,32 @@ def test_a_missing_binary_raises_mpv_error():
     with pytest.raises(MpvError, match="not found"):
         s.start()
     assert not s.alive()
+
+
+def test_an_idle_session_stays_alive_and_answers_after_the_command_timeout(session):
+    session.start()
+    assert session.get("mpv-version")
+    time.sleep(2.5)  # longer than any command timeout: the reader must not give up on a silent socket
+    assert session.alive()
+    assert session.get("mpv-version")
+
+
+def test_a_late_reply_is_dropped(session):
+    session.start()
+    for _ in range(20):
+        try:
+            session.command("get_property", "mpv-version", timeout=0.0005)
+        except MpvError:
+            pass
+    time.sleep(0.5)
+    assert session._replies == {} and session._pending == set()
+
+
+def test_close_without_a_usable_socket_kills_at_once(edl_item):
+    s = MpvSession(headless=True)
+    s.start()
+    s._eof = True  # as if the reader had lost the connection while mpv lives on
+    t0 = time.monotonic()
+    s.close()
+    assert time.monotonic() - t0 < 1.5 and not s.alive()
+    assert s._proc is None

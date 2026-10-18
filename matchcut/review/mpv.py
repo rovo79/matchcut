@@ -8,6 +8,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,7 @@ class MpvSession:
         self._sock_path = ""
         self._reader: Optional[threading.Thread] = None
         self._replies: Dict[int, Dict[str, Any]] = {}
+        self._pending: set = set()  # request ids somebody is still waiting for
         self._events: Deque[Dict[str, Any]] = deque(maxlen=2000)
         self._next_id = 0
         self._eof = True  # no connection yet
@@ -65,6 +67,7 @@ class MpvSession:
             raise
         with self._cond:
             self._replies.clear()
+            self._pending.clear()
             self._events.clear()
             self._eof = False
         self._reader = threading.Thread(target=self._read_loop, args=(self._sock,), name="mpv-ipc", daemon=True)
@@ -98,15 +101,20 @@ class MpvSession:
         try:
             proc, sock, reader = self._proc, self._sock, self._reader
             if proc is not None and proc.poll() is None:
+                sent = False
                 if sock is not None and not self._eof:
                     try:
                         with self._send_lock:
-                            sock.settimeout(0.5)
-                            sock.sendall(b'{"command": ["quit"]}\n')
-                    except OSError:
+                            if select.select([], [sock], [], 0.5)[1]:
+                                sock.sendall(b'{"command": ["quit"]}\n')
+                                sent = True
+                    except (OSError, ValueError):
                         pass
                 try:
-                    proc.wait(timeout=2.0)
+                    if sent:
+                        proc.wait(timeout=2.0)
+                    else:
+                        raise subprocess.TimeoutExpired(self.binary, 0)  # quit could not be sent: do not wait
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     try:
@@ -114,6 +122,10 @@ class MpvSession:
                     except subprocess.TimeoutExpired:
                         pass
             if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)  # wakes a reader blocked in recv
+                except OSError:
+                    pass
                 try:
                     sock.close()
                 except OSError:
@@ -143,7 +155,12 @@ class MpvSession:
         buf = b""
         try:
             while sock is not None:
-                data = sock.recv(65536)
+                try:
+                    data = sock.recv(65536)
+                except socket.timeout:  # no data yet; only a closing session, EOF or a real error ends the loop
+                    if self._closing:
+                        break
+                    continue
                 if not data:
                     break
                 buf += data
@@ -158,7 +175,7 @@ class MpvSession:
                     with self._cond:
                         if "event" in msg:
                             self._events.append(msg)
-                        elif isinstance(msg.get("request_id"), int):
+                        elif msg.get("request_id") in self._pending:  # a reply nobody waits for any more is dropped
                             self._replies[msg["request_id"]] = msg
                         self._cond.notify_all()
         except OSError:
@@ -176,23 +193,30 @@ class MpvSession:
         with self._cond:
             self._next_id += 1
             rid = self._next_id
-        payload = json.dumps({"command": list(args), "request_id": rid}).encode("utf-8") + b"\n"
+            self._pending.add(rid)
         try:
-            with self._send_lock:
-                self._sock.settimeout(timeout)
-                self._sock.sendall(payload)
-        except (OSError, AttributeError) as e:
-            raise MpvError(f"{name}: cannot reach mpv ({e})") from e
-        deadline = time.monotonic() + timeout
-        with self._cond:
-            while rid not in self._replies:
-                left = deadline - time.monotonic()
-                if self._eof:
-                    raise MpvError(f"{name}: mpv has exited")
-                if left <= 0:
-                    raise MpvError(f"{name}: no reply from mpv")
-                self._cond.wait(left)
-            reply = self._replies.pop(rid)
+            payload = json.dumps({"command": list(args), "request_id": rid}).encode("utf-8") + b"\n"
+            try:
+                with self._send_lock:  # the socket stays blocking (the reader lives in recv): bound the write with select
+                    if not select.select([], [self._sock], [], timeout)[1]:
+                        raise MpvError(f"{name}: cannot reach mpv (write timed out)")
+                    self._sock.sendall(payload)
+            except (OSError, ValueError, AttributeError) as e:
+                raise MpvError(f"{name}: cannot reach mpv ({e})") from e
+            deadline = time.monotonic() + timeout
+            with self._cond:
+                while rid not in self._replies:
+                    left = deadline - time.monotonic()
+                    if self._eof:
+                        raise MpvError(f"{name}: mpv has exited")
+                    if left <= 0:
+                        raise MpvError(f"{name}: no reply from mpv")
+                    self._cond.wait(left)
+                reply = self._replies.pop(rid)
+        finally:
+            with self._cond:
+                self._pending.discard(rid)
+                self._replies.pop(rid, None)
         if reply.get("error") != "success":
             detail = args[1] if name in ("get_property", "set_property") and len(args) > 1 else None
             raise MpvError(f"{name}{' ' + str(detail) if detail else ''}: {reply.get('error')}")
