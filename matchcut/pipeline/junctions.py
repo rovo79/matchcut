@@ -234,6 +234,11 @@ def _locate(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
     return best
 
 
+def locate_junction(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
+    """Index i where clip i descends from ``a_ref`` and clip i+1 from ``b_ref`` (same shot, overlapping source), or None."""
+    return _locate(timeline, a_ref, b_ref)
+
+
 def _best_clip(timeline: Timeline, ref: Clip) -> Optional[int]:
     best: Optional[int] = None
     best_overlap = 0.0
