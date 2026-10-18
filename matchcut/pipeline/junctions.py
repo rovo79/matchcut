@@ -272,6 +272,7 @@ def _attribute(
     cur_ids: Optional[Tuple[str, str]],
     prev_all: Optional[Set[str]],
     cur_all: Set[str],
+    prev_pair_only: bool = False,
 ) -> List[Tuple[Decision, bool]]:
     """The (decision, clip_level) pairs among a stage's new decisions that concern the junction.
 
@@ -279,6 +280,8 @@ def _attribute(
     against the junction's ids in the previous stage first; only a decision whose ids all exist
     in this stage but not all in the previous one (a clip the pass created) is read against this
     stage's ids. In the first stage there is no previous one and its own ids apply.
+    ``prev_pair_only``: the previous ids are those of clips that were not adjacent there, so only a decision naming
+    both of them (a pin's move) counts; one naming a single clip (a trim) says nothing about this junction.
     """
     found: List[Tuple[Decision, bool]] = []
     for d in new:
@@ -294,7 +297,7 @@ def _attribute(
             if all(i in ids for i in pair):
                 found.append((d, False))
                 break
-            if len(ids) == 1 and ids[0] in pair:
+            if len(ids) == 1 and ids[0] in pair and not (prev_pair_only and pair is prev_ids):
                 found.append((d, True))
                 break
     return found
@@ -324,14 +327,16 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
             cur_ids = (timeline.clips[at[k]].id, timeline.clips[at[k] + 1].id) if at[k] is not None else None
             prev_idx = at[k - 1] if k else None
             prev_ids = (prev.clips[prev_idx].id, prev.clips[prev_idx + 1].id) if prev is not None and prev_idx is not None else None
+            pair_only = False
             if prev is not None and prev_ids is None:
                 # Not adjacent before this stage (a pin's move joined them): the stage's decisions still name the previous
                 # stage's clips, so read them against the clips the two descend from.
                 pa, pb = _best_clip(prev, a), _best_clip(prev, b)
                 if pa is not None and pb is not None and pa != pb:
                     prev_ids = (prev.clips[pa].id, prev.clips[pb].id)
+                    pair_only = True
             prev_all = {c.id for c in prev.clips} if prev is not None else None
-            for d, clip_level in _attribute(new, prev_ids, cur_ids, prev_all, {c.id for c in timeline.clips}):
+            for d, clip_level in _attribute(new, prev_ids, cur_ids, prev_all, {c.id for c in timeline.clips}, pair_only):
                 j.decisions.append(d)
                 j.clip_level.append(clip_level)
                 j.decision_stage.append(considered[k][0])

@@ -452,9 +452,19 @@ def test_a_pin_decision_taken_after_a_move_belongs_to_the_junction_the_move_made
     pinned = Decision("editor", "pinned", ["c001", "c003"], "locked by the editor: out 1.80s, in 6.20s", None,
                       {"out_shot": 0, "in_shot": 2, "out_time": 1.8, "in_time": 6.2, "origin": "locked", "note": "", "out": 1.8, "in_": 6.2})
     passed = tl("matchcut", [clip("c001", 0, 0.0, 1.8, locked_out=True), clip("c003", 2, 6.2, 8.0, locked_in=True), clip("c002", 1, 3.0, 5.0)], [move, pinned])
-    j = build_junctions([("roughcut", rough), ("matchcut", passed)])[0]
+    junctions = build_junctions([("roughcut", rough), ("matchcut", passed)])
+    j = junctions[0]
     assert (j.out_shot, j.in_shot) == (0, 2)
     assert j.pinned and j.pin_origin == "locked"
     assert j.why().startswith("editor:")
-    other = build_junctions([("roughcut", rough), ("matchcut", passed)])[1]
-    assert not other.pinned  # the junction the moved clip left behind is not the pin's
+    assert not junctions[1].pinned  # the junction the moved clip left behind is not the pin's
+
+
+def test_a_trim_in_the_stage_that_dropped_the_clip_between_does_not_replace_the_adjacency_story():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    drop = Decision("pacing", "drop", ["c002"], "total: over target, dropped lowest-value clip")
+    trim = Decision("pacing", "trim", ["c001"], "total: fitted to target, -0.50s")
+    paced = tl("pacing", [clip("c001", 0, 0.0, 1.5), clip("c002", 2, 6.0, 8.0)], [drop, trim])
+    j = build_junctions([("roughcut", rough), ("pacing", paced)])[0]
+    assert j.why() == "made adjacent by pacing: total: over target, dropped lowest-value clip"
+    assert not j.decisions  # neither the drop nor the trim concerns the junction when the clips were apart before
