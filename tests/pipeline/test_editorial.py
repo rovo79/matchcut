@@ -582,3 +582,45 @@ def test_a_clip_without_an_origin_is_identified_by_its_rough_cut_range():
     assert clip_origin(c) == "3@6.500-8.200"
     c.origin = "3@6.500-7.600"
     assert clip_origin(c) == "3@6.500-7.600"
+
+
+def test_a_pin_taken_after_pacing_extended_a_piece_is_placed_by_a_move_with_lineage_and_is_ambiguous_without():
+    # the review's probe: rough cut [p1, p2, Y]; pacing extended p1's out to 8.2; the pin (shot 3 -> shot 4) was taken in [p1, Y, p2]
+    tl, c = extended_pieces(["p1", "p2", "Y"])
+    pin = Pin(3, 4, 8.2, 9.5, out_origin=clip_origin(c["p1"]), in_origin=clip_origin(c["Y"]))
+    out, decisions = apply_pins(tl, [pin], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c003", "c001"]), ("pinned", ["c001", "c003"])]
+    assert [x.id for x in out.clips] == ["c001", "c003", "c002"] and out.clips[0].source_out == 8.2
+    assert not decisions[-1].detail.endswith(")") and "by_boundary" not in decisions[-1].data  # lineage: nothing to check
+    tl, _ = extended_pieces(["p1", "p2", "Y"])
+    out, decisions = apply_pins(tl, [Pin(3, 4, 8.2, 9.5)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", AMBIGUOUS)]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c003"]
+
+
+NOTE = " (piece chosen by nearest boundary: check it, or lock it again)"
+
+
+def test_a_placement_by_the_nearest_boundary_is_marked_in_the_decision():
+    # both pieces were extended to ~6.5-9.0 by pacing and the pin has no lineage: the boundaries are 1.4 s and more apart, so
+    # the rule picks a piece (here the wrong one for the editor who pinned p1) but says so
+    tl, _ = extended_pieces(["p1", "p2", "Y"])
+    out, decisions = apply_pins(tl, [Pin(3, 4, 9.0, 9.5)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c002", "c003"])]
+    assert decisions[0].detail == "locked by the editor: out 9.00s, in 9.52s" + NOTE  # 9.5 snapped to the 25 fps grid
+    assert decisions[0].data["by_boundary"] is True
+    tl, _ = extended_pieces(["p1", "p2", "Y"])
+    out, decisions = apply_pins(tl, [Pin(4, 3, 11.0, 6.52)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c001", "c003"]), ("pinned", ["c003", "c001"])]
+    assert decisions[-1].detail.endswith(NOTE) and decisions[-1].data["by_boundary"] is True
+    assert "by_boundary" not in decisions[0].data
+    # one candidate on each side: nothing was chosen, nothing to check
+    out, decisions = apply_pins(cut(), [Pin(0, 2, 2.2, 4.8)], BOUNDS, min_clip=0.75)
+    assert decisions[0].detail == "locked by the editor: out 2.20s, in 4.80s" and "by_boundary" not in decisions[0].data
+
+
+def test_an_origin_that_matches_no_piece_is_a_boundary_choice_and_is_marked():
+    tl, _ = extended_pieces(["p1", "p2", "Y"])
+    stale = Pin(3, 4, 9.0, 9.5, out_origin="3@6.000-7.000")
+    _, decisions = apply_pins(tl, [stale], SPLIT_BOUNDS, min_clip=0.5)
+    assert decisions[0].action == "pinned" and decisions[0].data["by_boundary"] is True

@@ -243,9 +243,16 @@ How a pin takes effect:
   without a unique match it takes the piece whose boundary is nearest (the
   outgoing side compares `out_time` with each `source_out`, the incoming side
   `in_time` with each `source_in`), but only if the runner-up is at least
-  0.5 s farther. Otherwise the pin is left unplaced with the ambiguity reason
-  and nothing moves: a pin is never placed on a guess. Selection uses the
-  rough-cut ranges as they were before any pin was applied.
+  0.5 s farther; otherwise the pin is left unplaced with the ambiguity reason
+  and nothing moves. Lineage identifies the piece exactly; the nearest
+  boundary is only a fallback (old pins, stage files that predate origins, a
+  timeline passed in without them), so a placement chosen that way among two or
+  more pieces is marked: the `editor:pinned` detail ends with ` (piece chosen
+  by nearest boundary: check it, or lock it again)`, its data has
+  `"by_boundary": true`, and the inspector badge says so. The Edit tab writes
+  a clip's origin only when the clip carries one (or the inspected stage is the
+  rough cut); otherwise the field stays empty. Selection uses the rough-cut
+  ranges as they were before any pin was applied.
 
 A pin holds the cut points, not the transition: a pinned junction on a beat
 boundary still gets the beat's dissolve, and only a match cut (tagged

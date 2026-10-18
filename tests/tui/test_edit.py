@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import Pin, PinStore
-from matchcut.pipeline.junctions import build_junctions, load_stage_timelines
+from matchcut.pipeline.junctions import build_junctions, load_stage_timelines, stage_timeline_paths
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import clip_origin
+from matchcut.pipeline.timeline import Timeline, clip_origin
 from matchcut.tui import images
 from matchcut.tui.app import MatchcutApp
 from matchcut.tui.views.edit import EditView
@@ -166,7 +166,42 @@ def test_a_pin_remembers_the_clip_instances_of_the_inspected_stage(mock_workspac
             pin = json.loads((ws / "editorial.json").read_text())["pins"][0]
             assert pin["out_origin"] == clip_origin(tl.clip_by_id(j.out_clip)) and pin["in_origin"] == clip_origin(tl.clip_by_id(j.in_clip))
             assert pin["out_origin"] and pin["in_origin"]
+            rough_keys = {clip_origin(c) for c in Timeline.load(ws / "roughcut.json").clips}  # an instance key a rough-cut clip really has
+            assert pin["out_origin"] in rough_keys and pin["in_origin"] in rough_keys
             assert PinStore(ws).get(j.out_shot, j.in_shot).out_origin == pin["out_origin"]
+
+    run_async(body())
+
+
+def test_a_stage_file_that_predates_origins_gives_a_pin_no_origin_except_in_the_rough_cut(mock_workspace, tmp_path):
+    ws = own_copy(mock_workspace, tmp_path)
+    for stage, path in stage_timeline_paths(ws):  # simulate stage files written before clips carried an origin
+        if path.exists() and stage != "roughcut":
+            data = json.loads(path.read_text())
+            for c in data["clips"]:
+                del c["origin"]
+            path.write_text(json.dumps(data))
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            j = view.current_junction()
+            assert view.current_stage() != "roughcut"
+            await pilot.press("l")
+            pin = json.loads((ws / "editorial.json").read_text())["pins"][0]
+            assert (pin["out_origin"], pin["in_origin"]) == ("", "")  # not a key computed from a pass's modified range
+            while view.current_stage() != "roughcut":  # in the rough cut a clip's range IS its instance key
+                await pilot.press("left_square_bracket")
+                await pilot.pause()
+            j = view.current_junction()
+            tl = view._state.timeline("roughcut")
+            await pilot.press("l")
+            pin = PinStore(ws).get(j.out_shot, j.in_shot)
+            assert pin.out_origin == clip_origin(tl.clip_by_id(j.out_clip)) and pin.in_origin == clip_origin(tl.clip_by_id(j.in_clip))
+            assert pin.out_origin and pin.in_origin
 
     run_async(body())
 

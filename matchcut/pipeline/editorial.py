@@ -4,10 +4,11 @@ A pin names a junction by its two shots (clip ids change when a cut is
 regenerated; shots do not) and stores the cut points to hold. Pins are applied
 to the rough cut before any pass runs: both ends of the junction are locked,
 the passes leave locked ends alone, and pacing never drops a pinned clip. The
-clips are the clip instances the pin remembers (their ``origin``, which travels through every pass); a pin
-without them, or whose instance is gone, takes the piece whose boundary is nearest its point, and is left unplaced
-(never guessed) when two pieces fit about equally well. Selection reads the rough cut's ranges as they were before
-any pin was applied. When they are not adjacent in the rough cut (a later pass would have joined
+clips are the clip instances the pin remembers (their ``origin``, which travels through every pass): lineage
+identifies the piece exactly. Without lineage (or when the instance is gone) the piece whose facing boundary is
+nearest the pin's point is used; two pieces within 0.5 s of each other leave the pin unplaced as ambiguous, and a
+placement chosen by the boundary is marked in the ``pinned`` decision (``by_boundary``) so the history and the
+badge ask the editor to check it. Selection reads the rough cut's ranges as they were before any pin was applied. When they are not adjacent in the rough cut (a later pass would have joined
 them), one clip is moved next to the other, never splitting or reordering the
 beats and never moving a clip another pin holds; pins already in place are
 applied before any pin that needs a move.
@@ -120,38 +121,41 @@ Snapshot = Dict[str, Tuple[float, float, str]]
 AMBIGUITY_SECONDS = 0.5  # the nearest piece must be at least this much nearer than the runner-up, else the pin is not placed
 
 
-def _pick(candidates: Sequence[Clip], snap: Snapshot, shot: int, t: float, origin: str, incoming: bool) -> Tuple[Optional[Clip], str]:
-    """The candidate a pin side selects, or (None, the reason). Lineage first, then the nearest boundary."""
+BOUNDARY_NOTE = " (piece chosen by nearest boundary: check it, or lock it again)"
+
+
+def _pick(candidates: Sequence[Clip], snap: Snapshot, shot: int, t: float, origin: str, incoming: bool) -> Tuple[Optional[Clip], str, bool]:
+    """(the candidate a pin side selects, "", whether it was a nearest-boundary choice among several pieces), or (None, the reason, False)."""
     if not candidates:
-        return None, ""
+        return None, "", False
     if origin:
         same = [c for c in candidates if snap[c.id][2] == origin]
         if len(same) == 1:
-            return same[0], ""
+            return same[0], "", False
     if len(candidates) == 1:
-        return candidates[0], ""
+        return candidates[0], "", False  # nothing to tell apart
     # the outgoing side holds the clip's out-point, the incoming side its in-point
     ranked = sorted(((abs(t - snap[c.id][0 if incoming else 1]), k) for k, c in enumerate(candidates)))
     if ranked[1][0] - ranked[0][0] < AMBIGUITY_SECONDS - 1e-9:
-        return None, f"shot {shot} is ambiguous: more than one piece fits the pinned point"
-    return candidates[ranked[0][1]], ""
+        return None, f"shot {shot} is ambiguous: more than one piece fits the pinned point", False
+    return candidates[ranked[0][1]], "", True
 
 
-def _choose(out: Timeline, pin: Pin, snap: Snapshot) -> Tuple[Optional[Tuple[Clip, Clip]], str]:
-    """The (outgoing, incoming) clips the pin selects, two distinct clips; or (None, reason). Ranges come from ``snap``."""
+def _choose(out: Timeline, pin: Pin, snap: Snapshot) -> Tuple[Optional[Tuple[Clip, Clip]], str, bool]:
+    """The (outgoing, incoming) clips the pin selects, two distinct clips, and whether either side went by the nearest boundary; or (None, reason, False). Ranges come from ``snap``."""
     outs = [c for c in out.clips if c.shot_index == pin.out_shot]
     if not outs:
-        return None, f"shot {pin.out_shot} is not in this cut"
-    a, reason = _pick(outs, snap, pin.out_shot, pin.out_time, pin.out_origin, incoming=False)
+        return None, f"shot {pin.out_shot} is not in this cut", False
+    a, reason, by_a = _pick(outs, snap, pin.out_shot, pin.out_time, pin.out_origin, incoming=False)
     if a is None:
-        return None, reason
+        return None, reason, False
     ins = [c for c in out.clips if c.shot_index == pin.in_shot and c is not a]  # a jump cut: two different pieces of one shot
     if not ins:
-        return None, f"shot {pin.in_shot} has only one clip in this cut" if pin.in_shot == pin.out_shot else f"shot {pin.in_shot} is not in this cut"
-    b, reason = _pick(ins, snap, pin.in_shot, pin.in_time, pin.in_origin, incoming=True)
+        return None, f"shot {pin.in_shot} has only one clip in this cut" if pin.in_shot == pin.out_shot else f"shot {pin.in_shot} is not in this cut", False
+    b, reason, by_b = _pick(ins, snap, pin.in_shot, pin.in_time, pin.in_origin, incoming=True)
     if b is None:
-        return None, reason
-    return (a, b), ""
+        return None, reason, False
+    return (a, b), "", by_a or by_b
 
 
 def _move_next_to(out: Timeline, a: Clip, b: Clip, pin: Pin) -> Tuple[Optional[Decision], str]:
@@ -178,7 +182,7 @@ def _move_next_to(out: Timeline, a: Clip, b: Clip, pin: Pin) -> Tuple[Optional[D
 
 def _place(out: Timeline, pin: Pin, snap: Snapshot, bounds: Dict[int, Tuple[float, float]], min_clip: float, allow_move: bool) -> Optional[List[Decision]]:
     """The decisions for ``pin``; None when it needs a move and ``allow_move`` is false (try it again in the second phase)."""
-    chosen, reason = _choose(out, pin, snap)
+    chosen, reason, by_boundary = _choose(out, pin, snap)
     if chosen is None:
         return [Decision("editor", "pin_unplaced", [], reason, None, pin.to_dict())]
     a, b = chosen
@@ -206,7 +210,11 @@ def _place(out: Timeline, pin: Pin, snap: Snapshot, bounds: Dict[int, Tuple[floa
         if "pinned" not in c.tags:
             c.tags.append("pinned")
     detail = f"{pin.origin} by the editor: out {a.source_out:.2f}s, in {b.source_in:.2f}s"
-    decisions.append(Decision("editor", "pinned", [a.id, b.id], detail, None, dict(pin.to_dict(), out=a.source_out, in_=b.source_in)))
+    data = dict(pin.to_dict(), out=a.source_out, in_=b.source_in)
+    if by_boundary:  # no lineage told the pieces apart: say so, the editor should check the piece
+        detail += BOUNDARY_NOTE
+        data["by_boundary"] = True
+    decisions.append(Decision("editor", "pinned", [a.id, b.id], detail, None, data))
     return decisions
 
 

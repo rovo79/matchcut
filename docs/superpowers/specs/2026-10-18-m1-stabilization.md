@@ -70,8 +70,19 @@ when they are not:
      One candidate is chosen. With several, the nearest is chosen only if the
      runner-up is at least `AMBIGUITY_SECONDS = 0.5` farther; otherwise the pin
      is **not placed** and nothing moves: `pin_unplaced`, detail
-     `shot N is ambiguous: more than one piece fits the pinned point`. A pin is
-     never placed on a guess.
+     `shot N is ambiguous: more than one piece fits the pinned point`.
+   Lineage identifies the piece exactly. Without lineage (an old pin, a stage
+   file that predates origins, a timeline passed in without origins) the
+   nearest facing boundary is used, ties within 0.5 s are left unplaced as
+   ambiguous, and a placement chosen this way among two or more pieces is
+   marked: the `pinned` decision's detail ends with
+   ` (piece chosen by nearest boundary: check it, or lock it again)` and its data
+   holds `"by_boundary": true`; the inspector's pin badge appends
+   `, piece chosen by nearest boundary: check it`. A side with a single
+   candidate piece is unambiguous and unmarked. The Edit view writes a clip's
+   origin into a pin only when the clip carries a real `origin` (or the inspected
+   stage is the rough cut, where `clip_origin` is the instance key) and the clip's
+   shot is the junction's shot; otherwise it writes `""`.
    The two clips are never the same clip: for a pin on one shot (a jump cut) the
    incoming side excludes the clip the outgoing side chose. If a shot is not in
    the cut: `pin_unplaced`, detail `shot N is not in this cut`. If a jump-cut

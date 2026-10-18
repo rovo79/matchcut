@@ -256,11 +256,20 @@ class EditView(Vertical):
             self.app.notify("no junction selected", severity="warning")
             return
         source = j.baseline if origin == "reverted" else (j.state_at(stage) or j.current)
-        # The pin remembers the two clip instances (not just their points) so a regenerated cut finds the same pieces.
+        # The pin remembers the two clip instances (not just their points) so a regenerated cut finds the same pieces. A clip
+        # names its instance only through a real ``origin`` (or in the rough cut, where its range IS the instance key); from
+        # a stage file that predates origins nothing is written rather than a key computed from a modified range.
         stage_tl = self._state.timeline(stage)
-        found = {c.id: clip_origin(c) for c in stage_tl.clips} if stage_tl is not None else {}
+        by_id = {c.id: c for c in stage_tl.clips} if stage_tl is not None else {}
+
+        def instance(clip_id: str, shot: int) -> str:
+            c = by_id.get(clip_id)
+            if c is None or c.shot_index != shot:
+                return ""
+            return c.origin or (clip_origin(c) if stage == "roughcut" else "")
+
         pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin,
-                  out_origin=found.get(j.out_clip, ""), in_origin=found.get(j.in_clip, ""))
+                  out_origin=instance(j.out_clip, j.out_shot), in_origin=instance(j.in_clip, j.in_shot))
         PinStore(self._state.workspace).put(pin)
         note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
         if j.baseline.stage != j.first_stage:

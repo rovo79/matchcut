@@ -67,7 +67,9 @@ A pin is stored in `editorial.json` keyed by the two shots, so it survives
 clips being renumbered and the rough cut being regenerated (the rough-cut
 prompt is told to keep the two shots adjacent). It also remembers which piece
 of each shot it was taken on, so a shot cut into several pieces keeps the right
-one. It takes effect on the next run:
+one. When an older pin has no such memory, the nearest cut point picks the
+piece and the badge adds `, piece chosen by nearest boundary: check it`; pieces
+too close to tell apart are not placed. It takes effect on the next run:
 until then the badge reads `pin pending: run again (R) to apply`. After a run
 it reads `pinned (locked|reverted)`, or `pinned (...), adjusted to out X / in Y
 to fit the clips` when the points had to be clamped, or `pin not placed:

@@ -27,9 +27,10 @@ def _pin_badge(j: Junction, pin: Pin, decision: Optional[Decision]) -> str:
         return "pin pending: run again (R) to apply"
     tol = (1.0 / j.fps if j.fps > 0 else 0.04) + 1e-6
     placed_out, placed_in = float(decision.data.get("out", pin.out_time)), float(decision.data.get("in_", pin.in_time))
+    check = ", piece chosen by nearest boundary: check it" if decision.data.get("by_boundary") else ""
     if abs(placed_out - pin.out_time) <= tol and abs(placed_in - pin.in_time) <= tol:
-        return f"pinned ({pin.origin})"
-    return f"pinned ({pin.origin}), adjusted to out {placed_out:.2f}s / in {placed_in:.2f}s to fit the clips"
+        return f"pinned ({pin.origin}){check}"
+    return f"pinned ({pin.origin}), adjusted to out {placed_out:.2f}s / in {placed_in:.2f}s to fit the clips{check}"
 
 
 def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: Optional[Decision] = None) -> List[str]:

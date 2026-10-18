@@ -333,6 +333,18 @@ def test_a_clamped_pin_says_where_it_was_placed():
     assert "pending" not in plain
 
 
+def test_a_pin_placed_by_the_nearest_boundary_asks_the_editor_to_check_the_piece():
+    j = inspected_junction()
+    decision = editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12, by_boundary=True)
+    plain = render_inspector(j, "final", Pin(1, 3, 4.88, 7.12), pin_decision=decision).plain
+    assert "pinned (locked), piece chosen by nearest boundary: check it" in plain
+    clamped = editor_decision("pinned", 4.50, 7.12, out=4.88, in_=7.12, by_boundary=True)
+    plain = render_inspector(j, "final", Pin(1, 3, 4.50, 7.12), pin_decision=clamped).plain
+    assert "adjusted to out 4.88s / in 7.12s to fit the clips, piece chosen by nearest boundary: check it" in plain
+    plain = render_inspector(j, "final", Pin(1, 3, 4.88, 7.12), pin_decision=editor_decision("pinned", 4.88, 7.12, out=4.88, in_=7.12)).plain
+    assert "nearest boundary" not in plain
+
+
 def test_an_unplaced_pin_says_why():
     j = inspected_junction()
     decision = editor_decision("pin_unplaced", 4.70, 7.12, "not enough room in these clips for the pinned points")
