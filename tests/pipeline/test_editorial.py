@@ -12,7 +12,7 @@ from matchcut.pipeline.editorial import Pin, PinStore, apply_pins, pin_constrain
 from matchcut.pipeline.passes import PacingPass, PolishPass, run_passes
 from matchcut.pipeline.schemas import PolishEdit
 from matchcut.pipeline.pipeline import Pipeline
-from matchcut.pipeline.timeline import Clip, Timeline, Transition
+from matchcut.pipeline.timeline import Clip, Timeline, Transition, clip_origin
 from tests.pipeline.conftest import RecordingMock
 
 BOUNDS = {0: (0.0, 2.5), 1: (2.5, 4.5), 2: (4.5, 6.0)}
@@ -170,11 +170,12 @@ def test_the_clip_a_pin_points_at_is_the_one_that_moves():
     assert out.clips[2].source_in == 7.6 and out.clips[0].source_out == 7.4 and not out.clips[0].locked_in
 
 
-def test_a_clip_is_chosen_by_distance_when_no_range_contains_the_point_and_ties_go_to_the_earlier_one():
-    # 7.5 sits in the gap between the pieces, 0.1 s from each: the earlier piece wins the tie
+def test_a_point_in_the_gap_between_two_pieces_selects_the_piece_whose_boundary_is_nearest():
+    # 7.5 sits in the gap between the pieces: the incoming side measures to the in-points (6.0 and 7.6), so the second piece
+    # is chosen. (The earlier rule chose the first piece, the earlier of two ranges 0.1 s away.)
     out, decisions = apply_pins(two_pieces(), [Pin(4, 3, 11.0, 7.5)], PIECE_BOUNDS, min_clip=0.5)
-    assert decisions[0].clip_ids == ["c001", "c003"] and decisions[0].action == "pin_moved"
-    assert [c.id for c in out.clips] == ["c002", "c003", "c001"]
+    assert decisions[0].clip_ids == ["c002", "c003"] and decisions[0].action == "pin_moved"
+    assert [c.id for c in out.clips] == ["c001", "c003", "c002"]
 
 
 def test_a_pair_that_is_adjacent_elsewhere_is_used_only_when_the_points_select_it():
@@ -409,3 +410,175 @@ def test_pin_store_survives_an_infinite_shot_index(tmp_path):
     assert PinStore(tmp_path).load() == [good]
     (tmp_path / "editorial.json").write_text('{"pins": Infinity}')
     assert PinStore(tmp_path).load() == []
+
+
+# -- how a pin finds its clips: lineage first, then the nearest boundary, never a guess ----------------------------
+AMBIGUOUS = "shot 3 is ambiguous: more than one piece fits the pinned point"
+SPLIT_BOUNDS = {3: (6.0, 9.0), 4: (9.0, 12.0), 5: (12.0, 15.0)}
+
+
+def extended_pieces(order):
+    """Shot 3 as two rough-cut pieces p1 6.5-7.6 and p2 7.9-9.0, a shot 4 clip Y; ``order`` names the clips left to right.
+
+    Pacing later extended p1's out-point to 8.2, inside p2's rough-cut range: a pin taken there points at 8.2.
+    """
+    clips = {"p1": Clip("c001", 3, 6.5, 7.6, "b1"), "p2": Clip("c002", 3, 7.9, 9.0, "b1"), "Y": Clip("c003", 4, 9.5, 11.0, "b1")}
+    return Timeline(source="s.mp4", fps=25.0, clips=[clips[k] for k in order]), clips
+
+
+def test_a_pacing_extension_inside_a_sibling_piece_keeps_an_adjacent_jump_cut_when_the_pin_remembers_its_clips():
+    tl, c = extended_pieces(["p1", "p2", "Y"])
+    pin = Pin(3, 3, 8.2, 7.9, out_origin=clip_origin(c["p1"]), in_origin=clip_origin(c["p2"]))
+    out, decisions = apply_pins(tl, [pin], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c003"]
+    assert (out.clips[0].source_out, out.clips[1].source_in) == (8.2, 7.92)  # 7.9 snapped to the 25 fps grid
+    assert not any(d.action == "pin_moved" for d in out.history)
+
+
+def test_the_same_pin_without_its_clips_is_ambiguous_and_leaves_the_order_alone():
+    tl, _ = extended_pieces(["p1", "p2", "Y"])
+    out, decisions = apply_pins(tl, [Pin(3, 3, 8.2, 7.9)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail, d.clip_ids) for d in decisions] == [("pin_unplaced", AMBIGUOUS, [])]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c003"]
+    assert not any(x.locked_in or x.locked_out or x.tags for x in out.clips)
+    assert [(x.source_in, x.source_out) for x in out.clips] == [(6.5, 7.6), (7.9, 9.0), (9.5, 11.0)]
+
+
+def test_a_pacing_extension_inside_a_sibling_piece_keeps_an_adjacent_junction_when_the_pin_remembers_its_clips():
+    tl, c = extended_pieces(["p1", "Y", "p2"])
+    pin = Pin(3, 4, 8.2, 9.5, out_origin=clip_origin(c["p1"]), in_origin=clip_origin(c["Y"]))
+    out, decisions = apply_pins(tl, [pin], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c003"])]
+    assert [x.id for x in out.clips] == ["c001", "c003", "c002"]
+    assert out.clips[0].source_out == 8.2 and not out.clips[2].locked_in and not out.clips[2].locked_out
+
+
+def test_the_same_junction_without_its_clips_is_ambiguous_and_nothing_moves():
+    tl, _ = extended_pieces(["p1", "Y", "p2"])
+    out, decisions = apply_pins(tl, [Pin(3, 4, 8.2, 9.5)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", AMBIGUOUS)]
+    assert [x.id for x in out.clips] == ["c001", "c003", "c002"]
+    assert [(x.source_in, x.source_out) for x in out.clips] == [(6.5, 7.6), (9.5, 11.0), (7.9, 9.0)]
+
+
+def test_repeated_shots_far_apart_are_told_apart_by_the_nearest_boundary():
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 2.0, 3.0, "b1"), Clip("c002", 4, 9.5, 11.0, "b1"), Clip("c003", 3, 7.0, 8.0, "b1")])
+    out, decisions = apply_pins(tl, [Pin(3, 4, 3.0, 9.5)], {3: (1.0, 9.0), 4: (9.0, 12.0)}, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c003"]
+    out, decisions = apply_pins(tl, [Pin(3, 4, 8.0, 9.5)], {3: (1.0, 9.0), 4: (9.0, 12.0)}, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c002", "c003"]), ("pinned", ["c003", "c002"])]
+    assert [x.id for x in out.clips] == ["c001", "c003", "c002"]
+
+
+def overlapping() -> Timeline:
+    """Shot 3 as two pieces whose source ranges overlap (6.0-8.0 and 7.0-9.0), then shot 4."""
+    return Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 6.0, 8.0, "b1"), Clip("c002", 3, 7.0, 9.0, "b1"), Clip("c003", 4, 9.5, 11.0, "b1")])
+
+
+def test_overlapping_pieces_resolve_by_lineage_on_each_side():
+    tl = overlapping()
+    pin = Pin(3, 3, 8.4, 6.6, out_origin=clip_origin(tl.clips[0]), in_origin=clip_origin(tl.clips[1]))
+    out, decisions = apply_pins(tl, [pin], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+    assert (out.clips[0].source_out, out.clips[1].source_in) == (8.4, 6.6)
+    assert [x.id for x in out.clips] == ["c001", "c002", "c003"]
+
+
+def test_overlapping_pieces_whose_boundaries_are_close_are_ambiguous_without_lineage():
+    out, decisions = apply_pins(overlapping(), [Pin(3, 3, 8.4, 6.6)], SPLIT_BOUNDS, min_clip=0.5)  # out: 0.4 vs 0.6 away
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", AMBIGUOUS)]
+    assert [(x.source_in, x.source_out) for x in out.clips] == [(6.0, 8.0), (7.0, 9.0), (9.5, 11.0)]
+
+
+def test_the_incoming_side_of_a_jump_cut_never_considers_the_clip_the_outgoing_side_took():
+    tl = overlapping()  # 6.6 is 0.6 from piece 1's in-point and 0.4 from piece 2's: ambiguous, unless piece 1 is already taken
+    out, decisions = apply_pins(tl, [Pin(3, 3, 8.0, 6.6, out_origin=clip_origin(tl.clips[0]))], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+
+
+def test_a_gap_of_exactly_the_ambiguity_margin_is_clear_and_a_smaller_one_is_not():
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 6.0, 7.0, "b1"), Clip("c002", 4, 9.5, 11.0, "b1"), Clip("c003", 3, 6.5, 7.5, "b1")])
+    _, decisions = apply_pins(tl, [Pin(3, 4, 6.75, 9.5)], SPLIT_BOUNDS, min_clip=0.5)  # 0.25 vs 0.75 away: exactly 0.5 farther
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+    _, decisions = apply_pins(tl, [Pin(3, 4, 7.1, 9.5)], SPLIT_BOUNDS, min_clip=0.5)  # 0.1 vs 0.4 away
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", AMBIGUOUS)]
+
+
+def test_a_lineage_that_matches_no_clip_falls_back_to_the_nearest_boundary():
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 2.0, 3.0, "b1"), Clip("c002", 4, 9.5, 11.0, "b1")])
+    _, decisions = apply_pins(tl, [Pin(3, 4, 3.0, 9.5, out_origin="3@0.000-1.000")], {3: (1.0, 9.0), 4: (9.0, 12.0)}, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"])]
+
+
+def test_lineage_prefers_the_remembered_piece_over_a_nearer_boundary():
+    # the pin points at 7.6, nearest to piece 1's out-point, but remembers piece 2 (a later pass moved the out-point)
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 6.0, 7.5, "b1"), Clip("c002", 3, 7.0, 9.0, "b1"), Clip("c003", 4, 9.5, 11.0, "b1")])
+    _, decisions = apply_pins(tl, [Pin(3, 4, 7.6, 9.5, out_origin=clip_origin(tl.clips[1]))], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c002", "c003"])]
+    _, decisions = apply_pins(tl, [Pin(3, 4, 7.6, 9.5)], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c003", "c001"]), ("pinned", ["c001", "c003"])]  # the nearest boundary alone picks piece 1
+
+
+def test_the_incoming_clip_a_pin_remembers_wins_after_a_clip_reordering():
+    # rough cut: p1 | sh1 | p2 | sh2; a match-cut reorder gave p1 | sh2 | p2 | sh1 and the editor pinned sh2 -> p2 at p2's trimmed in-point
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[
+        Clip("c001", 3, 6.0, 7.0, "b1"), Clip("c002", 1, 2.6, 4.0, "b1"), Clip("c003", 3, 7.4, 8.6, "b1"), Clip("c004", 2, 4.6, 5.8, "b1"),
+    ])
+    bounds = {1: (2.5, 4.5), 2: (4.5, 6.0), 3: (6.0, 9.0)}
+    pin = Pin(2, 3, 5.8, 6.8, in_origin=clip_origin(tl.clips[2]))  # 6.8 is 0.8 from piece 1's in-point and 0.6 from piece 2's
+    out, decisions = apply_pins(tl, [pin], bounds, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c003", "c004"]), ("pinned", ["c004", "c003"])]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c004", "c003"]
+    assert out.clips[3].source_in == 6.8 and out.clips[0].source_in == 6.0 and not out.clips[0].locked_in
+    _, decisions = apply_pins(tl, [Pin(2, 3, 5.8, 6.8)], bounds, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", AMBIGUOUS)]
+
+
+def test_the_continuity_insert_shape_is_resolved_by_the_remembered_piece():
+    tl = two_pieces()  # rough cut c001 sh3 6.0-7.4, c002 sh3 7.6-9.0, c003 sh4; the stage order was c001, c003, c002
+    pin = Pin(4, 3, 11.0, 7.6, in_origin=clip_origin(tl.clips[1]))
+    out, decisions = apply_pins(tl, [pin], PIECE_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pin_moved", ["c002", "c003"]), ("pinned", ["c003", "c002"])]
+    assert [x.id for x in out.clips] == ["c001", "c003", "c002"] and out.clips[2].source_in == 7.6
+    _, decisions = apply_pins(tl, [Pin(4, 3, 11.0, 7.6)], PIECE_BOUNDS, min_clip=0.5)  # without lineage 7.6 is still clear here: 1.6 s from piece 1's in-point, 0 from piece 2's
+    assert decisions[0].clip_ids == ["c002", "c003"]
+
+
+def test_a_phase_two_pin_selects_by_the_ranges_the_rough_cut_had_before_phase_one():
+    # Q is shot 3's piece nearest to the second pin's out-point 8.4 (0.1 away, piece P 1.4 away). The first pin, applied
+    # earlier because it needs no move, extends P's out-point to 8.0 (0.4 away); reading that would make the second pin ambiguous.
+    p = Clip("c001", 3, 6.0, 7.0, "b1")
+    tl = Timeline(source="s.mp4", fps=25.0, clips=[p, Clip("c002", 4, 9.5, 11.0, "b1"), Clip("c003", 5, 12.5, 14.0, "b1"), Clip("c004", 3, 7.5, 8.5, "b1")])
+    first = Pin(3, 4, 8.0, 9.5, out_origin=clip_origin(p))
+    second = Pin(3, 5, 8.4, 12.5)
+    out, decisions = apply_pins(tl, [second, first], SPLIT_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c001", "c002"]), ("pin_moved", ["c003", "c004"]), ("pinned", ["c004", "c003"])]
+    assert [x.id for x in out.clips] == ["c001", "c002", "c004", "c003"]
+    assert out.clips[0].source_out == 8.0 and out.clips[2].source_out == 8.4
+
+
+def test_pin_and_clip_origins_round_trip_and_old_files_still_load(tmp_path):
+    store = PinStore(tmp_path)
+    store.put(Pin(3, 4, 8.2, 9.5, out_origin="3@6.500-7.600", in_origin="4@9.500-11.000"))
+    pin = PinStore(tmp_path).get(3, 4)
+    assert (pin.out_origin, pin.in_origin) == ("3@6.500-7.600", "4@9.500-11.000") and pin.key == (3, 4)
+    (tmp_path / "editorial.json").write_text(json.dumps({"pins": [{"out_shot": 3, "in_shot": 4, "out_time": 8.2, "in_time": 9.5, "origin": "locked", "note": ""}]}))
+    old = PinStore(tmp_path).get(3, 4)
+    assert (old.out_origin, old.in_origin, old.out_time) == ("", "", 8.2)
+    clip = Clip("c001", 3, 6.5, 7.6, "b1", origin="3@6.500-7.600")
+    assert Clip.from_dict(clip.to_dict()).origin == "3@6.500-7.600"
+    legacy = clip.to_dict()
+    del legacy["origin"]
+    assert Clip.from_dict(legacy).origin == ""
+    assert Timeline(source="s.mp4", fps=25.0, clips=[clip]).copy().clips[0].origin == "3@6.500-7.600"
+
+
+def test_a_clip_without_an_origin_is_identified_by_its_rough_cut_range():
+    c = Clip("c001", 3, 6.5, 7.6, "b1")
+    assert clip_origin(c) == "3@6.500-7.600"
+    c.source_out = 8.2  # a later pass moved the out-point: a stamped clip keeps its instance
+    assert clip_origin(c) == "3@6.500-8.200"
+    c.origin = "3@6.500-7.600"
+    assert clip_origin(c) == "3@6.500-7.600"

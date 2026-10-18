@@ -13,6 +13,7 @@ from textual.widgets import Static
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace
 from matchcut.pipeline.sampling import FrameCache
+from matchcut.pipeline.timeline import clip_origin
 from .. import images
 from ..state import RunState, file_fingerprint
 from ..widgets.frame import Frame
@@ -255,7 +256,11 @@ class EditView(Vertical):
             self.app.notify("no junction selected", severity="warning")
             return
         source = j.baseline if origin == "reverted" else (j.state_at(stage) or j.current)
-        pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin)
+        # The pin remembers the two clip instances (not just their points) so a regenerated cut finds the same pieces.
+        stage_tl = self._state.timeline(stage)
+        found = {c.id: clip_origin(c) for c in stage_tl.clips} if stage_tl is not None else {}
+        pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin,
+                  out_origin=found.get(j.out_clip, ""), in_origin=found.get(j.in_clip, ""))
         PinStore(self._state.workspace).put(pin)
         note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
         if j.baseline.stage != j.first_stage:

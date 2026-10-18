@@ -269,6 +269,7 @@ class ContinuityPass(Pass):
             prev = merged[-1] if merged else None
             if prev is not None and prev.shot_index == c.shot_index and abs(prev.source_out - c.source_in) < 0.05 and not prev.locked_out:
                 decisions.append(self.decision("merge", [prev.id, c.id], "contiguous pieces of the same shot merged"))
+                # the merged clip keeps the earlier piece's origin (``prev`` stays; its range just grows)
                 prev.source_out = c.source_out
                 prev.locked_out = c.locked_out
                 prev.tags = [t for t in prev.tags if not t.startswith("match_out")] + [t for t in c.tags if t.startswith("match_out")]

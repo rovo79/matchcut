@@ -4,8 +4,10 @@ A pin names a junction by its two shots (clip ids change when a cut is
 regenerated; shots do not) and stores the cut points to hold. Pins are applied
 to the rough cut before any pass runs: both ends of the junction are locked,
 the passes leave locked ends alone, and pacing never drops a pinned clip. The
-clips are chosen by the pinned points (the piece of each shot that holds them).
-When they are not adjacent in the rough cut (a later pass would have joined
+clips are the clip instances the pin remembers (their ``origin``, which travels through every pass); a pin
+without them, or whose instance is gone, takes the piece whose boundary is nearest its point, and is left unplaced
+(never guessed) when two pieces fit about equally well. Selection reads the rough cut's ranges as they were before
+any pin was applied. When they are not adjacent in the rough cut (a later pass would have joined
 them), one clip is moved next to the other, never splitting or reordering the
 beats and never moving a clip another pin holds; pins already in place are
 applied before any pin that needs a move.
@@ -19,7 +21,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .timeline import Clip, Decision, Timeline
+from .timeline import Clip, Decision, Timeline, clip_origin
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +34,8 @@ class Pin:
     in_time: float
     origin: str = "locked"  # "locked": keep the inspected points; "reverted": back to the first cut's points
     note: str = ""
+    out_origin: str = ""  # clip_origin of the outgoing / incoming clip when the pin was taken; "" for pins that predate it
+    in_origin: str = ""
 
     @property
     def key(self) -> Tuple[int, int]:
@@ -42,7 +46,8 @@ class Pin:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Pin":
-        return cls(int(d["out_shot"]), int(d["in_shot"]), float(d["out_time"]), float(d["in_time"]), str(d.get("origin", "locked")), str(d.get("note", "")))
+        return cls(int(d["out_shot"]), int(d["in_shot"]), float(d["out_time"]), float(d["in_time"]), str(d.get("origin", "locked")), str(d.get("note", "")),
+                   str(d.get("out_origin", "")), str(d.get("in_origin", "")))
 
 
 class PinStore:
@@ -109,35 +114,43 @@ def _index(clips: Sequence[Clip], clip: Clip) -> int:
     return next(i for i, c in enumerate(clips) if c is clip)
 
 
-def _distance(c: Clip, t: float) -> float:
-    """0 when ``t`` lies in the clip's source range, else the gap to the nearer end."""
-    return max(c.source_in - t, t - c.source_out, 0.0)
+# A rough-cut clip's range as it was before any pin touched it: id -> (source_in, source_out, clip_origin).
+Snapshot = Dict[str, Tuple[float, float, str]]
+
+AMBIGUITY_SECONDS = 0.5  # the nearest piece must be at least this much nearer than the runner-up, else the pin is not placed
 
 
-def _nearest(clips: Sequence[Clip], shot: int, t: float, skip: Optional[Clip] = None) -> Optional[Clip]:
-    """The clip of ``shot`` whose source range holds ``t`` (else the nearest one); the earlier clip on a tie."""
-    best: Optional[Clip] = None
-    for c in clips:
-        if c.shot_index != shot or c is skip:
-            continue
-        if best is None or _distance(c, t) < _distance(best, t) - 1e-9:
-            best = c
-    return best
+def _pick(candidates: Sequence[Clip], snap: Snapshot, shot: int, t: float, origin: str, incoming: bool) -> Tuple[Optional[Clip], str]:
+    """The candidate a pin side selects, or (None, the reason). Lineage first, then the nearest boundary."""
+    if not candidates:
+        return None, ""
+    if origin:
+        same = [c for c in candidates if snap[c.id][2] == origin]
+        if len(same) == 1:
+            return same[0], ""
+    if len(candidates) == 1:
+        return candidates[0], ""
+    # the outgoing side holds the clip's out-point, the incoming side its in-point
+    ranked = sorted(((abs(t - snap[c.id][0 if incoming else 1]), k) for k, c in enumerate(candidates)))
+    if ranked[1][0] - ranked[0][0] < AMBIGUITY_SECONDS - 1e-9:
+        return None, f"shot {shot} is ambiguous: more than one piece fits the pinned point"
+    return candidates[ranked[0][1]], ""
 
 
-def _choose(out: Timeline, pin: Pin) -> Tuple[Optional[Tuple[Clip, Clip]], str]:
-    """The (outgoing, incoming) clips the pinned points select, two distinct clips; or (None, reason)."""
-    a = _nearest(out.clips, pin.out_shot, pin.out_time)
-    if a is None:
+def _choose(out: Timeline, pin: Pin, snap: Snapshot) -> Tuple[Optional[Tuple[Clip, Clip]], str]:
+    """The (outgoing, incoming) clips the pin selects, two distinct clips; or (None, reason). Ranges come from ``snap``."""
+    outs = [c for c in out.clips if c.shot_index == pin.out_shot]
+    if not outs:
         return None, f"shot {pin.out_shot} is not in this cut"
-    if pin.in_shot == pin.out_shot:  # a jump cut: two different pieces of one shot
-        b = _nearest(out.clips, pin.in_shot, pin.in_time, skip=a)
-        if b is None:
-            return None, f"shot {pin.in_shot} has only one clip in this cut"
-    else:
-        b = _nearest(out.clips, pin.in_shot, pin.in_time)
-        if b is None:
-            return None, f"shot {pin.in_shot} is not in this cut"
+    a, reason = _pick(outs, snap, pin.out_shot, pin.out_time, pin.out_origin, incoming=False)
+    if a is None:
+        return None, reason
+    ins = [c for c in out.clips if c.shot_index == pin.in_shot and c is not a]  # a jump cut: two different pieces of one shot
+    if not ins:
+        return None, f"shot {pin.in_shot} has only one clip in this cut" if pin.in_shot == pin.out_shot else f"shot {pin.in_shot} is not in this cut"
+    b, reason = _pick(ins, snap, pin.in_shot, pin.in_time, pin.in_origin, incoming=True)
+    if b is None:
+        return None, reason
     return (a, b), ""
 
 
@@ -163,9 +176,9 @@ def _move_next_to(out: Timeline, a: Clip, b: Clip, pin: Pin) -> Tuple[Optional[D
     return None, reason
 
 
-def _place(out: Timeline, pin: Pin, bounds: Dict[int, Tuple[float, float]], min_clip: float, allow_move: bool) -> Optional[List[Decision]]:
+def _place(out: Timeline, pin: Pin, snap: Snapshot, bounds: Dict[int, Tuple[float, float]], min_clip: float, allow_move: bool) -> Optional[List[Decision]]:
     """The decisions for ``pin``; None when it needs a move and ``allow_move`` is false (try it again in the second phase)."""
-    chosen, reason = _choose(out, pin)
+    chosen, reason = _choose(out, pin, snap)
     if chosen is None:
         return [Decision("editor", "pin_unplaced", [], reason, None, pin.to_dict())]
     a, b = chosen
@@ -204,12 +217,13 @@ def apply_pins(tl: Timeline, pins: Sequence[Pin], bounds: Dict[int, Tuple[float,
     moves can break them), then the pins that need a move.
     """
     out = tl.copy()
+    snap: Snapshot = {c.id: (c.source_in, c.source_out, clip_origin(c)) for c in out.clips}  # phase one clamps ranges; selection must not see that
     decisions: List[Decision] = []
     pending = list(pins)
     for allow_move in (False, True):
         later: List[Pin] = []
         for pin in pending:
-            placed = _place(out, pin, bounds, min_clip, allow_move)
+            placed = _place(out, pin, snap, bounds, min_clip, allow_move)
             if placed is None:
                 later.append(pin)
             else:

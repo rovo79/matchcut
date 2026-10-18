@@ -11,6 +11,7 @@ from matchcut.pipeline.editorial import Pin, PinStore
 from matchcut.pipeline.junctions import build_junctions, load_stage_timelines
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.sampling import FrameCache
+from matchcut.pipeline.timeline import clip_origin
 from matchcut.tui import images
 from matchcut.tui.app import MatchcutApp
 from matchcut.tui.views.edit import EditView
@@ -128,7 +129,9 @@ def test_lock_revert_and_clear_write_editorial_json(mock_workspace, tmp_path):
             j = view.current_junction()
             await pilot.press("l")
             pins = json.loads((ws / "editorial.json").read_text())["pins"]
-            assert pins == [dict(out_shot=j.out_shot, in_shot=j.in_shot, out_time=round(j.current.out_time, 3), in_time=round(j.current.in_time, 3), origin="locked", note="")]
+            tl = view._state.timeline(view.current_stage())
+            origins = dict(out_origin=clip_origin(tl.clip_by_id(j.out_clip)), in_origin=clip_origin(tl.clip_by_id(j.in_clip)))
+            assert pins == [dict(out_shot=j.out_shot, in_shot=j.in_shot, out_time=round(j.current.out_time, 3), in_time=round(j.current.in_time, 3), origin="locked", note="", **origins)]
             await wait_for(pilot, lambda: "pin pending" in str(app.query_one("#junction-panel").content))
             await pilot.press("v")
             pins = json.loads((ws / "editorial.json").read_text())["pins"]
@@ -139,6 +142,31 @@ def test_lock_revert_and_clear_write_editorial_json(mock_workspace, tmp_path):
             await wait_for(pilot, lambda: "pin pending" not in str(app.query_one("#junction-panel").content))
             panel = str(app.query_one("#junction-panel").content)
             assert "pinned (" not in panel and "pin not placed" not in panel
+
+    run_async(body())
+
+
+def test_a_pin_remembers_the_clip_instances_of_the_inspected_stage(mock_workspace, tmp_path):
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert len(view.stages) > 1
+            await pilot.press("left_square_bracket")  # inspect the stage before the last
+            await pilot.pause()
+            stage = view.current_stage()
+            assert stage != view.stages[-1]
+            j = view.current_junction()
+            tl = view._state.timeline(stage)
+            await pilot.press("l")
+            pin = json.loads((ws / "editorial.json").read_text())["pins"][0]
+            assert pin["out_origin"] == clip_origin(tl.clip_by_id(j.out_clip)) and pin["in_origin"] == clip_origin(tl.clip_by_id(j.in_clip))
+            assert pin["out_origin"] and pin["in_origin"]
+            assert PinStore(ws).get(j.out_shot, j.in_shot).out_origin == pin["out_origin"]
 
     run_async(body())
 

@@ -19,7 +19,7 @@ from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import Junction, build_junctions, junction_detail, load_stage_timelines
 from matchcut.pipeline.pipeline import Pipeline
-from matchcut.pipeline.timeline import Clip, Decision, Timeline
+from matchcut.pipeline.timeline import Clip, Decision, Timeline, clip_origin
 
 
 @pytest.fixture(scope="module")
@@ -307,3 +307,47 @@ def test_a_junction_a_pass_made_is_placed_on_the_piece_the_editor_pinned(base_ws
     pieces = [c for c in final.clips if c.shot_index == 3]
     assert pieces[0] is not b and pieces[1] is b  # shot 3's pieces keep their source order
     assert not pieces[0].locked_in
+
+
+# -- 9. clip-instance lineage: origins travel through every pass and a pin finds its pieces by them ----------
+def two_pieces_then_y() -> List[Clip]:
+    return [Clip("c001", 3, 6.5, 7.6, "b2"), Clip("c002", 3, 7.9, 9.0, "b2"), Clip("c003", 4, 9.2, 10.6, "b2")]
+
+
+def test_every_clip_of_every_stage_carries_the_origin_of_a_rough_cut_clip(base_ws, tmp_path):
+    ws, cfg = own_copy(base_ws, tmp_path)
+    rough = hand_built(ws, cfg, two_pieces_then_y())
+    final = Pipeline(cfg).refine(rough)
+    keys = {clip_origin(c) for c in rough.clips}
+    assert keys == {"3@6.500-7.600", "3@7.900-9.000", "4@9.200-10.600"}
+    stages = dict(load_stage_timelines(ws))
+    assert len(stages) > 2
+    for name, tl in stages.items():
+        if name == "roughcut":
+            assert all(c.origin == "" for c in tl.clips)  # written before refine: clip_origin computes the same key
+            continue
+        assert tl.clips and all(c.origin in keys for c in tl.clips), name
+    assert {c.origin for c in final.clips} <= keys and all(c.origin for c in final.clips)
+    # the default workspace's rough cut too
+    base_final = Pipeline(cfg).refine(Timeline.load(base_ws / "roughcut.json"))
+    base_keys = {clip_origin(c) for c in Timeline.load(base_ws / "roughcut.json").clips}
+    assert all(c.origin in base_keys for c in base_final.clips)
+
+
+def test_a_pin_taken_at_final_stage_points_finds_its_pieces_by_their_origins_after_a_second_run(base_ws, tmp_path):
+    ws, cfg = own_copy(base_ws, tmp_path)
+    rough = hand_built(ws, cfg, two_pieces_then_y())
+    final = Pipeline(cfg).refine(rough)
+    j = junction_of(ws, (4, 3))  # the junction the match-cut reorder made: shot 4 -> the second piece of shot 3
+    a, b = final.clip_by_id(j.out_clip), final.clip_by_id(j.in_clip)
+    assert b.origin == "3@7.900-9.000"
+    # exactly what the Edit view writes for "lock" at the final stage
+    pin = Pin(j.out_shot, j.in_shot, round(j.current.out_time, 3), round(j.current.in_time, 3), "locked", out_origin=clip_origin(a), in_origin=clip_origin(b))
+    PinStore(ws).put(pin)
+    again = Pipeline(cfg).refine(rough)
+    outcome = pin_outcome(again, pin)
+    assert outcome is not None and outcome.action == "pinned", outcome
+    a2, b2 = pair_of(again, pin.key)
+    assert (a2.origin, b2.origin) == (pin.out_origin, pin.in_origin)
+    assert a2.locked_out and b2.locked_in
+    assert not any(d.action == "pin_unplaced" for d in editor_decisions(again, pin))

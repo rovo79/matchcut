@@ -48,14 +48,34 @@ rough cut, before any pass. A pin says "keep shot A immediately followed by
 shot B at these points", so `apply_pins` now makes the two shots adjacent
 when they are not:
 
-1. Choose the two clips by the pinned points. The outgoing clip is the clip of
-   the pin's out shot whose source range contains `out_time`, else the nearest
-   one by distance to its range; the incoming clip is chosen the same way for
-   the in shot and `in_time`; a tie goes to the earlier clip. The two are never
-   the same clip: for a pin on one shot (a jump cut) the incoming clip is
-   chosen among the shot's other clips. If a shot is not in the cut:
-   `pin_unplaced`, detail `shot N is not in this cut`. If a jump-cut pin's shot
-   has only one clip in the cut: `pin_unplaced`, detail
+1. Choose the two clips the pin points at. A pin remembers the clip instances it
+   was taken on: `Clip.origin` (default `""`, serialised) is the identity of a
+   clip instance, `timeline.clip_origin(c)` returns `c.origin` when set, else
+   `"{shot}@{in:.3f}-{out:.3f}"` (the rough-cut key). `Pipeline.refine` stamps
+   every rough-cut clip that has no origin with its `clip_origin` before
+   `apply_pins`; every pass copies clips (continuity's merge keeps the earlier
+   piece), so the origin reaches every stage's timeline. `Pin` gains
+   `out_origin` and `in_origin` (default `""`, serialised; `Pin.key` and
+   `pin_outcome` are unchanged), which the Edit view fills with `clip_origin` of
+   the junction's two clips in the inspected stage's timeline (empty when a clip
+   cannot be found). Per side (outgoing: the out shot, `out_time`, `out_origin`;
+   incoming: the in shot, `in_time`, `in_origin`) over the candidates, the clips
+   of that shot, using the ranges the clips had **before the first pin was
+   applied** (a snapshot taken at the start of `apply_pins`, so a clamp by an
+   earlier pin never changes a later pin's choice):
+   - lineage: if the pin's origin is set and exactly one candidate has that
+     `clip_origin`, it is chosen;
+   - otherwise the nearest boundary: the outgoing side measures
+     `abs(out_time - source_out)`, the incoming side `abs(in_time - source_in)`.
+     One candidate is chosen. With several, the nearest is chosen only if the
+     runner-up is at least `AMBIGUITY_SECONDS = 0.5` farther; otherwise the pin
+     is **not placed** and nothing moves: `pin_unplaced`, detail
+     `shot N is ambiguous: more than one piece fits the pinned point`. A pin is
+     never placed on a guess.
+   The two clips are never the same clip: for a pin on one shot (a jump cut) the
+   incoming side excludes the clip the outgoing side chose. If a shot is not in
+   the cut: `pin_unplaced`, detail `shot N is not in this cut`. If a jump-cut
+   pin's shot has only one clip in the cut: `pin_unplaced`, detail
    `shot N has only one clip in this cut`.
 2. If the chosen incoming clip directly follows the chosen outgoing clip, place
    the pin as today. A pair of the same two shots that is adjacent elsewhere in
@@ -82,10 +102,11 @@ when they are not:
 6. If both candidates are rejected: `pin_unplaced` with the first candidate's
    reason.
 
-The reasons a pin is unplaced are therefore exactly five: `shot N is not in this
-cut`, `shot N has only one clip in this cut`, `shot N is held by another pin`,
-`moving shot N would split or reorder the beats`, and `not enough room in these
-clips for the pinned points`.
+The reasons a pin is unplaced are therefore exactly six: `shot N is not in this
+cut`, `shot N has only one clip in this cut`, `shot N is ambiguous: more than one
+piece fits the pinned point`, `shot N is held by another pin`, `moving shot N
+would split or reorder the beats`, and `not enough room in these clips for the
+pinned points`.
 
 Placement is two-phase, each phase in store order: first every pin whose chosen
 clips are already adjacent, then the pins that need a move. A clip locked by a
@@ -140,6 +161,11 @@ timelines, with the mock backend. Required scenarios:
    both runs the badges read `pinned (locked)` / `pinned (reverted)` with the
    labels of §1.1; a rough cut regenerated without one of the shots reports
    `pin not placed: shot N is not in this cut`.
+5. **Pin-to-clip selection:** repeated shots, overlapping source ranges, a pacing
+   extension that lands inside a sibling piece's range, and clips reordered by a
+   pass: with the clip origins the pin remembers it is placed on the right pieces;
+   without them, a pin whose pieces cannot be told apart is left unplaced with
+   the ambiguity reason and the clip order untouched.
 
 ## 5. Acceptance status
 

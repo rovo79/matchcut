@@ -42,7 +42,7 @@ from .render import render, snap_to_frames
 from .report import build_report
 from .sampling import FrameCache
 from .shots import detect_shots, load_shots, save_shots
-from .timeline import Timeline
+from .timeline import Timeline, clip_origin
 
 log = logging.getLogger("matchcut.pipeline")
 
@@ -305,6 +305,9 @@ class Pipeline:
         ctx = self.narrative()
         tl = timeline or self.rough_cut()
         pins = editorial.PinStore(self.ws).load()
+        tl = tl.copy()  # stamp every clip with the instance it is, so a pin taken at any later stage can name it
+        for c in tl.clips:
+            c.origin = clip_origin(c)
         if pins:
             tl, pin_decisions = editorial.apply_pins(tl, pins, ctx.shot_bounds, self.cfg.pacing.min_clip_seconds)
             for d in pin_decisions:

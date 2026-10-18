@@ -65,14 +65,16 @@ footage credit.
 reverts it to the points of the first cut and keeps those; `x` clears the pin.
 A pin is stored in `editorial.json` keyed by the two shots, so it survives
 clips being renumbered and the rough cut being regenerated (the rough-cut
-prompt is told to keep the two shots adjacent). It takes effect on the next run:
+prompt is told to keep the two shots adjacent). It also remembers which piece
+of each shot it was taken on, so a shot cut into several pieces keeps the right
+one. It takes effect on the next run:
 until then the badge reads `pin pending: run again (R) to apply`. After a run
 it reads `pinned (locked|reverted)`, or `pinned (...), adjusted to out X / in Y
 to fit the clips` when the points had to be clamped, or `pin not placed:
 <reason>` when the pin cannot be placed (a shot is not in the cut, another pin
 holds a clip it would have to move, moving a clip would split or reorder the
-beats, a jump-cut pin's shot appears only once in the cut, or the clips have no
-room). The badge is judged from the latest stage's history, so it reads the same
+beats, a jump-cut pin's shot appears only once in the cut, a shot has more than
+one piece that fits the pinned point equally well, or the clips have no room). The badge is judged from the latest stage's history, so it reads the same
 whichever stage you inspect, and the header counts the pins not placed. A
 junction a later pass created (its baseline is not the rough cut) is placed by
 moving one of its clips next to the other in the rough cut before the passes

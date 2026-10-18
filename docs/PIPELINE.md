@@ -181,13 +181,14 @@ tab so that later runs keep it. Pins live in `workspace/editorial.json`,
 written atomically:
 
 ```json
-{"pins": [{"out_shot": 0, "in_shot": 1, "out_time": 4.0, "in_time": 11.88, "origin": "locked", "note": ""}]}
+{"pins": [{"out_shot": 0, "in_shot": 1, "out_time": 4.0, "in_time": 11.88, "origin": "locked", "note": "", "out_origin": "0@0.000-4.500", "in_origin": "1@11.500-14.000"}]}
 ```
 
 A pin names a junction by its two **shots**, not by clip ids: passes renumber
 clips, shots do not. `out_time` and `in_time` are source seconds. `origin` is
 `locked` (keep the points the editor was looking at) or `reverted` (go back to
-the points of the first cut). A malformed entry is skipped and logged; a
+the points of the first cut). `out_origin` / `in_origin` name the two clip
+instances the pin was taken on (see below; `""` in older files). A malformed entry is skipped and logged; a
 missing or corrupt file means no pins.
 
 How a pin takes effect:
@@ -205,9 +206,8 @@ How a pin takes effect:
 - **Shots that are not adjacent.** A pin on a junction a later pass would have
   made (a pacing drop, a continuity insert, a match-cut reorder) names two
   shots that are not neighbours in the rough cut. `apply_pins` first chooses
-  the two clips by the pinned points: the clip of each shot whose source range
-  holds the pin's point, else the nearest one (the earlier on a tie), and never
-  the same clip twice (a pinned jump cut takes two pieces of one shot). If the
+  the two clips (see **How a pin finds its clips** below), never the same clip
+  twice (a pinned jump cut takes two pieces of one shot). If the
   pinned points fit those clips (the room check comes first, so a pin that
   fails it leaves the order alone), `apply_pins` moves one clip next to the
   other: first the incoming clip to just after the outgoing one, otherwise the
@@ -225,10 +225,27 @@ How a pin takes effect:
   data holds the pin plus the points actually placed) or `editor:pin_unplaced`.
   The unplaced detail is exactly one of `shot N is not in this cut`, `shot N
   has only one clip in this cut` (a pinned jump cut of a shot the cut keeps
-  once), `shot N is held by another pin`, `moving shot N would split or
+  once), `shot N is ambiguous: more than one piece fits the pinned point`,
+  `shot N is held by another pin`, `moving shot N would split or
   reorder the beats`, or `not enough room in these clips for the pinned
   points`. These show in the event stream, in `report.md`, in the TUI log, and
   in the junction inspector's badge.
+
+- **How a pin finds its clips.** A shot can appear as several pieces, and a
+  later stage's points (the Edit tab pins the inspected stage) may have moved
+  past the rough-cut range of the piece they belong to, for instance when
+  pacing extends a clip's out-point into a sibling piece's range. So a clip
+  carries an `origin`: `Pipeline.refine` stamps each rough-cut clip with
+  `clip_origin(c)` (`"<shot>@<in>-<out>"` of its rough-cut range), every pass
+  copies it forward (continuity's merge keeps the earlier piece's), and the
+  Edit tab writes the origins of the junction's two clips into the pin. Per
+  side, a pin first takes the one clip of that shot with its remembered origin;
+  without a unique match it takes the piece whose boundary is nearest (the
+  outgoing side compares `out_time` with each `source_out`, the incoming side
+  `in_time` with each `source_in`), but only if the runner-up is at least
+  0.5 s farther. Otherwise the pin is left unplaced with the ambiguity reason
+  and nothing moves: a pin is never placed on a guess. Selection uses the
+  rough-cut ranges as they were before any pin was applied.
 
 A pin holds the cut points, not the transition: a pinned junction on a beat
 boundary still gets the beat's dissolve, and only a match cut (tagged
