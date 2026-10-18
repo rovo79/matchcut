@@ -329,7 +329,7 @@ def test_a_junction_made_adjacent_by_the_editors_pin_move_names_the_move():
     moved = tl("matchcut", [clip("c001", 0, 0.0, 2.0), clip("c003", 2, 6.0, 8.0), clip("c002", 1, 3.0, 5.0)], [move])
     j = build_junctions([("roughcut", rough), ("matchcut", moved)])[0]
     assert j.adjacent_detail == "moved shot 2 next to shot 0 to hold the editor's pin"
-    assert j.why() == "made adjacent by matchcut: moved shot 2 next to shot 0 to hold the editor's pin"
+    assert j.why() == "editor: moved shot 2 next to shot 0 to hold the editor's pin"  # the move is the editor's decision about this junction
 
 
 def test_nothing_changed_is_only_said_for_one_history_line_from_the_first_stage():
@@ -442,3 +442,19 @@ def test_a_locked_pin_still_reads_locked():
 def test_a_junction_without_a_pin_has_no_origin():
     rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0)])
     assert build_junctions([("roughcut", rough)])[0].pin_origin is None
+
+
+def test_a_pin_decision_taken_after_a_move_belongs_to_the_junction_the_move_made():
+    # The pin was applied by moving c003 next to c001 before matchcut ran: the editor's decisions name rough-cut ids,
+    # and the two shots were not adjacent in the rough cut, so only the clips' lineage can attribute them.
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    move = Decision("editor", "pin_moved", ["c003", "c001"], "moved shot 2 next to shot 0 to hold the editor's pin", None, {"out_shot": 0, "in_shot": 2})
+    pinned = Decision("editor", "pinned", ["c001", "c003"], "locked by the editor: out 1.80s, in 6.20s", None,
+                      {"out_shot": 0, "in_shot": 2, "out_time": 1.8, "in_time": 6.2, "origin": "locked", "note": "", "out": 1.8, "in_": 6.2})
+    passed = tl("matchcut", [clip("c001", 0, 0.0, 1.8, locked_out=True), clip("c003", 2, 6.2, 8.0, locked_in=True), clip("c002", 1, 3.0, 5.0)], [move, pinned])
+    j = build_junctions([("roughcut", rough), ("matchcut", passed)])[0]
+    assert (j.out_shot, j.in_shot) == (0, 2)
+    assert j.pinned and j.pin_origin == "locked"
+    assert j.why().startswith("editor:")
+    other = build_junctions([("roughcut", rough), ("matchcut", passed)])[1]
+    assert not other.pinned  # the junction the moved clip left behind is not the pin's

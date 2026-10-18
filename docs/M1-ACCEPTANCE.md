@@ -4,6 +4,18 @@ M1 is accepted when an editor, on real footage with a real model backend in
 their own terminal, can inspect cuts and say why matchcut made them without
 reading a log file or a JSON document.
 
+## Status
+
+- Automated checks: pass (`tests/pipeline`, `tests/tui`), including the
+  regression scenarios in `tests/pipeline/test_regressions.py` (moved cut
+  points, pins placed by a move, preserved dissolves, pins that persist across
+  a regenerated rough cut).
+- Mock-backend rehearsal (2026-10-18, 20 s Big Buck Bunny clip, headless):
+  checklist items 4-6 behave as written; items 1-3 need a real backend.
+- **Pending a human run:** the real model backend (item 1, and item 3 on real
+  decisions) and an image-capable terminal (item 2). M1 is not accepted until
+  the verdict table below is filled in by that run.
+
 ## Set up
 - Footage: any real clip of 15-60 s with several shots (the default is the
   20 s Big Buck Bunny clip, which has only three shots; a clip with more cuts
@@ -43,10 +55,11 @@ the overlay image, and `l` / `v` / `x` lock, revert and clear a pin.
    `adjusted to out X / in Y to fit the clips` or `pin not placed: <reason>`,
    note it and whether the reason is right; the header counts the pins not
    placed (`N pin(s) not placed`) and the badge says why. A junction that a
-   later pass created (its history starts after the rough cut) is placed by moving
-   one clip next to the other (the junction's why line then reads `made
-   adjacent by <pass>: moved shot N next to shot M to hold the editor's pin`), unless that would split or reorder the beats or
-   another pin holds a clip; `l` says so in its notification.
+   later pass created (its history starts after the rough cut) is placed by
+   the next run: it moves one shot next to the other, unless that would split
+   or reorder the beats or another pin holds a clip, and the badge says which
+   (`pinned (...)` once placed, `pin not placed: <reason>` otherwise); the
+   junction's why line then reads `editor: ...`.
 5. Regenerate the rough cut: run again, choose redo with a note at the rough
    cut checkpoint. After the passes, both pins still hold, or the header
    says which could not be placed and why.

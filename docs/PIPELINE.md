@@ -210,8 +210,9 @@ How a pin takes effect:
   splits or reorders the beats and never moves a clip, or the end of an anchor
   clip, that another pin already holds. The move is recorded as
   `editor:pin_moved` (detail `moved shot 3 next to shot 0 to hold the editor's
-  pin`) before the pin's `editor:pinned` decision, and the junction inspector
-  explains the junction as made adjacent by it.
+  pin`) before the pin's `editor:pinned` decision; both name rough-cut clip
+  ids, and the junction inspector attributes them to the junction by the clips'
+  lineage, so its why line is the editor's.
 - **Decisions.** Each pin leaves a decision with pass name `editor`:
   `editor:pinned` (detail `locked by the editor: out 4.00s, in 11.88s`; the
   data holds the pin plus the points actually placed) or `editor:pin_unplaced`.

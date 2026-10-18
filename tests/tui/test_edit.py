@@ -275,6 +275,29 @@ def test_an_applied_pin_reads_pinned_when_the_roughcut_stage_is_inspected(mock_w
     run_async(body())
 
 
+def test_a_reverted_pin_reads_reverted_everywhere_after_a_run(mock_workspace, tmp_path):
+    ws = own_copy(mock_workspace, tmp_path)
+    j0 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j0.out_shot, j0.in_shot)
+    refine_in(ws, pin=Pin(j0.out_shot, j0.in_shot, round(j0.baseline.out_time, 3), round(j0.baseline.in_time, 3), origin="reverted"))
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            await pilot.press("enter")  # the expanded history
+            await wait_for(pilot, lambda: view.expanded and "history:\n" in str(app.query_one("#junction-panel").content))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "reverted by the editor" in panel and "pinned (reverted)" in panel
+            assert "editor (before matchcut): reverted" in panel
+            assert "locked by the editor" not in panel and "-0.00" not in panel
+
+    run_async(body())
+
+
 def test_the_apply_hint_follows_where_the_run_is(mock_workspace):
     async def body():
         app = app_for(mock_workspace)

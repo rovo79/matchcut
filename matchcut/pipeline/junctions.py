@@ -324,6 +324,12 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
             cur_ids = (timeline.clips[at[k]].id, timeline.clips[at[k] + 1].id) if at[k] is not None else None
             prev_idx = at[k - 1] if k else None
             prev_ids = (prev.clips[prev_idx].id, prev.clips[prev_idx + 1].id) if prev is not None and prev_idx is not None else None
+            if prev is not None and prev_ids is None:
+                # Not adjacent before this stage (a pin's move joined them): the stage's decisions still name the previous
+                # stage's clips, so read them against the clips the two descend from.
+                pa, pb = _best_clip(prev, a), _best_clip(prev, b)
+                if pa is not None and pb is not None and pa != pb:
+                    prev_ids = (prev.clips[pa].id, prev.clips[pb].id)
             prev_all = {c.id for c in prev.clips} if prev is not None else None
             for d, clip_level in _attribute(new, prev_ids, cur_ids, prev_all, {c.id for c in timeline.clips}):
                 j.decisions.append(d)
