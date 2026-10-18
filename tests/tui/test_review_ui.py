@@ -1,6 +1,7 @@
 """Review keys in the Edit workbench: p / a / s, the status line, non-blocking preparation, and the controller's lifetime."""
 from __future__ import annotations
 
+import asyncio
 import shutil
 import threading
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.review import controller as controller_mod, items as items_mod
+from matchcut.review.controller import ReviewController as RealController
 from matchcut.review.items import ReviewItem, ReviewPair
 from matchcut.review.mpv import MpvSession
 from matchcut.review.window import ReviewError
@@ -130,13 +132,183 @@ def test_a_plays_the_comparison_then_toggles_on_the_same_junction(mock_workspace
     run_async(body())
 
 
-def test_s_stops(mock_workspace, fakes):
+def test_s_pauses_what_was_played(mock_workspace, fakes):
     async def body():
         app = app_for(mock_workspace)
         async with app.run_test(size=(120, 40)) as pilot:
             await edit_ready(pilot, app)
+            await pilot.press("p")
+            await wait_for(pilot, lambda: status_of(app).startswith("playing"))
             await pilot.press("s")
-            await wait_for(pilot, lambda: fakes.controller().calls == ["stop"] and status_of(app) == "paused")
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair", "stop"] and status_of(app) == "paused")
+
+    run_async(body())
+
+
+def test_s_with_nothing_playing_leaves_the_idle_line(mock_workspace, fakes):
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            idle = status_of(app)
+            assert idle.startswith("p play")
+            await pilot.press("s")
+            await pilot.pause(0.3)
+            assert notified(app, "nothing is playing") and status_of(app) == idle
+            assert FakeController.instances == []  # nothing was started to stop
+
+    run_async(body())
+
+
+def test_s_pauses_the_played_junction_not_the_selected_one(mock_workspace, fakes):
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            await pilot.press("p")
+            await wait_for(pilot, lambda: status_of(app).startswith("playing"))
+            await pilot.press("right")
+            idle = status_of(app)
+            assert idle.startswith("p play")
+            await pilot.press("s")
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair", "stop"])
+            await pilot.pause(0.3)
+            assert status_of(app) == idle  # the selected junction's line is left alone
+            await pilot.press("left")
+            assert status_of(app) == "paused"
+
+    run_async(body())
+
+
+def test_a_stop_that_leaves_no_status_does_not_blank_the_line(mock_workspace, fakes, monkeypatch):
+    def quiet_stop(self):
+        self.calls.append("stop")
+        self.status = ""  # what the real controller reports when nothing was started
+
+    monkeypatch.setattr(FakeController, "stop", quiet_stop)
+
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            await pilot.press("p")
+            await wait_for(pilot, lambda: status_of(app).startswith("playing"))
+            await pilot.press("s")
+            await wait_for(pilot, lambda: "stop" in fakes.controller().calls)
+            await pilot.pause(0.3)
+            assert status_of(app).startswith("playing")
+
+    run_async(body())
+
+
+def test_a_after_p_on_the_same_junction_prepares_the_comparison(mock_workspace, fakes):
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            await pilot.press("p")
+            await wait_for(pilot, lambda: len(fakes.prepared) == 1 and status_of(app).startswith("playing"))
+            await pilot.press("a")
+            await wait_for(pilot, lambda: len(fakes.prepared) == 2)
+            assert fakes.prepared[1]["ab"] is True
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair", "play_pair"])
+
+    run_async(body())
+
+
+def test_a_toggle_that_finds_nothing_to_toggle_prepares_once(mock_workspace, fakes, monkeypatch):
+    monkeypatch.setattr(FakeController, "toggle", lambda self: (self.calls.append("toggle"), False)[1])
+
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await edit_ready(pilot, app)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair"])
+            await pilot.press("a")
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair", "toggle", "play_pair"])
+            assert len(fakes.prepared) == 2 and fakes.prepared[1]["ab"] is True
+
+    run_async(body())
+
+
+def test_a_toggle_that_finds_the_junction_busy_notifies_and_does_not_fail(mock_workspace, fakes, monkeypatch):
+    monkeypatch.setattr(FakeController, "toggle", lambda self: (self.calls.append("toggle"), False)[1])
+
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: fakes.controller().calls == ["play_pair"])
+            await wait_for(pilot, lambda: view._ab_key is not None)
+            key = view._review_key()
+            assert view._claim(key)  # another request for this junction is in flight
+            before = status_of(app)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: notified(app, "already preparing this junction"))
+            assert status_of(app) == before and not notified(app, "review failed")
+            assert len(fakes.prepared) == 1
+            view._release(key)
+
+    run_async(body())
+
+
+def test_a_change_to_the_workspace_forgets_the_prepared_pair(mock_workspace, tmp_path, fakes):
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: view._ab_key is not None)
+            await pilot.press("l")  # pinning rewrites editorial.json
+            await wait_for(pilot, lambda: view._ab_key is None)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: len(fakes.prepared) == 2)
+            assert "toggle" not in fakes.controller().calls
+
+    run_async(body())
+
+
+class FakeSession:
+    def __init__(self, sessions):
+        self.open = True
+        sessions.append(self)
+
+    def start(self):
+        pass
+
+    def alive(self):
+        return self.open
+
+    def close(self):
+        self.open = False
+
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
+def test_a_job_that_finishes_after_the_app_closed_leaves_no_session(mock_workspace, fakes, monkeypatch):
+    sessions = []
+
+    async def body():
+        app = app_for(mock_workspace)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            real = RealController(view._state.config, session_factory=lambda *a, **k: FakeSession(sessions))
+            original = items_mod.prepare_review
+
+            def closes_midway(*a, **k):  # the app exits while the job is preparing
+                app.review_closing = True
+                return original(*a, **k)
+
+            monkeypatch.setattr(items_mod, "prepare_review", closes_midway)
+            job = (real, view._review_key(), view._state.workspace, view._state.config, view.current_stage(), view.current_junction().index, False, False)
+            await asyncio.to_thread(view._review_job, *job)
+            assert len(sessions) == 1 and not sessions[0].open
+            assert real.current is None  # it never started playing
 
     run_async(body())
 

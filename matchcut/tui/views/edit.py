@@ -25,6 +25,10 @@ from ..widgets.timeline import TimelineTrack
 FRAME_IDS = ("out-frame", "in-frame", "blend-frame")
 
 
+class _Busy(Exception):
+    """A request for a junction that is already being prepared."""
+
+
 class EditView(Vertical):
     can_focus = True  # junction, stage and pin keys only apply while focus sits here
     BINDINGS = [
@@ -59,6 +63,7 @@ class EditView(Vertical):
         self._preparing: set = set()  # keys being prepared; touched by the UI thread and the review workers
         self._preparing_lock = threading.Lock()
         self._ab_key: Optional[tuple] = None  # the junction an A/B pair was last handed to the controller for
+        self._playing_key: Optional[tuple] = None  # the junction the controller last played (what `s` pauses)
 
     def compose(self) -> ComposeResult:
         yield Static("", id="edit-header")
@@ -96,6 +101,7 @@ class EditView(Vertical):
             with self._preparing_lock:
                 busy = set(self._preparing)
             self._review_status = {k: v for k, v in self._review_status.items() if k in busy}
+            self._ab_key = None  # a re-run or a pin may have changed the pair: prepare again before toggling
         if fingerprint == self._fingerprint:
             return
         self._fingerprint = fingerprint
@@ -332,7 +338,10 @@ class EditView(Vertical):
         line.update(Text(text, style=style))
 
     def _set_review_status(self, key: tuple, text: str, style: str = "") -> None:
-        self._review_status[key] = (text, style)
+        if text:
+            self._review_status[key] = (text, style)
+        else:
+            self._review_status.pop(key, None)  # no status: the idle line shows
         if key == self._review_key():
             self._show_review_status()
 
@@ -371,16 +380,19 @@ class EditView(Vertical):
 
     def _review_job(self, ctl, key: tuple, ws: Path, cfg, stage: str, index: int, ab: bool, toggle: bool) -> None:
         """Runs in a worker thread: nothing here touches a widget; the outcome goes back through ``_review_done``."""
-        text, style, note, ab_pair = "", "", "", False
+        text, style, note, ab_pair, played = "", "", "", False, False
         claimed = not toggle
         try:
+            if getattr(self.app, "review_closing", False):
+                return
             if toggle and ctl.toggle():
-                text = ctl.status
+                text, played = ctl.status, True
             else:
                 if toggle:  # nothing to toggle any more (the mpv window was closed): prepare again
                     if not self._claim(key):
-                        raise items.ReviewError("already preparing this junction")
+                        raise _Busy()
                     claimed = True
+                    self._ui(self._set_review_status, key, "preparing the junction for review...", "dim")
                 mpv = ctl.has_mpv()
                 pair = items.prepare_review(ws, cfg, stage=stage, index=index, ab=ab, force_render=not mpv)
                 if getattr(self.app, "review_closing", False):
@@ -390,22 +402,39 @@ class EditView(Vertical):
                 else:
                     ctl.play_pair(pair)
                     ab_pair = ab and pair.a is not None
+                played = True
                 text, note = ctl.status, pair.note
                 if note:
                     text += " · " + note
+        except _Busy:
+            text, style = "already preparing this junction", "busy"
         except Exception as exc:
             text, style = f"review failed: {exc}", "red"
         finally:
             if claimed:
                 self._release(key)
+            if getattr(self.app, "review_closing", False):
+                try:
+                    ctl.close()  # the app closed while this job was in flight: it must not leave an mpv behind
+                except Exception:
+                    pass
+        if text:
+            self._ui(self._review_done, key, text, style, note, ab_pair, played)
+
+    def _ui(self, fn, *args) -> None:
         try:
-            self.app.call_from_thread(self._review_done, key, text, style, note, ab_pair)
+            self.app.call_from_thread(fn, *args)
         except Exception:
             pass  # the app has closed
 
-    def _review_done(self, key: tuple, text: str, style: str, note: str, ab_pair: bool) -> None:
+    def _review_done(self, key: tuple, text: str, style: str, note: str, ab_pair: bool, played: bool = False) -> None:
+        if style == "busy":
+            self.app.notify(text, severity="warning")
+            return
         if ab_pair:
             self._ab_key = key
+        if played:
+            self._playing_key = key
         self._set_review_status(key, text, style)
         if style == "red":
             self.app.notify(text, severity="error")
@@ -421,7 +450,10 @@ class EditView(Vertical):
     def action_stop_play(self) -> None:
         if self._state is None or not hasattr(self.app, "review_controller"):
             return
-        key = self._review_key()
+        key = self._playing_key  # pause what was played, whichever junction is selected now
+        if key is None:
+            self.app.notify("nothing is playing")
+            return
         ctl = self.app.review_controller()
 
         def job() -> None:
@@ -431,10 +463,7 @@ class EditView(Vertical):
                 text = ctl.status
             except Exception as exc:
                 text, style = f"review failed: {exc}", "red"
-            try:
-                if key is not None:
-                    self.app.call_from_thread(self._review_done, key, text, style, "", False)
-            except Exception:
-                pass
+            if text:
+                self._ui(self._review_done, key, text, style, "", False, False)
 
         self.run_worker(job, thread=True, group="review", exit_on_error=False)
