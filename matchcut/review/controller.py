@@ -1,0 +1,183 @@
+"""The review controller: play a junction item looping in mpv, toggle A/B at the same offset from the cut.
+
+Without mpv a rendered item is handed to the system opener instead (no A/B toggle). The controller never
+renders: callers prepare rendered items (``prepare_review(..., force_render=True)``) when ``has_mpv()`` is False.
+"""
+from __future__ import annotations
+
+import shutil
+import subprocess
+import sys
+import threading
+from pathlib import Path
+from typing import Any, Callable, Optional, Tuple
+
+from ..pipeline.config import PipelineConfig
+from .items import ReviewItem, ReviewPair
+from .mpv import MpvError, MpvSession
+from .window import ReviewError
+
+_SEEK_MARGIN = 0.05
+_LABEL_MS = 2000
+
+
+def open_with_system(path: Path) -> Tuple[bool, str]:
+    """Open ``path`` with the platform's default player, detached. Returns (opened, message)."""
+    path = Path(path)
+    missing = f"no player found: the file is {path}"
+    try:
+        if sys.platform == "win32":
+            import os
+
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        else:
+            tool = "open" if sys.platform == "darwin" else "xdg-open"
+            if shutil.which(tool) is None:
+                return False, missing
+            subprocess.Popen(
+                [tool, str(path)], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+            )
+    except OSError:
+        return False, missing
+    return True, f"opened {path.name} in the system player"
+
+
+class ReviewController:
+    def __init__(
+        self,
+        cfg: PipelineConfig,
+        session_factory: Callable[[str], Any] = MpvSession,
+        opener: Callable[[Path], Tuple[bool, str]] = open_with_system,
+    ):
+        self.cfg = cfg
+        self._factory = session_factory
+        self._opener = opener
+        self._lock = threading.Lock()
+        self._session: Any = None
+        self._failed = False
+        self.status: str = ""
+        self.current: Optional[ReviewItem] = None
+        self.pair: Optional[ReviewPair] = None  # the pair last given to play_pair; None after play() of a single item
+
+    # -- mpv ----------------------------------------------------------------------------------------
+
+    def has_mpv(self) -> bool:
+        """True when an mpv session is running (started on first use); False when mpv is missing or fails to start."""
+        with self._lock:
+            return self._ensure() is not None
+
+    def _ensure(self) -> Any:
+        s = self._session
+        if s is not None and s.alive():
+            return s
+        if s is not None:  # the editor closed the mpv window: start a new one on next use
+            self._drop()
+        if self._failed:
+            return None
+        try:
+            s = self._factory(self.cfg.review.mpv)
+            s.start()
+        except Exception:
+            self._failed = True
+            try:
+                s.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
+            return None
+        self._session = s
+        return s
+
+    def _drop(self) -> None:
+        s, self._session = self._session, None
+        if s is not None:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    # -- playback -----------------------------------------------------------------------------------
+
+    def play(self, item: ReviewItem, from_cut: Optional[float] = None) -> None:
+        with self._lock:
+            self._play(item, from_cut)
+            self.pair = None
+
+    def play_pair(self, pair: ReviewPair) -> None:
+        with self._lock:
+            self._play(pair.a if pair.a is not None else pair.b, None)
+            self.pair = pair
+
+    def _play(self, item: ReviewItem, from_cut: Optional[float]) -> None:
+        s = self._ensure()
+        if s is None:
+            self._open(item)
+            return
+        try:
+            self._play_in(s, item, from_cut)
+        except MpvError as e:
+            if s.alive():
+                raise ReviewError(str(e)) from e
+            self._drop()  # mpv died under us: one retry with a fresh process
+            s = self._ensure()
+            if s is None:
+                self._open(item)
+                return
+            try:
+                self._play_in(s, item, from_cut)
+            except MpvError as e2:
+                raise ReviewError(str(e2)) from e2
+
+    def _play_in(self, s: Any, item: ReviewItem, from_cut: Optional[float]) -> None:
+        s.load(str(item.path))
+        s.set("loop-file", "inf")
+        target = item.cut + from_cut if from_cut is not None else 0
+        if from_cut is not None:
+            target = min(max(target, 0), max(item.duration - _SEEK_MARGIN, 0))
+        clear = getattr(s, "clear_events", None)
+        if clear is not None:
+            clear()
+        s.command("seek", target, "absolute+exact")
+        wait = getattr(s, "wait_restart", None)
+        if wait is not None:
+            wait(1.0)  # so time-pos already reads the new position
+        s.set("pause", False)
+        s.command("show-text", item.label.replace("$", "$$"), _LABEL_MS)
+        how = "exact source" if item.kind == "edl" else "rendered"
+        self.current = item
+        self.status = f"playing {item.label} ({how}{', cached' if item.cached else ''})"
+
+    def _open(self, item: ReviewItem) -> None:
+        if item.kind == "edl":
+            raise ReviewError("cannot play an EDL window without mpv: prepare it with force_render")
+        ok, message = self._opener(item.path)
+        self.current = item
+        self.status = f"mpv not found: {message}" + (" (no A/B toggle)" if ok else "")
+
+    def toggle(self) -> bool:
+        """Switch between A and B at the same offset from the cut; False (status unchanged) when there is nothing to toggle."""
+        with self._lock:
+            pair, cur, s = self.pair, self.current, self._session
+            if pair is None or pair.a is None or cur is None or s is None or not s.alive():
+                return False
+            other = pair.b if cur is pair.a else pair.a
+            try:
+                offset = float(s.get("time-pos")) - cur.cut
+            except (MpvError, TypeError, ValueError):
+                offset = 0.0
+            self._play(other, offset)
+            return True
+
+    def stop(self) -> None:
+        with self._lock:
+            s = self._session
+            if s is None or not s.alive():
+                return
+            try:
+                s.set("pause", True)
+            except MpvError as e:
+                raise ReviewError(str(e)) from e
+            self.status = "paused"
+
+    def close(self) -> None:
+        with self._lock:
+            self._drop()
