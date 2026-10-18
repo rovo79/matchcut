@@ -1,8 +1,9 @@
 """Edit workbench: pick a junction on the track and see why the cut is there."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -14,6 +15,7 @@ from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace
 from matchcut.pipeline.sampling import FrameCache
 from matchcut.pipeline.timeline import clip_origin
+from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
 from ..widgets.frame import Frame
@@ -34,6 +36,9 @@ class EditView(Vertical):
         Binding("v", "revert", "Revert"),
         Binding("x", "clear_pin", "Clear pin"),
         Binding("enter", "toggle_history", "History"),
+        Binding("p", "play", "Play"),
+        Binding("a", "ab", "A/B"),
+        Binding("s", "stop_play", "Stop"),
     ]
 
     def __init__(self, **kwargs) -> None:
@@ -49,6 +54,11 @@ class EditView(Vertical):
         self._frames_key: Optional[tuple] = None  # (stage, clips, cut points, media) the three frames were rendered for
         self._blend_image = None
         self._keep_pair: Optional[Tuple[int, int]] = None  # the shot pair to stay on when the junctions are rebuilt for another stage
+        self._review_fp: Optional[tuple] = None  # the workspace data the review statuses belong to
+        self._review_status: Dict[tuple, Tuple[str, str]] = {}  # (stage, out_shot, in_shot) -> (text, style)
+        self._preparing: set = set()  # keys being prepared; touched by the UI thread and the review workers
+        self._preparing_lock = threading.Lock()
+        self._ab_key: Optional[tuple] = None  # the junction an A/B pair was last handed to the controller for
 
     def compose(self) -> ComposeResult:
         yield Static("", id="edit-header")
@@ -58,6 +68,7 @@ class EditView(Vertical):
             yield Frame(id="out-frame", caption="outgoing", classes="junction-frame")
             yield Frame(id="in-frame", caption="incoming", classes="junction-frame")
             yield Frame(id="blend-frame", caption="overlay", classes="junction-frame")
+        yield Static("", id="review-status")
         with VerticalScroll(id="junction-scroll"):
             yield Static("", id="junction-panel")
 
@@ -80,6 +91,11 @@ class EditView(Vertical):
     def refresh_from_state(self, state: RunState) -> None:
         self._state = state
         fingerprint = self._data_fingerprint(state)
+        if fingerprint != self._review_fp:
+            self._review_fp = fingerprint  # the cut changed under the old results: only the requests in flight stay
+            with self._preparing_lock:
+                busy = set(self._preparing)
+            self._review_status = {k: v for k, v in self._review_status.items() if k in busy}
         if fingerprint == self._fingerprint:
             return
         self._fingerprint = fingerprint
@@ -135,6 +151,7 @@ class EditView(Vertical):
             return
         panel = self.query_one("#junction-panel", Static)
         j, stage = self.current_junction(), self.current_stage()
+        self._show_review_status()
         if j is None or stage is None:
             panel.update("(no junctions: the cut needs at least two clips)" if stage else "")
             for f in self._frames():
@@ -296,3 +313,128 @@ class EditView(Vertical):
             self.app.notify("this junction has no pin", severity="warning")
         self._fingerprint = None
         self.refresh_from_state(self._state)
+
+    # -- review in mpv -----------------------------------------------------------------
+    def _review_key(self) -> Optional[tuple]:
+        j, stage = self.current_junction(), self.current_stage()
+        return (stage, j.out_shot, j.in_shot) if j is not None and stage is not None else None
+
+    def _show_review_status(self) -> None:
+        j, stage = self.current_junction(), self.current_stage()
+        line = self.query_one("#review-status", Static)
+        if j is None or stage is None:
+            line.update("")
+            return
+        text, style = self._review_status.get((stage, j.out_shot, j.in_shot)) or (None, "")
+        if text is None:
+            base = j.baseline.stage
+            text, style = ("p play" if base == stage else f"p play · a compare with {base}"), "dim"
+        line.update(Text(text, style=style))
+
+    def _set_review_status(self, key: tuple, text: str, style: str = "") -> None:
+        self._review_status[key] = (text, style)
+        if key == self._review_key():
+            self._show_review_status()
+
+    def _claim(self, key: tuple) -> bool:
+        with self._preparing_lock:
+            if key in self._preparing:
+                return False
+            self._preparing.add(key)
+            return True
+
+    def _release(self, key: tuple) -> None:
+        with self._preparing_lock:
+            self._preparing.discard(key)
+
+    def _review_request(self, ab: bool) -> None:
+        key, j, stage = self._review_key(), self.current_junction(), self.current_stage()
+        if key is None or j is None or stage is None or self._state is None:
+            self.app.notify("no junction selected", severity="warning")
+            return
+        if not hasattr(self.app, "review_controller"):
+            return
+        ctl = self.app.review_controller()
+        pair = getattr(ctl, "pair", None)
+        # A/B toggles only a pair prepared for this very junction; anything else is prepared first.
+        toggle = ab and self._ab_key == key and pair is not None and pair.a is not None and pair.b is not None
+        if not toggle and not self._claim(key):
+            self.app.notify("already preparing this junction", severity="warning")
+            return
+        if not toggle:
+            self._set_review_status(key, "preparing the junction for review...", "dim")
+        ws, cfg, index = self._state.workspace, self._state.config, j.index
+        self.run_worker(
+            lambda: self._review_job(ctl, key, ws, cfg, stage, index, ab, toggle),
+            thread=True, group="review", exit_on_error=False,
+        )
+
+    def _review_job(self, ctl, key: tuple, ws: Path, cfg, stage: str, index: int, ab: bool, toggle: bool) -> None:
+        """Runs in a worker thread: nothing here touches a widget; the outcome goes back through ``_review_done``."""
+        text, style, note, ab_pair = "", "", "", False
+        claimed = not toggle
+        try:
+            if toggle and ctl.toggle():
+                text = ctl.status
+            else:
+                if toggle:  # nothing to toggle any more (the mpv window was closed): prepare again
+                    if not self._claim(key):
+                        raise items.ReviewError("already preparing this junction")
+                    claimed = True
+                mpv = ctl.has_mpv()
+                pair = items.prepare_review(ws, cfg, stage=stage, index=index, ab=ab, force_render=not mpv)
+                if getattr(self.app, "review_closing", False):
+                    return
+                if ab and not mpv and pair.a is not None:
+                    ctl.open_file(items.ab_file(pair, ws, cfg))
+                else:
+                    ctl.play_pair(pair)
+                    ab_pair = ab and pair.a is not None
+                text, note = ctl.status, pair.note
+                if note:
+                    text += " · " + note
+        except Exception as exc:
+            text, style = f"review failed: {exc}", "red"
+        finally:
+            if claimed:
+                self._release(key)
+        try:
+            self.app.call_from_thread(self._review_done, key, text, style, note, ab_pair)
+        except Exception:
+            pass  # the app has closed
+
+    def _review_done(self, key: tuple, text: str, style: str, note: str, ab_pair: bool) -> None:
+        if ab_pair:
+            self._ab_key = key
+        self._set_review_status(key, text, style)
+        if style == "red":
+            self.app.notify(text, severity="error")
+        elif note:
+            self.app.notify(note)
+
+    def action_play(self) -> None:
+        self._review_request(False)
+
+    def action_ab(self) -> None:
+        self._review_request(True)
+
+    def action_stop_play(self) -> None:
+        if self._state is None or not hasattr(self.app, "review_controller"):
+            return
+        key = self._review_key()
+        ctl = self.app.review_controller()
+
+        def job() -> None:
+            text, style = "", ""
+            try:
+                ctl.stop()
+                text = ctl.status
+            except Exception as exc:
+                text, style = f"review failed: {exc}", "red"
+            try:
+                if key is not None:
+                    self.app.call_from_thread(self._review_done, key, text, style, "", False)
+            except Exception:
+                pass
+
+        self.run_worker(job, thread=True, group="review", exit_on_error=False)

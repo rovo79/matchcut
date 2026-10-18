@@ -12,6 +12,7 @@ from textual.widgets import Footer, Static, TabbedContent, TabPane
 
 from matchcut.pipeline import events
 from matchcut.pipeline.config import PipelineConfig
+from matchcut.review import controller
 from . import images
 from .bridge import PipelineBridge
 from .state import RunState
@@ -29,6 +30,7 @@ HELP_TEXT = """Control room keys
  c/r/a continue / redo with note / abort a checkpoint (Run view)
  f     cycle the log filter (Run view)           o  open the current image or render externally
  u     toggle a shot's usable flag (Shots)       ←/→ junction · [ ] stage · l lock · v revert · x clear pin · Enter history (Edit)
+ p/a/s play the junction / A/B against the baseline / stop, in mpv (Edit)
  Enter edit a config value (Config)              ?  this help      Esc  close      q  quit
 
 Press Escape to close."""
@@ -80,6 +82,25 @@ class MatchcutApp(App):
         self._quit_armed = False
         self._quit_timer = None
         self._image_notice_shown = False
+        self._review: Optional[controller.ReviewController] = None
+        self.review_closing = False  # set at exit so a review job still preparing does not start a new mpv
+
+    def review_controller(self) -> "controller.ReviewController":
+        """The app's review controller, created on first use (mpv itself starts on the controller's first play)."""
+        if self._review is None:
+            self._review = controller.ReviewController(self.state.config)
+        return self._review
+
+    def on_unmount(self) -> None:
+        # Closing waits for the controller's lock, held at most while mpv loads a file (~10 s): acceptable at exit, when
+        # nothing else needs the UI, and it never leaves an mpv process behind.
+        self.review_closing = True
+        review, self._review = self._review, None
+        if review is not None:
+            try:
+                review.close()
+            except Exception:
+                pass
 
     # -- layout --------------------------------------------------------------
     def compose(self) -> ComposeResult:
