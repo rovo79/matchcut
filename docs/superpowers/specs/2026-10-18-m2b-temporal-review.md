@@ -104,7 +104,8 @@ from mpv's OSD; the A/B concat for players without IPC keeps burned-in labels).
 speaks the documented JSON IPC: one JSON object per line, integer `request_id`, replies
 matched by id, events skipped; every request has a timeout (default 2 s; loading a file
 waits up to 10 s for `file-loaded`). The socket lives in a private temporary directory;
-on Windows a named pipe `\\.\pipe\matchcut-<pid>` (implemented, not tested here).
+on Windows mpv control is not implemented: `start()` raises `MpvError` and the controller
+falls back to the system opener (a named pipe would be the way to add it).
 
 `ReviewController`:
 

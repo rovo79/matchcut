@@ -311,6 +311,58 @@ decisions:
   transitions:dissolve  beat b1 -> b2: dissolve 0.75s
 ```
 
+## Reviewing a junction in motion
+
+`matchcut.review` prepares and plays the window around one junction, so a cut
+can be watched rather than inferred from stills. The Edit tab drives it with `p`,
+`a` and `s` ([TUI.md](TUI.md#watching-a-junction-mpv)); from a terminal:
+
+```shell
+python -m matchcut.review WORKSPACE --index 1 --ab           # prepare A (first cut) and B (final)
+python -m matchcut.review WORKSPACE --index 1 --ab --play    # play in mpv; Enter flips A/B, s pauses, q quits
+python -m matchcut.review WORKSPACE --index 2 --stage polish --render   # always render the window
+```
+
+`--index` is the junction number from `junctions` (1-based), `--stage` defaults
+to the last stage, `--ab` adds the same junction at its baseline stage, `--play`
+plays it (mpv, or the system player without mpv) and `--render` renders the
+window instead of playing hard cuts from an EDL. Sample output on the 20 s Big
+Buck Bunny clip (a mock run):
+
+```text
+$ python -m matchcut.review ws_bbb --index 1 --ab
+A edl ws_bbb/review/roughcut_s0-s1_08e09c8369a9bb2d.edl cut=2.00 duration=4.00 cut
+B render ws_bbb/review/final_s0-s1_0c92e9e04eb8aa1c.mp4 cut=2.00 duration=4.75 dissolve 0.75s
+```
+
+Each line is the item (`A` the baseline stage, `B` the inspected one), its kind
+(`edl`: hard cuts played straight from the source; `render`: an ffmpeg render),
+its file under `workspace/review/`, `cut=` the seconds from the start of the
+window to the incoming clip, the window's duration and the transition, with
+`cached` appended when the file already existed. A window is rendered when it
+holds a transition, overlaps the timeline's fade-in or fade-out, or music is
+configured; the render is the clips around the junction, as a short timeline through
+the normal renderer, trimmed to the window. Errors are one line on
+stderr and exit code 1 (`no stage X in WS`, `junction 3 is out of range 1..2`,
+`source footage not found: ...`, `ffmpeg not found on PATH`).
+
+The `review` section of the workspace's `config.json` (the command reads it from
+there; a pipeline command's `--set review.pre_seconds=3` writes it):
+
+| key | default | meaning |
+|---|---|---|
+| `pre_seconds` | 2.0 | shown before the cut |
+| `post_seconds` | 2.0 | shown after the transition |
+| `width` | 640 | width of rendered windows |
+| `crf` | 23 | quality of rendered windows |
+| `mpv` | `mpv` | the mpv binary |
+| `always_render` | false | render every window instead of playing hard cuts from an EDL |
+
+mpv is driven over its JSON IPC socket (Unix only; on Windows the system opener
+is used). `matchcut.review` reads the stage timelines and never writes them, and
+the pipeline does not import it. [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md) lists what
+is verified headless and what still needs a human at a desktop.
+
 ## Working iteratively
 
 Every stage is cached in the workspace, so you can change something and re-run

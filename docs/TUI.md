@@ -43,8 +43,8 @@ the badges (match type, beat boundary, locked, pin state), a score table (rough
 cut against the inspected stage; one column when the inspected stage is the
 baseline), the cut points with deltas in seconds and frames, the why line and
 the history. `Enter` expands the full history and every decision. The footer
-shows the keys that apply: `l Lock`, `v Revert`, `x Clear pin`, `⏎ History`;
-`o` opens the blend image in the system viewer.
+shows the keys that apply: `l Lock`, `v Revert`, `x Clear pin`, `⏎ History`,
+`p Play`, `a A/B`, `s Stop`; `o` opens the blend image in the system viewer.
 
 ![Junction 1 of the Big Buck Bunny clip: a beat boundary with a 0.75 s dissolve](screenshots/edit-junction-1.svg)
 
@@ -58,6 +58,53 @@ Screenshots are captured headless from a workspace with
 `python3 tools/capture_edit.py WORKSPACE OUTDIR --junctions N`; see
 [screenshots/README.md](screenshots/README.md) for how these were made and the
 footage credit.
+
+### Watching a junction (mpv)
+
+Stills and scores cannot show whether a cut lands on an action or a dissolve is
+too long, so the Edit tab can play the moving sequence around the selected
+junction in [mpv](https://mpv.io):
+
+| Key | Does |
+|---|---|
+| `p` | Play the inspected stage's window around the junction (2 s before the cut to 2 s after the transition by default), looping. |
+| `a` | A/B. The first press prepares and plays **A**, the same junction at its baseline stage (the first stage where its two clips are adjacent, usually the rough cut). Later presses on the same junction toggle A and B at the same offset from the cut. When the junction first appears at the inspected stage there is nothing earlier to compare and the status line says so. |
+| `s` | Stop: pause what was played. |
+
+One line under the frames, `#review-status`, shows what is happening:
+`p play · a compare with roughcut` when idle, then `preparing the junction for
+review...`, `playing B  final  shot 0 -> shot 1  dissolve 0.75s (rendered,
+cached)` or `playing A  roughcut  shot 0 -> shot 1  cut (exact source)`,
+`paused`, or `review failed: <message>`. Preparation and every mpv command run
+in a thread worker, so `←`/`→` and `[`/`]` keep working; a second request for
+the junction being prepared is ignored (`already preparing this junction`). A
+result for a junction you have since left still plays, because you asked for
+it, but does not overwrite the selected junction's status line.
+
+![The Edit tab after p on junction 1: the status line under the frames and the Play, A/B and Stop keys in the footer](screenshots/m2b-edit-review.svg)
+
+*The Edit tab after `p`: the controller is the real one, its mpv session a stub
+(a headless capture), so nothing was played.*
+
+How a window is played: a window of hard cuts plays straight from the source
+through an mpv EDL (exact source ranges, nothing rendered, instant). A window
+with a transition, a fade or music, or any window when `review.always_render`
+is set, is rendered by a short ffmpeg run (640 px wide by default) so that the
+transition, fades and music are exactly what ffmpeg makes; loudness
+normalisation and ducking run on the excerpt. Files go to `workspace/review/`
+(`<stage>_s<out>-s<in>_<key>.edl` or `.mp4`); the key is a hash of what the
+window depends on, so a repeat is instant and an edit to the cut or the config
+makes a new file. They are never deleted automatically.
+
+mpv must be on `PATH` (or named in `review.mpv`); it is started on the first
+`p` or `a` and quit when the app exits. Without mpv the window is rendered and
+opened in the system player (`open` / `xdg-open`), the status line says `mpv not
+found: opened <file> in the system player (no A/B toggle)`, and `a` opens one
+file with A, half a second of black and silence, and B, with the labels burned in.
+mpv control is not implemented on Windows (the same fallback applies there). The
+same review runs outside the TUI with `python -m matchcut.review`
+([PIPELINE.md](PIPELINE.md#reviewing-a-junction-in-motion)), and
+[M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md) is the procedure and the evidence so far.
 
 ### Pins
 

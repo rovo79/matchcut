@@ -1,0 +1,146 @@
+# M2b acceptance: can a cut be judged by watching it?
+
+M2b adds temporal review to the Edit workbench: `p` plays the window around the
+selected junction in mpv, `a` flips between the first cut and the refined cut of
+the same junction at the same moment relative to the cut, and `s` pauses. Hard
+cuts play straight from the source through an mpv EDL with no rendering; a window
+with a transition, a fade or music is rendered by a short ffmpeg run. The same
+review runs from a terminal with `python -m matchcut.review WORKSPACE --index N --ab --play`.
+
+Design: [superpowers/specs/2026-10-18-m2b-temporal-review.md](superpowers/specs/2026-10-18-m2b-temporal-review.md).
+M1's gate ([M1-ACCEPTANCE.md](M1-ACCEPTANCE.md)) is independent and still open.
+
+## Status
+
+- **Automated checks: pass** (see below).
+- **Human checklist: PENDING.** Nobody has yet watched a junction in a real mpv
+  window, heard the audio, or compared it with `final.mp4`. Everything under
+  "Demonstration" is headless evidence of what mpv displayed; none of it says
+  whether motion and timing can be judged by eye.
+- **M1's human gate is still open.**
+
+## Automated evidence
+
+Offline, deterministic, on synthetic footage; the tests that need mpv skip
+without it.
+
+| Module | What it proves |
+|---|---|
+| `tests/review/test_window.py` | The window around a junction (pre/post, clamping at 0 and at the end, a dissolve pulling the neighbouring clip in), the sub-timeline and its fades, when a window needs a render (a transition, a fade, music), the EDL text and its escaping, and that an EDL is refused for a window that needs a render. |
+| `tests/review/test_items.py` | `prepare_review`: a hard-cut junction is an EDL and runs no ffmpeg; a dissolve is rendered and blends mid-transition; audio is present only when the source has it; the file name is a content key, an identical second call is a cache hit and a changed window, config, source or kind gives a new file (a sub-frame edit gives a new EDL); A is the baseline stage's hard cut and B the refined dissolve; the A/B concat file; one-line errors that leave no media behind; the music offset. |
+| `tests/review/test_mpv.py` | The JSON IPC client against a real headless mpv: an EDL window loads with its chapters, `loop-file` wraps the window, a missing file or an unknown property raises, an idle session survives and answers after the command timeout, a late reply is dropped, `close` never hangs and removes the socket directory, a missing binary raises `MpvError`. |
+| `tests/review/test_controller.py` | The controller's command order (load, loop, seek, unpause, label), A/B toggling that keeps the offset from the cut (real mpv, headless), a toggle when the position cannot be read, a dead mpv restarted once, the status strings, the system-opener fallback without mpv (and the refusal of an EDL item there), the session surviving pause and silence with no second mpv spawned, mpv closed by the controller, and the `python -m matchcut.review` CLI. |
+| `tests/tui/test_review_ui.py` | `p`, `a` and `s` in the Edit view; the `#review-status` line and the idle hint naming the baseline stage; preparation in a thread worker that leaves the keys responsive; a second request for the same item ignored; a result for a junction no longer selected not overwriting the selected junction's status; errors shown without stopping the app; the rendered fallback without mpv; the controller closed on exit; and one test with a real headless mpv. |
+
+Measured A/B toggle accuracy (real mpv, headless, 25 fps footage): after toggling
+from A to B at 1.300 s from its start, B's `time-pos` read 1.320 s, within one frame.
+
+## Demonstration
+
+`tools/demo_review.py` drives the real `ReviewController` against a real mpv
+(0.37.0 here) started with `--vo=image`, so every frame mpv displays is written
+as an image. For each junction it prepares the A/B pair, plays A from the start
+until just after A's cut, calls `toggle()` to B at the same offset from the cut,
+plays B to the end of its window, and tiles the captured frames into one sheet:
+the top half is A, the bottom half is B, and each caption names the item, its
+kind (EDL or render), the transition, where the cut is and the offset of the
+toggle.
+
+| Image | Footage | What it shows |
+|---|---|---|
+| ![](screenshots/m2b-review-synthetic-j3.jpg) `m2b-review-synthetic-j3.jpg` | Synthetic, junction 3 (shot 3 to shot 6) | A is the rough cut's hard cut from colour bars to a gradient, played from the source by EDL; B is the final cut's 0.75 s dissolve, a rendered window: the bars blend into the gradient over three tiles. A's one green tile is a frame of the footage itself: the cut-in of shot 6 is at 14.00 s, but the source content changes one frame later (14.04 s), so frame 350 still shows the previous shot. |
+| ![](screenshots/m2b-review-synthetic-j4.jpg) `m2b-review-synthetic-j4.jpg` | Synthetic, junction 4 (shot 6 to shot 7) | A hard cut from a gradient to a fractal on **both** sides: A and B are both exact-source EDLs (nothing rendered); A plays up to 0.17 s after the cut, B continues from 0.24 s after its cut to the end of its window, so B shows only the incoming shot. |
+| ![](screenshots/m2b-review-bbb-j1.jpg) `m2b-review-bbb-j1.jpg` | Big Buck Bunny (20 s clip, mock backend) junction 1 (shot 0 to shot 1) | A is the rough cut's hard cut from the clouds to the grass; B is the final cut's 0.75 s dissolve between them, rendered; B was toggled in 0.21 s into the dissolve, so its first tiles are the rest of the blend. The first tiles of A are dim because the source itself fades in. |
+| [`m2b-edit-review.svg`](screenshots/m2b-edit-review.svg) | Big Buck Bunny, final stage, junction 1 | The Edit tab after `p`: the footer lists `p Play`, `a A/B`, `s Stop`, and the `#review-status` line reads `playing final  shot 0 -> shot 1  dissolve 0.75s (rendered, cached)`. The controller is the real one but its mpv session is a stub, so nothing was played; the line shows the controller's own status text. |
+
+Regenerate (the synthetic workspace is built from `make_demo_footage` with the
+mock backend, fades off and a 1.0 s / 1.5 s window so that the last junction
+qualifies for exact playback; the Big Buck Bunny workspace is a mock-backend run
+of the 20 s clip):
+
+    python3 tools/demo_review.py /tmp/m2b-synth /tmp/m2b-out --make-synthetic --index 3 --index 4
+    python3 tools/demo_review.py WORKSPACE /tmp/m2b-out --index 1 --svg m2b-edit-review.svg
+
+Footage credit: [screenshots/README.md](screenshots/README.md).
+
+What the headless run proves:
+
+- mpv, driven by the controller's IPC commands, displayed the frames of A and then
+  of B: the EDL item played the source's hard cut and the rendered item the
+  dissolve.
+- The toggle moved to B at the same offset from the cut: in the runs behind these
+  images A was left at +0.17 s (Big Buck Bunny) and B read +0.21 s from its cut
+  right after, one frame later.
+- mpv's `--vo=image` frames do not include the OSD label: the label is shown for
+  2 s after each load and none of the frames in that period shows text. The
+  caption bars in the sheets are drawn by the tool, not by mpv.
+- Preparation cost on this machine (Big Buck Bunny, 720p source): an EDL is a
+  text file, the 4.75 s rendered B window plus the EDL took about 4.5 s the first
+  time (including Python start-up) and about 0.45 s once cached.
+
+What it does not prove:
+
+- That anything looks right on a screen: there was no window, no scaling to a
+  display, no colour management.
+- Sound: audio was off (`--ao=null`); whether the audio of a window matches the
+  final cut is unchecked.
+- Real-time smoothness, input lag, or how `←`/`→` feel while a window prepares.
+- The editor's judgement: whether watching these windows lets someone assess
+  motion and timing is the question below.
+
+Two things about the tool itself. With mpv 0.37, `--vo=image` crashed now and
+then when a looping file restarted, so the tool never lets a file loop (A stops
+shortly after its cut, B stops at the end of its window) and retries a crashed
+run up to three times; the frames that mpv writes while B loads and seeks (the
+start of the file, before the seek) are dropped from the sheet. The tool's
+sheets show A only up to the toggle and B only after it.
+
+## Human checklist
+
+Needs a desktop with mpv installed (`mpv --version`) and a workspace made by a
+real run (`python -m matchcut.tui footage.mp4 -w ws_m2b --backend anthropic`),
+with the Edit tab open (`4`).
+
+1. On three junctions, including one with a dissolve and one a pass moved, press
+   `p`, then `a`, then `a` again, then `s`. Each press does what the footer says;
+   the status line reads `playing B ...`, `playing A ...`, `playing B ...`,
+   `paused`.
+2. Latency of the first prepare: a hard-cut window that plays from an EDL, and a
+   window that has to be rendered. Note both delays and whether the tab stays
+   usable meanwhile.
+3. The transition and the sound in mpv match `final.mp4` played around the same
+   cut (the window starts `review.pre_seconds`, 2 s by default, before the cut,
+   so the cut is 2 s into the window; `python -m matchcut.review WORKSPACE
+   --index N` prints it as `cut=`).
+4. `←`/`→` and `[`/`]` respond immediately while a junction is still preparing,
+   and a second `p` on the same junction says `already preparing this junction`.
+5. Make mpv unavailable (uninstall it, rename the binary, or set
+   `"review": {"mpv": "no-such-mpv"}` in `ws_m2b/config.json`) and press `p`: the
+   window is rendered and opened in the system player, and the status line reads
+   `mpv not found: opened <file> in the system player (no A/B toggle)`. Press `a`:
+   the A/B file with both halves and burned-in labels opens.
+6. Rename the source footage and press `p`: the status line reads
+   `review failed: source footage not found: <path>` and the app keeps running.
+
+## Verdict
+
+| Question | Answer |
+|---|---|
+| Motion and timing judgeable by watching the window (yes/no) | |
+| A/B at the same offset from the cut is useful (yes/no) | |
+| Notes: first-prepare latency, what was hard to judge | |
+| Decision | keep mpv review as the editor's way to watch a cut / change the approach |
+
+## Known limitations
+
+- An EDL item shows hard cuts only: a window with a transition, a fade or music
+  is rendered by ffmpeg instead, so those are exactly what the render shows, not
+  what mpv would compose.
+- Loudness normalisation and ducking run on the rendered excerpt, not on the
+  whole cut, so levels can differ slightly from `final.mp4`.
+- mpv control on Windows is not implemented: `start()` raises `MpvError` and the
+  controller falls back to the system opener.
+- The fallback has no A/B toggle beyond the concat file (A, half a second of
+  black and silence, B, with burned-in labels).
+- Previews are never deleted automatically: `workspace/review/` grows by one file
+  per distinct junction window; delete the folder to clear it.

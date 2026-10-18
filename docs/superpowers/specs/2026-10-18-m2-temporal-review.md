@@ -1,6 +1,8 @@
 # M2: Temporal editorial review — design
 
-Status: proposed. Builds on M1 (`docs/superpowers/specs/2026-10-17-m1-junction-inspector.md`
+Status: superseded by `docs/superpowers/specs/2026-10-18-m2b-temporal-review.md`
+(mpv playback instead of an external player); its window and render design
+are reused there. Builds on M1 (`docs/superpowers/specs/2026-10-17-m1-junction-inspector.md`
 and `docs/superpowers/specs/2026-10-18-m1-stabilization.md`). M1's human
 acceptance gate stays open and is not affected by M2.
 
