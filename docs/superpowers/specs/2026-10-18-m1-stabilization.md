@@ -48,12 +48,24 @@ rough cut, before any pass. A pin says "keep shot A immediately followed by
 shot B at these points", so `apply_pins` now makes the two shots adjacent
 when they are not:
 
-1. If the two shots are adjacent, place the pin as today.
-2. Otherwise find the clip of each shot (the first clip with that shot index).
-   If either shot is not in the cut: `pin_unplaced`, detail
-   `shot N is not in this cut`.
-3. Try, in order: move the incoming clip to just after the outgoing clip;
-   move the outgoing clip to just before the incoming clip. A candidate is
+1. Choose the two clips by the pinned points. The outgoing clip is the clip of
+   the pin's out shot whose source range contains `out_time`, else the nearest
+   one by distance to its range; the incoming clip is chosen the same way for
+   the in shot and `in_time`; a tie goes to the earlier clip. The two are never
+   the same clip: for a pin on one shot (a jump cut) the incoming clip is
+   chosen among the shot's other clips. If a shot is not in the cut:
+   `pin_unplaced`, detail `shot N is not in this cut`. If a jump-cut pin's shot
+   has only one clip in the cut: `pin_unplaced`, detail
+   `shot N has only one clip in this cut`.
+2. If the chosen incoming clip directly follows the chosen outgoing clip, place
+   the pin as today. A pair of the same two shots that is adjacent elsewhere in
+   the cut is used only when the points select it.
+3. Room check, before any move: if the pinned points do not fit the two clips
+   (the shot bounds and the minimum clip length), `pin_unplaced`, detail
+   `not enough room in these clips for the pinned points`. The clip order is
+   left untouched and no `pin_moved` is recorded.
+4. Otherwise try, in order: move the incoming clip to just after the outgoing
+   clip; move the outgoing clip to just before the incoming clip. A candidate is
    rejected when:
    - the moved clip already has a locked end (another pin holds it):
      `shot N is held by another pin`;
@@ -63,22 +75,32 @@ when they are not:
    - the new order would split a beat or change the order of the beats (the
      sequence of beat-id runs in clip order must stay exactly as it was):
      `moving shot N would split or reorder the beats`.
-4. Apply the first candidate that passes. Record
+5. Apply the first candidate that passes. Record
    `Decision("editor", "pin_moved", [moved clip id, anchor clip id], "moved shot X next to shot Y to hold the editor's pin", None, pin.to_dict())`
-   and then place the pin as in step 1 (its usual `pinned` decision follows).
+   and then place the pin as in step 2 (its usual `pinned` decision follows).
    The moved clip keeps its beat id.
-5. If both candidates are rejected: `pin_unplaced` with the first candidate's
+6. If both candidates are rejected: `pin_unplaced` with the first candidate's
    reason.
 
-Pins are processed in store order. A clip locked by a pin placed earlier in the
-same call is never moved. The junction data layer treats `pin_moved` like a
-`drop` or `insert` when it explains why two clips became adjacent
-(`made adjacent by …`). The `editor` tier of `why()` already ranks the
-`pinned` decision first.
+The reasons a pin is unplaced are therefore exactly five: `shot N is not in this
+cut`, `shot N has only one clip in this cut`, `shot N is held by another pin`,
+`moving shot N would split or reorder the beats`, and `not enough room in these
+clips for the pinned points`.
+
+Placement is two-phase, each phase in store order: first every pin whose chosen
+clips are already adjacent, then the pins that need a move. A clip locked by a
+pin placed earlier in the same call is never moved, so an adjacent pin is
+protected whatever its place in the store. The junction data layer treats
+`pin_moved` like a `drop` or `insert` when it explains why two clips became
+adjacent (`made adjacent by …`). The `editor` tier of `why()` already ranks the
+`pinned` decision first. Junctions a pass created are attributed their pass
+decisions by the lineage of their clips (a continuity insert names all three
+clips it touched; a match-cut reorder's verdicts about the new neighbours): this
+is intended.
 
 The Edit view's notification when the editor pins such a junction changes from
 "…the pin only applies if a regenerated rough cut pairs them" to:
-`these shots are not adjacent in the rough cut: the next run moves shot Y next to shot X, unless that would split or reorder the beats or another pin holds them`.
+`these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, unless that would split or reorder the beats or another pin holds them`.
 
 Consequence, documented: the match-cut pass does not reorder a beat that holds
 a locked clip, so a pinned beat is no longer reordered.

@@ -242,3 +242,68 @@ def test_a_regenerated_rough_cut_without_the_shot_reports_it(base_ws, tmp_path):
     assert outcome.detail == f"shot {pin.in_shot} is not in this cut"
     assert [d.action for d in editor_decisions(final, pin)] == ["pin_unplaced"]
     assert not any(c.shot_index == pin.in_shot for c in final.clips)
+
+
+# -- 7. a pinned jump cut whose two pieces are apart ------------------------------------------------
+JUMP_CUT = Pin(3, 3, 7.4, 7.8)  # shot 3 (6.5-9.0) cut twice: it ends at 7.4, resumes at 7.8
+
+
+def two_pieces_apart() -> List[Clip]:
+    return [Clip("c001", 3, 6.5, 7.4, "b2"), Clip("c002", 4, 9.2, 10.6, "b2"), Clip("c003", 3, 7.8, 9.0, "b2")]
+
+
+def test_a_pinned_jump_cut_whose_pieces_are_apart_is_placed_by_a_move(base_ws, tmp_path):
+    # Used to crash refine (the pin's two clips were the same clip) and then fail every later run until the pin was cleared.
+    ws, cfg = own_copy(base_ws, tmp_path)
+    rough = hand_built(ws, cfg, two_pieces_apart())
+    PinStore(ws).put(JUMP_CUT)
+    final = Pipeline(cfg).refine(rough)
+
+    matchcut = dict(load_stage_timelines(ws))["matchcut"]
+    actions = [d.action for d in editor_decisions(matchcut, JUMP_CUT)]
+    assert actions == ["pin_moved", "pinned"], actions
+    outcome = pin_outcome(final, JUMP_CUT)
+    assert outcome is not None and outcome.action == "pinned"
+    pieces = [c for c in final.clips if c.shot_index == 3]
+    first, second = pieces[0], pieces[1]
+    assert final.clips.index(second) == final.clips.index(first) + 1  # the two pieces now sit side by side
+    assert first.locked_out and second.locked_in
+    assert abs(first.source_out - 7.4) <= 0.5 / final.fps + 1e-6 and abs(second.source_in - 7.8) <= 0.5 / final.fps + 1e-6
+    Pipeline(cfg).refine(rough)  # and the next run is no different
+
+
+def test_the_same_pin_after_a_rough_cut_that_keeps_the_shot_once_is_reported(base_ws, tmp_path):
+    ws, cfg = own_copy(base_ws, tmp_path)
+    rough = hand_built(ws, cfg, [Clip("c001", 3, 6.5, 8.0, "b2"), Clip("c002", 4, 9.2, 10.6, "b2")])
+    PinStore(ws).put(JUMP_CUT)
+    final = Pipeline(cfg).refine(rough)
+    outcome = pin_outcome(final, JUMP_CUT)
+    assert outcome is not None and outcome.action == "pin_unplaced"
+    assert outcome.detail == "shot 3 has only one clip in this cut"
+    assert [d.action for d in editor_decisions(final, JUMP_CUT)] == ["pin_unplaced"]
+    assert not any("pinned" in c.tags for c in final.clips)
+
+
+# -- 8. the junction a pass made (here matchcut's reorder) is pinned on the right piece ------------
+def test_a_junction_a_pass_made_is_placed_on_the_piece_the_editor_pinned(base_ws, tmp_path):
+    # Rough cut: shot 3 in two pieces, then shot 4. The match-cut pass reorders them to 3, 4, 3 and the editor reverts that
+    # junction (shot 4 -> shot 3) to the first cut's points, which lie in the second piece.
+    ws, cfg = own_copy(base_ws, tmp_path)
+    rough = hand_built(ws, cfg, [Clip("c001", 3, 6.5, 7.6, "b2"), Clip("c002", 3, 7.9, 9.0, "b2"), Clip("c003", 4, 9.2, 10.6, "b2")])
+    Pipeline(cfg).refine(rough)
+    j0 = next(j for j in final_junctions(ws) if (j.out_shot, j.in_shot) == (4, 3))
+    assert j0.baseline.stage != "roughcut"  # a pass made this junction: the rough cut never paired the shots
+    pin = Pin(4, 3, round(j0.baseline.out_time, 3), round(j0.baseline.in_time, 3), origin="reverted")
+    assert round(pin.in_time, 2) == 7.9
+    PinStore(ws).put(pin)
+    final = Pipeline(cfg).refine(rough)
+
+    outcome = pin_outcome(final, pin)
+    assert outcome is not None and outcome.action == "pinned", outcome
+    moves = editor_decisions(dict(load_stage_timelines(ws))["matchcut"], pin, "pin_moved")
+    assert len(moves) == 1 and moves[0].clip_ids == ["c002", "c003"]  # the piece holding 7.9, not the first clip of shot 3
+    a, b = pair_of(final, pin.key)
+    assert b.locked_in and abs(b.source_in - 7.9) <= 0.5 / final.fps + 1e-6  # kept, snapped to the frame grid
+    pieces = [c for c in final.clips if c.shot_index == 3]
+    assert pieces[0] is not b and pieces[1] is b  # shot 3's pieces keep their source order
+    assert not pieces[0].locked_in

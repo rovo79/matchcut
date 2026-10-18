@@ -468,3 +468,29 @@ def test_a_trim_in_the_stage_that_dropped_the_clip_between_does_not_replace_the_
     j = build_junctions([("roughcut", rough), ("pacing", paced)])[0]
     assert j.why() == "made adjacent by pacing: total: over target, dropped lowest-value clip"
     assert not j.decisions  # neither the drop nor the trim concerns the junction when the clips were apart before
+
+
+# -- junctions a pass created are attributed by the lineage of their clips (intended behaviour) -----
+def test_a_continuity_insert_junction_reads_as_the_insert_that_made_it():
+    # c003 was moved between c001 and c002: the insert names all three clips, so it is the junction's own decision
+    # (not just "made adjacent by continuity"), for both junctions the insert created.
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 0, 2.2, 4.0), clip("c003", 2, 6.0, 8.0)])
+    insert = Decision("continuity", "insert", ["c001", "c003", "c002"], "moved c003 between c001 and c002 to break a jump cut")
+    cont = tl("continuity", [clip("c001", 0, 0.0, 2.0), clip("c003", 2, 6.0, 8.0), clip("c002", 0, 2.2, 4.0)], [insert])
+    first, second = build_junctions([("roughcut", rough), ("continuity", cont)])
+    for j in (first, second):
+        assert j.baseline.stage == "continuity"
+        assert j.decisions == [insert]
+        assert j.why() == "continuity: moved c003 between c001 and c002 to break a jump cut"
+
+
+def test_a_reorder_made_junction_gets_the_match_cut_and_rejected_verdicts_about_it():
+    rough = tl("roughcut", [clip("c001", 0, 0.0, 2.0), clip("c002", 1, 3.0, 5.0), clip("c003", 2, 6.0, 8.0)])
+    match = Decision("matchcut", "match_cut", ["c001", "c003"], "graphic match cut: accepted on feature score alone", 0.74, {"match_type": "graphic"})
+    rejected = Decision("matchcut", "rejected", ["c003", "c002"], "no match: scores below the threshold", 0.31)
+    reordered = tl("matchcut", [clip("c001", 0, 0.0, 2.0), clip("c003", 2, 6.0, 8.0), clip("c002", 1, 3.0, 5.0)], [match, rejected])
+    first, second = build_junctions([("roughcut", rough), ("matchcut", reordered)])
+    assert first.decisions == [match]
+    assert first.why() == "matchcut: graphic match cut: accepted on feature score alone"
+    assert second.decisions == [rejected]
+    assert second.why() == "matchcut: no match: scores below the threshold"

@@ -246,7 +246,7 @@ def test_a_pin_on_a_junction_a_later_pass_created_that_would_split_the_beats_is_
             assert "pinned (" not in panel and "pin pending" not in panel and "not adjacent in this cut" not in panel
             assert "1 pin(s) not placed" in str(app.query_one("#edit-header").content)
             await pilot.press("l")
-            assert f"these shots are not adjacent in the rough cut: the next run moves shot {j0.in_shot} next to shot {j0.out_shot}, unless that would split or reorder the beats or another pin holds them" in notes[-1]
+            assert "these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, unless that would split or reorder the beats or another pin holds them" in notes[-1]
 
     run_async(body())
 

@@ -10,8 +10,15 @@ reading a log file or a JSON document.
   regression scenarios in `tests/pipeline/test_regressions.py` (moved cut
   points, pins placed by a move, preserved dissolves, pins that persist across
   a regenerated rough cut).
-- Mock-backend rehearsal (2026-10-18, 20 s Big Buck Bunny clip, headless):
-  checklist items 4-6 behave as written; items 1-3 need a real backend.
+- Mock-backend rehearsal (2026-10-18, headless, 20 s Big Buck Bunny clip): it
+  covered the mechanics behind checklist items 4-6 (lock and revert pins pending
+  and then pinned after a re-run, pins held through a redo of the rough cut, the
+  first visit's frame extraction at about 0.4 s). It ran before the stabilization
+  work and found two defects, a reverted pin labelled "locked" and "-0.00" in
+  printed deltas; both are fixed. Items 4-6 have **not** been re-rehearsed
+  against the new pin-move behaviour (a pin on a junction a pass created is now
+  placed by moving a clip), and item 4 now describes pin moves no rehearsal
+  exercised. Items 1-3 need a real backend.
 - **Pending a human run:** the real model backend (item 1, and item 3 on real
   decisions) and an image-capable terminal (item 2). M1 is not accepted until
   the verdict table below is filled in by that run.

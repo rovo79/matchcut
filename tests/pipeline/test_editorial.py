@@ -107,6 +107,106 @@ def test_a_clip_held_by_an_earlier_pin_is_never_moved():
     assert [c.shot_index for c in out.clips] == [0, 2, 3, 1]
 
 
+def test_a_pin_held_by_one_candidate_is_placed_by_the_other():
+    # an earlier pin holds shot 3's out-point: moving shot 3 (the incoming clip) is out, moving shot 0 before it is fine
+    out, decisions = apply_pins(four(), [Pin(3, 1, 7.6, 2.6), Pin(0, 3, 2.0, 6.2)], FOUR_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pinned", "pin_moved", "pinned"]
+    assert decisions[1].detail == "moved shot 0 next to shot 3 to hold the editor's pin"
+    assert [c.shot_index for c in out.clips] == [2, 0, 3, 1]
+
+
+def test_a_pin_whose_anchor_in_point_is_held_is_not_placed():
+    # shot 2's in-point belongs to the first pin: shot 2 can neither move (candidate 1) nor be the anchor of shot 3 (candidate 2)
+    out, decisions = apply_pins(four(), [Pin(0, 2, 2.0, 4.6), Pin(3, 2, 7.6, 4.6)], FOUR_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions][1:] == [("pin_unplaced", "shot 2 is held by another pin")]
+    assert [c.shot_index for c in out.clips] == [0, 2, 3, 1]
+
+
+def test_the_first_reason_wins_when_both_candidates_fail_for_different_reasons():
+    # shot 2 -> shot 1 is pinned first, so shot 1's in-point is held. Pin shot 1 -> shot 0: candidate 1 would reorder
+    # the beats, candidate 2 would move the held shot 1; the reported reason is candidate 1's.
+    out, decisions = apply_pins(cut(), [Pin(2, 1, 5.8, 2.6), Pin(1, 0, 3.0, 1.0)], BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions][1:] == [("pin_unplaced", "moving shot 0 would split or reorder the beats")]
+    assert [c.id for c in out.clips] == ["c001", "c002", "c003"]
+
+
+def jump_cut() -> Timeline:
+    """Shot 3 twice (6.0-7.0 and 7.4-8.6) with shot 1 between the two pieces."""
+    return Timeline(source="s.mp4", fps=25.0, clips=[
+        Clip("c001", 3, 6.0, 7.0, "b1"), Clip("c002", 1, 2.6, 4.0, "b1"), Clip("c003", 3, 7.4, 8.6, "b1"),
+    ])
+
+
+def test_a_pinned_jump_cut_whose_pieces_are_apart_is_placed_by_a_move():
+    out, decisions = apply_pins(jump_cut(), [Pin(3, 3, 7.0, 7.4)], FOUR_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pin_moved", "pinned"]
+    assert decisions[0].clip_ids == ["c003", "c001"]
+    assert [c.id for c in out.clips] == ["c001", "c003", "c002"]
+    assert (out.clips[0].source_out, out.clips[1].source_in) == (7.0, 7.4)
+
+
+def test_a_pinned_jump_cut_of_a_shot_with_one_clip_is_not_placed():
+    cutting = Timeline(source="s.mp4", fps=25.0, clips=[Clip("c001", 3, 6.0, 7.0, "b1"), Clip("c002", 1, 2.6, 4.0, "b1")])
+    out, decisions = apply_pins(cutting, [Pin(3, 3, 7.0, 7.4)], FOUR_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", "shot 3 has only one clip in this cut")]
+    assert [c.id for c in out.clips] == ["c001", "c002"]
+
+
+def two_pieces() -> Timeline:
+    """Shot 3 as two pieces (6.0-7.4 and 7.6-9.0), then shot 4: the rough cut behind a continuity insert."""
+    return Timeline(source="s.mp4", fps=25.0, clips=[
+        Clip("c001", 3, 6.0, 7.4, "b1"), Clip("c002", 3, 7.6, 9.0, "b1"), Clip("c003", 4, 9.5, 11.0, "b1"),
+    ])
+
+
+PIECE_BOUNDS = {3: (6.0, 9.0), 4: (9.0, 12.0)}
+
+
+def test_the_clip_a_pin_points_at_is_the_one_that_moves():
+    out, decisions = apply_pins(two_pieces(), [Pin(4, 3, 11.0, 7.6)], PIECE_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pin_moved", "pinned"]
+    assert decisions[0].clip_ids == ["c002", "c003"]
+    assert [c.id for c in out.clips] == ["c001", "c003", "c002"]  # shot 3's pieces stay in source order
+    assert out.clips[2].source_in == 7.6 and out.clips[0].source_out == 7.4 and not out.clips[0].locked_in
+
+
+def test_a_clip_is_chosen_by_distance_when_no_range_contains_the_point_and_ties_go_to_the_earlier_one():
+    # 7.5 sits in the gap between the pieces, 0.1 s from each: the earlier piece wins the tie
+    out, decisions = apply_pins(two_pieces(), [Pin(4, 3, 11.0, 7.5)], PIECE_BOUNDS, min_clip=0.5)
+    assert decisions[0].clip_ids == ["c001", "c003"] and decisions[0].action == "pin_moved"
+    assert [c.id for c in out.clips] == ["c002", "c003", "c001"]
+
+
+def test_a_pair_that_is_adjacent_elsewhere_is_used_only_when_the_points_select_it():
+    # shot 4 -> shot 3 is adjacent at (c002, c003) but the pin's in-point lies in c001
+    cutting = Timeline(source="s.mp4", fps=25.0, clips=[
+        Clip("c001", 3, 6.0, 7.4, "b1"), Clip("c002", 4, 9.5, 11.0, "b1"), Clip("c003", 3, 7.6, 9.0, "b1"),
+    ])
+    out, decisions = apply_pins(cutting, [Pin(4, 3, 11.0, 6.2)], PIECE_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pin_moved", "pinned"]
+    assert [c.id for c in out.clips] == ["c002", "c001", "c003"]
+    assert out.clips[1].source_in == 6.2 and not out.clips[2].locked_in
+    out, decisions = apply_pins(cutting, [Pin(4, 3, 11.0, 7.6)], PIECE_BOUNDS, min_clip=0.5)
+    assert [d.action for d in decisions] == ["pinned"]  # the points select the adjacent pair: no move
+    assert [c.id for c in out.clips] == ["c001", "c002", "c003"]
+
+
+def test_a_pin_without_room_leaves_the_order_untouched_and_records_no_move():
+    out, decisions = apply_pins(four(), [Pin(0, 3, 2.0, 6.2)], FOUR_BOUNDS, min_clip=2.2)
+    assert [(d.action, d.detail) for d in decisions] == [("pin_unplaced", "not enough room in these clips for the pinned points")]
+    assert [c.id for c in out.clips] == ["c001", "c002", "c003", "c004"]
+    assert not any(d.action == "pin_moved" for d in out.history)
+    assert not any(c.locked_in or c.locked_out for c in out.clips)
+
+
+def test_pins_that_are_already_adjacent_are_placed_before_any_pin_that_needs_a_move():
+    # the first pin would move shot 3 next to shot 0, breaking the adjacent shot 2 -> shot 3 the second pin holds
+    out, decisions = apply_pins(four(), [Pin(0, 3, 2.0, 6.2), Pin(2, 3, 5.8, 6.2)], FOUR_BOUNDS, min_clip=0.5)
+    assert [(d.action, d.clip_ids) for d in decisions] == [("pinned", ["c002", "c003"]), ("pin_unplaced", [])]
+    assert decisions[1].detail == "shot 3 is held by another pin"
+    assert [c.shot_index for c in out.clips] == [0, 2, 3, 1]
+
+
 def test_pin_store_skips_a_malformed_entry_and_keeps_the_rest(tmp_path):
     good = Pin(0, 2, 2.0, 4.6, note="keep")
     bad = {"out_shot": 3, "in_shot": 4, "out_time": 7.5}  # no in_time

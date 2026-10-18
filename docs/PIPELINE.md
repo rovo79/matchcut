@@ -204,23 +204,31 @@ How a pin takes effect:
   that holds a pinned clip is not reordered by the match-cut pass.
 - **Shots that are not adjacent.** A pin on a junction a later pass would have
   made (a pacing drop, a continuity insert, a match-cut reorder) names two
-  shots that are not neighbours in the rough cut. `apply_pins` then moves one
-  clip next to the other: first the incoming clip to just after the outgoing
-  one, otherwise the outgoing clip to just before the incoming one. A move never
-  splits or reorders the beats and never moves a clip, or the end of an anchor
-  clip, that another pin already holds. The move is recorded as
-  `editor:pin_moved` (detail `moved shot 3 next to shot 0 to hold the editor's
-  pin`) before the pin's `editor:pinned` decision; both name rough-cut clip
-  ids, and the junction inspector attributes them to the junction by the clips'
-  lineage, so its why line is the editor's.
+  shots that are not neighbours in the rough cut. `apply_pins` first chooses
+  the two clips by the pinned points: the clip of each shot whose source range
+  holds the pin's point, else the nearest one (the earlier on a tie), and never
+  the same clip twice (a pinned jump cut takes two pieces of one shot). If the
+  pinned points fit those clips (the room check comes first, so a pin that
+  fails it leaves the order alone), `apply_pins` moves one clip next to the
+  other: first the incoming clip to just after the outgoing one, otherwise the
+  outgoing clip to just before the incoming one. A move never splits or
+  reorders the beats and never moves a clip, or the end of an anchor clip, that
+  another pin already holds. Pins are placed in two phases, each in store
+  order: those whose chosen clips are already adjacent first, then those that
+  need a move, so a move never breaks a pin that is already in place. The move
+  is recorded as `editor:pin_moved` (detail `moved shot 3 next to shot 0 to
+  hold the editor's pin`) before the pin's `editor:pinned` decision; both name
+  rough-cut clip ids, and the junction inspector attributes them to the
+  junction by the clips' lineage, so its why line is the editor's.
 - **Decisions.** Each pin leaves a decision with pass name `editor`:
   `editor:pinned` (detail `locked by the editor: out 4.00s, in 11.88s`; the
   data holds the pin plus the points actually placed) or `editor:pin_unplaced`.
-  The unplaced detail is exactly one of `shot N is not in this cut`, `shot N is
-  held by another pin`, `moving shot N would split or reorder the beats`, or
-  `not enough room in these clips for the pinned points`. These show in the
-  event stream, in `report.md`, in the TUI log, and in the junction inspector's
-  badge.
+  The unplaced detail is exactly one of `shot N is not in this cut`, `shot N
+  has only one clip in this cut` (a pinned jump cut of a shot the cut keeps
+  once), `shot N is held by another pin`, `moving shot N would split or
+  reorder the beats`, or `not enough room in these clips for the pinned
+  points`. These show in the event stream, in `report.md`, in the TUI log, and
+  in the junction inspector's badge.
 
 A pin holds the cut points, not the transition: a pinned junction on a beat
 boundary still gets the beat's dissolve, and only a match cut (tagged
@@ -246,7 +254,11 @@ Each line gives the junction number, the two clips and shots, the cut points
 in source seconds, the transition, the combined score and badges
 (`match:<type>`, `locked`, `pinned`, `beat`). Junctions are followed across stages by
 lineage (same shot, overlapping source range), so the scores before and after
-the passes describe the same cut even when clips were renumbered. The scores
+the passes describe the same cut even when clips were renumbered. A junction a pass
+created is credited with that pass's decisions about its clips by the same
+lineage: a continuity insert reads `continuity: moved c003 between c001 and
+c002 to break a jump cut`, and a match-cut reorder's verdicts about the new
+neighbours belong to the junctions they made. The scores
 are rebuilt from `analysis.npz` with the deterministic scorer, the same one the
 match-cut pass uses. Output from a mock run on the 20 s Big Buck Bunny clip
 (`-t 12`):
