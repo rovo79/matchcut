@@ -358,29 +358,40 @@ def ab_workspace(tmp_path, video):
     return workspace(tmp_path, video, roughcut=rough, final=final)
 
 
+def settled_pos(session, target, tol=0.1, timeout=5.0):
+    """``time-pos`` once it is within ``tol`` of ``target`` (mpv acknowledges a seek or a load before the new position is
+    readable, and a loaded machine takes longer), or the last value read when ``timeout`` runs out."""
+    deadline = time.monotonic() + timeout
+    while True:
+        pos = session.get("time-pos")
+        if (pos is not None and abs(pos - target) < tol) or time.monotonic() > deadline:
+            return pos
+        time.sleep(0.02)
+
+
 @needs_mpv
 def test_toggling_a_and_b_keeps_the_same_offset_from_the_cut(demo_video, tmp_path):
     ws = ab_workspace(tmp_path, demo_video)
     cfg = small_cfg(1.0, 1.0)
     pair = prepare_review(ws, cfg, "final", 0, ab=True)
     assert pair.a is not None and pair.a.kind == "edl" and pair.b.kind == "render"
-    c = ReviewController(cfg, session_factory=headless)
+    # held: once paused, playback stays where each open or seek put it, so positions are read, not raced against the clock
+    c = ReviewController(cfg, session_factory=held)
     try:
         assert c.has_mpv()
         c.play_pair(pair)
         assert c.current is pair.a and c.status.startswith("playing A")
-        c._session.set("pause", True)
+        c._session.set("pause", True)  # held ignores the controller's unpause, so it stays paused from here on
         c._session.command("seek", pair.a.cut + 0.3, "absolute+exact")
-        assert abs(c._session.get("time-pos") - (pair.a.cut + 0.3)) < 0.1
+        assert abs(settled_pos(c._session, pair.a.cut + 0.3) - (pair.a.cut + 0.3)) < 0.1
         assert c.toggle() is True
         assert c.current is pair.b
-        pos_b = c._session.get("time-pos")
+        pos_b = settled_pos(c._session, pair.b.cut + 0.3)
         print(f"A at cut+0.3 -> B time-pos {pos_b:.3f} (b.cut+0.3 = {pair.b.cut + 0.3:.3f})")
         assert abs(pos_b - (pair.b.cut + 0.3)) < 0.1
-        c._session.set("pause", True)
         assert c.toggle() is True
         assert c.current is pair.a
-        pos_a = c._session.get("time-pos")
+        pos_a = settled_pos(c._session, pair.a.cut + 0.3)
         print(f"B back to A: time-pos {pos_a:.3f} (a.cut+0.3 = {pair.a.cut + 0.3:.3f})")
         assert abs(pos_a - (pair.a.cut + 0.3)) < 0.1
     finally:
