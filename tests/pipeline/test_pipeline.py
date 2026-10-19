@@ -49,7 +49,7 @@ def test_a_shorter_pass_list_leaves_no_snapshots_of_the_old_passes(demo_video, t
     cfg2.passes = (cfg2.passes[0],)
     Pipeline(cfg2).refine()
     assert [p.name for p in (ws / "passes").glob("*.json")] == [f"01_{cfg2.passes[0]}.json"]
-    assert [s for s, _ in stage_timeline_paths(ws)] == ["roughcut", cfg2.passes[0], "final"]
+    assert [s for s, p in stage_timeline_paths(ws) if p.exists()] == ["roughcut", cfg2.passes[0], "final"]
 
 
 def test_cli_subcommands(demo_video, tmp_path):
