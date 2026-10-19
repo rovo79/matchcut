@@ -28,6 +28,8 @@ _ALL_LOST = [
 ]
 _ALL_APPROX = [
     "dissolve lengths are whole frames and a cut's record time is a whole number of frames (measured below)",
+    "source times are written in the media's embedded start timecode (frame 0 = that timecode, 0 when the file has none); UNVERIFIED that "
+    "Resolve and Final Cut Pro conform timecoded camera media from it (human gate)",
 ]
 
 # What each format cannot carry or carries only approximately, whatever the stage.  Entries marked UNVERIFIED have not been
@@ -63,7 +65,7 @@ KNOWN: Dict[str, Dict[str, List[str]]] = {
             "music: an EDL has no second track, so the music file is not carried",
             "metadata other than comments: only the MATCHCUT comments (clip key, junction id, shot, stage, fades) are written; editors may drop them",
             "fade in/out of the whole cut: a comment only, not rendered by the receiving editor",
-            "tracks: one video track only; the source audio rides on the video events (AA/V)",
+            "tracks: one video track only; the source audio rides on the video events (AA/V; V when music.only drops it)",
         ],
     },
 }
@@ -114,8 +116,10 @@ def _compare(a: Timeline, b: Timeline, rate: Fraction, tol: float = 0, rec_tol: 
             out.append(("transitions", f"{who}: transition {y.transition[0]} != {x.transition[0]}"))
         elif abs(x.tr - y.tr) > tol:
             out.append(("transitions", f"{who}: transition length {y.tr} != {x.tr} frames"))
-        if abs(x.rec - y.rec) > rec_tol or abs(x.cut - y.cut) > rec_tol:
+        if abs(x.rec - y.rec) > rec_tol:
             out.append(("record", f"{who}: record start {y.rec} != {x.rec} frames"))
+        if abs(x.cut - y.cut) > rec_tol:
+            out.append(("record", f"{who}: cut at record frame {y.cut} != {x.cut}"))
         if keys and clip_key(ca) != cb.origin:
             out.append(("keys", f"{who}: clip key {cb.origin or '(missing)'} != {clip_key(ca)}"))
     end = abs(la[-1].rec_out - lb[-1].rec_out)
@@ -133,6 +137,38 @@ def differences(a: Timeline, b: Timeline, rate: Fraction, tol: float = 0, rec_to
 
 
 # -- measured approximations -----------------------------------------------------------------------
+# What the frame snap (``Timeline.snap_to_frames``) can do to one edge: round to the nearest frame (at most half a frame, plus 4-decimal
+# storage), then pull an edge that left its shot back inside (at most one frame in total for a clip that was inside its shot).  A clip
+# shorter than two frames gets its out edge pushed to two frames.  A larger move is not snapping: it is an error.
+MAX_SNAP_FRAMES = 1.0
+_SNAP_SLACK = 0.01
+
+
+def _snap_errors(canonical: Timeline, exported: Timeline, rate: Fraction) -> List[str]:
+    """Differences between the stage and the copy that was written that snapping cannot explain."""
+    if len(canonical.clips) != len(exported.clips):
+        return [f"export drops or adds clips: {len(exported.clips)} written for {len(canonical.clips)} in the stage"]
+    fps = float(rate)
+    errs: List[str] = []
+    for i, (a, b) in enumerate(zip(canonical.clips, exported.clips)):
+        who = f"clip {i + 1} ({a.id}, shot {a.shot_index})"
+        if a.shot_index != b.shot_index:
+            errs.append(f"{who}: exported as shot {b.shot_index}")
+        if clip_key(a) != clip_key(b):
+            errs.append(f"{who}: exported clip key {clip_key(b)} != {clip_key(a)}")
+        if i and (a.transition_in.is_cut != b.transition_in.is_cut or (not a.transition_in.is_cut and a.transition_in.kind != b.transition_in.kind)):
+            errs.append(f"{who}: exported transition {b.transition_in.kind} != {a.transition_in.kind}")
+        elif i and not a.transition_in.is_cut and abs(a.transition_in.duration - b.transition_in.duration) > 1e-3:
+            errs.append(f"{who}: exported transition length {b.transition_in.duration:g} s != {a.transition_in.duration:g} s")
+        short = (a.source_out - a.source_in) * fps < 2
+        for label, x, y, limit in (("in", a.source_in, b.source_in, MAX_SNAP_FRAMES),
+                                   ("out", a.source_out, b.source_out, 2.0 if short else MAX_SNAP_FRAMES)):
+            d = (y - x) * fps
+            if abs(d) > limit + _SNAP_SLACK:
+                errs.append(f"{who}: source {label} moved {d:+.2f} frames by the snap; snapping moves an edge by at most {limit:g} frame{'s' if limit > 1 else ''}")
+    return errs
+
+
 def _snap_note(canonical: Timeline, exported: Timeline, rate: Fraction) -> Optional[str]:
     fps = float(rate)
     moved, worst, where = 0, 0.0, ""
@@ -164,6 +200,12 @@ def _dissolve_note(canonical: Timeline, rate: Fraction) -> Optional[str]:
     return f"dissolve lengths rounded to whole frames: {n} transition{'s' if n != 1 else ''}, largest error {worst:.2f} frame{'s' if worst > 1.005 else ''}"
 
 
+def _dip_note(canonical: Timeline) -> str:
+    trs = [c for c in canonical.clips[1:] if not c.transition_in.is_cut]
+    dips = sum(1 for c in trs if c.transition_in.kind == "dip_to_black")
+    return f"dip to black: {dips} of {len(trs)} transition{'s' if len(trs) != 1 else ''} in this cut" + (" (approximated as described above)" if dips else "")
+
+
 def _fmt_rate(rate: Fraction) -> str:
     return f"{rate.numerator}/{rate.denominator} ({float(rate):.3f})" if rate.denominator != 1 else str(rate.numerator)
 
@@ -179,9 +221,12 @@ def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, e
         raise InterchangeError(f"unknown interchange format {fmt!r}")
     exp = exported if exported is not None else canonical
     res = FidelityResult(fmt, canonical.stage or exp.stage)
+    snap_errors = _snap_errors(canonical, exp, rate) if exp is not canonical else []
     found = _compare(exp, reimported, rate, tol=0, rec_tol=record_tolerance_frames(rate), keys=True)
-    res.errors = [m for _, m in found]
+    res.errors = snap_errors + [m for _, m in found]
     bad = {cat for cat, _ in found}
+    if snap_errors:  # what was written is not the stage: nothing below is a statement about the stage
+        bad |= {"clips", "shots", "source", "transitions", "keys"}
     if "clips" not in bad:
         n = len(exp.clips)
         trs = sum(1 for c in exp.clips[1:] if not c.transition_in.is_cut)
@@ -196,7 +241,7 @@ def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, e
         if "keys" not in bad:
             res.preserved.append("clip keys (the lineage ids of the clips)")
     res.approximated = list(KNOWN[fmt]["approximated"])
-    for note in (_snap_note(canonical, exp, rate), _dissolve_note(canonical, rate)):
+    for note in (_snap_note(canonical, exp, rate) if not snap_errors else None, _dissolve_note(canonical, rate), _dip_note(canonical)):
         if note:
             res.approximated.append(note)
     res.lost = list(KNOWN[fmt]["lost"])

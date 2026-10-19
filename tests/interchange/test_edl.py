@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from fractions import Fraction
 
 import pytest
@@ -290,3 +291,144 @@ FCM: NON-DROP FRAME
     a, b = back.clips
     assert (a.source_in, a.source_out) == (1.0, round(3.0 + 10 / 24, 4))  # the outgoing clip runs on through the dissolve
     assert (b.source_in, b.source_out) == (5.0, 7.0) and b.transition_in.kind == "dissolve" and b.transition_in.duration == round(10 / 24, 4)
+
+
+# -- regression tests from the review ---------------------------------------------------------------
+# an EDL as OpenTimelineIO's cmx_3600 writer turns matchcut's OTIO into: clip names "c001 shot0", reel "media", FROM CLIP urls
+OTIO_STYLE = """TITLE: media - final
+
+001  media    V     C        00:00:01:00 00:00:02:12 00:00:00:00 00:00:01:12
+* FROM CLIP NAME:  c001 shot0
+* FROM CLIP: file:///x/media.mp4
+* OTIO TRUNCATED REEL NAME FROM: media.mp4
+002  media    V     C        00:00:02:12 00:00:02:12 00:00:01:12 00:00:01:12
+002  media    V     D 012    00:00:05:00 00:00:07:00 00:00:01:12 00:00:03:12
+* FROM CLIP NAME:  c001 shot0
+* FROM CLIP: file:///x/media.mp4
+* OTIO TRUNCATED REEL NAME FROM: media.mp4
+* TO CLIP NAME:  c002 shot1
+* TO CLIP: file:///x/media.mp4
+* OTIO TRUNCATED REEL NAME FROM: media.mp4
+003  media    V     C        00:00:10:00 00:00:12:00 00:00:03:12 00:00:05:12
+* FROM CLIP NAME:  c003 shot2
+* FROM CLIP: file:///x/media.mp4
+* OTIO TRUNCATED REEL NAME FROM: media.mp4
+"""
+
+
+def test_an_edl_written_from_matchcuts_otio_by_another_writer_is_read(tmp_path):
+    back, notes = import_edl(OTIO_STYLE, RATE24, "/x/media.mp4")
+    assert notes == []
+    assert [(c.id, c.shot_index, c.source_in, c.source_out) for c in back.clips] == [
+        ("c001", 0, 1.0, 3.0), ("c002", 1, 5.0, 7.0), ("c003", 2, 10.0, 12.0)]
+    assert back.clips[1].transition_in.kind == "dissolve" and back.clips[1].transition_in.duration == 0.5
+    check_equivalent(synthetic(), back, RATE24)
+
+
+def test_media_is_other_only_on_positive_evidence_of_a_different_file():
+    def one(extra: str, reel: str = "A001", name: str = "") -> str:
+        names = f"* FROM CLIP NAME: {name}\n" if name else ""
+        return (f"TITLE: t\n001  {reel:<8} V     C        00:00:01:00 00:00:03:00 00:00:00:00 00:00:02:00\n{names}{extra}\n"
+                f"002  AX       V     C        00:00:05:00 00:00:07:00 00:00:02:00 00:00:04:00\n* FROM CLIP NAME: media.mp4\n")
+
+    def n_clips(text: str) -> int:
+        try:
+            return len(import_edl(text, RATE24, "/x/media.mp4")[0].clips)
+        except InterchangeError:
+            return 0
+
+    assert n_clips(one("")) == 2  # no evidence at all: accepted
+    assert n_clips(one("* FROM CLIP: file:///x/media.mp4")) == 2 and n_clips(one("* SOURCE FILE: /elsewhere/media.mp4")) == 2  # same file name
+    assert n_clips(one("* FROM CLIP: file:///x/other.mov")) == 1 and n_clips(one("* SOURCE FILE: /a/b/broll.mov")) == 1  # another file
+    assert n_clips(one("", name="c010 shot4")) == 2  # matchcut's own name, whatever the reel
+    assert n_clips(one("", reel="media")) == 2 and n_clips(one("", reel="med")) == 2  # a reel that is the start of the source's name
+    assert n_clips(one("", name="broll.mov")) == 1 and n_clips(one("", name="media.mp4")) == 2
+    # a path comment decides, even against matchcut-looking names
+    assert n_clips(one("* FROM CLIP: file:///x/other.mov", name="c010 shot4")) == 1
+
+
+def test_matchcut_source_comment_does_not_override_the_workspace_source():
+    text = export_edl(synthetic(), "final", fake_src(), "t")  # names /x/media.mp4
+    back, notes = import_edl(text, RATE24, "/x/media.mp4")
+    assert back.source == "/x/media.mp4" and notes == []
+    back, notes = import_edl(text, RATE24, "/moved/media.mp4")
+    assert back.source == "/moved/media.mp4" and notes == ["the EDL names the source /x/media.mp4; the workspace's /moved/media.mp4 is used"]
+
+
+SPLIT = """TITLE: x
+FCM: NON-DROP FRAME
+
+001  AX V     C        00:00:01:00 00:00:03:00 01:00:00:00 01:00:02:00
+001  AX A     C        00:00:01:00 00:00:03:00 01:00:00:00 01:00:02:00
+* FROM CLIP NAME: media.mp4
+002  AX V     C        00:00:05:00 00:00:07:00 01:00:02:00 01:00:04:00
+* FROM CLIP NAME: media.mp4
+"""
+
+
+def test_video_and_audio_lines_under_one_event_number_are_separate_events():
+    back, notes = import_edl(SPLIT, RATE24, "/x/media.mp4")
+    assert [(c.source_in, c.source_out) for c in back.clips] == [(1.0, 3.0), (5.0, 7.0)]
+    assert notes == ["event 001: audio event (track A) ignored"]
+    # the other order, and a dissolve on both tracks
+    swapped = SPLIT.replace("001  AX V", "001  AX X").replace("001  AX A", "001  AX V").replace("001  AX X", "001  AX A")
+    back, notes = import_edl(swapped, RATE24, "/x/media.mp4")
+    assert len(back.clips) == 2 and notes == ["event 001: audio event (track A) ignored"]
+    both = """TITLE: x
+001  AX V     C        00:00:01:00 00:00:03:00 01:00:00:00 01:00:02:00
+002  AX V     C        00:00:03:00 00:00:03:00 01:00:02:00 01:00:02:00
+002  AX A     C        00:00:03:00 00:00:03:00 01:00:02:00 01:00:02:00
+002  AX V     D    010 00:00:05:00 00:00:07:00 01:00:02:00 01:00:04:00
+002  AX A     D    010 00:00:05:00 00:00:07:00 01:00:02:00 01:00:04:00
+* FROM CLIP NAME: media.mp4
+"""
+    back, notes = import_edl(both, RATE24, "/x/media.mp4")
+    assert len(back.clips) == 2 and back.clips[1].transition_in.kind == "dissolve" and back.clips[1].transition_in.duration == round(10 / 24, 4)
+    assert len([n for n in notes if "audio event" in n]) == 1  # the A pair is one event
+
+
+CAM = """TITLE: x
+FCM: NON-DROP FRAME
+
+001  A001     V     C        10:00:01:00 10:00:03:00 01:00:00:00 01:00:02:00
+* FROM CLIP NAME: media.mp4
+002  A001     V     C        10:00:05:00 10:00:07:00 01:00:02:00 01:00:04:00
+* FROM CLIP NAME: media.mp4
+"""
+
+
+def test_source_timecode_of_a_camera_edl_is_conformed_to_the_media_start():
+    src = replace(fake_src(RATE24), start_tc_frames=10 * 3600 * 24)
+    back, notes = import_edl(CAM, RATE24, src.path, {0: (0, 3.5), 1: (4.0, 8.0)}, src)
+    assert [(c.source_in, c.source_out, c.shot_index) for c in back.clips] == [(1.0, 3.0, 0), (5.0, 7.0, 1)] and notes == []
+    # the same file against media without a timecode: the clips lie far outside it, and in no shot, and the notes say so
+    plain = fake_src(RATE24)
+    back, notes = import_edl(CAM, RATE24, plain.path, {0: (0, 3.5), 1: (4.0, 8.0)}, plain)
+    assert [c.shot_index for c in back.clips] == [-1, -1]
+    assert sum("outside the media (0-1440 frames)" in n and "start timecode" in n for n in notes) == 2
+    assert sum("lies in no shot" in n for n in notes) == 2
+    assert all("\n" not in n for n in notes)
+
+
+def test_music_only_writes_video_events_and_says_so():
+    from matchcut.pipeline.config import MusicConfig
+    text = export_edl(synthetic(), "final", fake_src(), "t", MusicConfig(path="/x/score.wav", only=True))
+    assert all(e[2] == "V" for e in events(text)) and "* MATCHCUT AUDIO none: music.only" in text
+    text = export_edl(synthetic(), "final", fake_src(), "t", MusicConfig(path="/x/score.wav", only=False))
+    assert all(e[2] == "AA/V" for e in events(text)) and "MATCHCUT AUDIO" not in text
+    assert all(e[2] == "AA/V" for e in events(export_edl(synthetic(), "final", fake_src(), "t", MusicConfig())))
+
+
+def test_invalid_drop_frame_numbers_and_overlapping_events():
+    bad = "TITLE: t\nFCM: DROP FRAME\n001  AX       V     C        00:01:00;00 00:01:10;00 00:00:00;00 00:00:10;00\n"
+    with pytest.raises(InterchangeError, match=r"^invalid EDL: line 3: 00:01:00;00 is not a valid drop-frame timecode$"):
+        import_edl(bad, NTSC, "/x/media.mp4")
+    ok = bad.replace("00:01:00;00", "00:01:00;02").replace("00:01:10;00", "00:01:10;02")
+    assert len(import_edl(ok, NTSC, "/x/media.mp4")[0].clips) == 1
+    assert len(import_edl(bad.replace("00:01:00;00", "00:10:00;00").replace("00:01:10;00", "00:10:10;00"), NTSC, "/x/media.mp4")[0].clips) == 1
+    overlap = """TITLE: t
+001  AX       V     C        00:00:01:00 00:00:03:00 00:00:00:00 00:00:02:00
+002  AX       V     C        00:00:05:00 00:00:07:00 00:00:01:00 00:00:03:00
+"""
+    back, notes = import_edl(overlap, RATE24, "/x/media.mp4")
+    assert len(back.clips) == 2 and notes == ["event 002 starts 24 frames before the previous video event ends (overlapping record times): read in file order"]

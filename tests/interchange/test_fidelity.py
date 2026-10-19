@@ -171,11 +171,87 @@ def test_report_records_errors_and_marks_a_failing_run(tmp_path):
     assert FidelityResult("otio", "final").to_dict()["ok"] is True
 
 
-def test_report_on_the_workspace_has_the_rough_cut_snapping_note_when_the_snap_moved_clips(world, tmp_path):
-    results, moved = [], 0
-    for stage in ("roughcut", "final"):
-        canonical, tl, back = roundtrip(world, stage, "edl")
-        moved += len([1 for a, b in zip(canonical.clips, tl.clips) if abs(a.source_in - b.source_in) * 25 > 0.01 or abs(a.source_out - b.source_out) * 25 > 0.01])
-        results.append(check(canonical, back, "edl", world.src.rate, tl))
-    md = write_report(results, tmp_path)[1].read_text()
-    assert ("snapped to the frame grid" in md) == bool(moved)
+def test_report_on_the_workspace_has_the_exact_snapping_measurement(world, tmp_path):
+    """A rough cut over the workspace's real shots, entered 0.25 frame late and left 0.4 frame early: the snap moves each edge back."""
+    rate = world.src.rate
+    fps = float(rate)
+    clips = []
+    for k, (shot, (lo, hi)) in enumerate(sorted(world.bounds.items())[:3]):
+        f_in = int(round(lo * fps)) + 10
+        f_out = min(f_in + 30, int(hi * fps) - 5)  # well inside the shot
+        assert f_out - f_in >= 10 and (f_out + 1) / fps < hi
+        clips.append(Clip(f"c{k + 1:03d}", shot, f_in / fps + 0.25 / fps, f_out / fps - 0.4 / fps))
+    canonical = Timeline(source=world.video, fps=fps, clips=clips, stage="roughcut")
+    snapped, notes = export_timeline(canonical, world.bounds, rate)
+    assert len(notes) == 3
+    back, _ = import_edl(export_edl(snapped, "roughcut", world.src, "t"), rate, world.src.path, world.bounds, world.src)
+    r = check(canonical, back, "edl", rate, snapped)
+    assert r.errors == []
+    assert "snapped to the frame grid: 3 of 3 clips moved, largest move 0.40 frame (c001)" in " ".join(r.approximated)
+    md = write_report([r], tmp_path)[1].read_text()
+    assert "3 of 3 clips moved, largest move 0.40 frame" in md
+
+
+# -- the exported copy must be the stage (review: check never compared the two) ----------------------------
+def test_an_export_that_dropped_a_clip_or_moved_one_far_is_an_error_not_an_approximation():
+    canonical = unsnapped()
+    snapped, _ = export_timeline(canonical, None, Fraction(25))
+
+    def run(bad: Timeline):
+        back, _ = import_edl(export_edl(bad, "roughcut", fake_src(Fraction(25)), "t"), Fraction(25), "/x/media.mp4")
+        return check(canonical, back, "edl", Fraction(25), bad)
+
+    dropped = copy.deepcopy(snapped)
+    dropped.clips.pop()
+    r = run(dropped)
+    assert not r.ok and r.errors == ["export drops or adds clips: 2 written for 3 in the stage"]
+    assert not any("clip count" in p or "source in/out" in p for p in r.preserved) and not any(a.startswith("snapped") for a in r.approximated)
+
+    moved = copy.deepcopy(snapped)
+    moved.clips[0].source_in = round(moved.clips[0].source_in + 0.8, 4)  # 20 frames
+    r = run(moved)
+    assert not r.ok and r.errors[0] == "clip 1 (c001, shot 0): source in moved +19.68 frames by the snap; snapping moves an edge by at most 1 frame"
+    assert not any(a.startswith("snapped") and "19" in a for a in r.approximated)
+
+    both = copy.deepcopy(moved)
+    both.clips.pop()
+    assert len(run(both).errors) == 1  # the count is reported once; the per-clip moves are not compared against a missing clip
+
+    shot = copy.deepcopy(snapped)
+    shot.clips[1].shot_index = 7
+    assert run(shot).errors[0] == "clip 2 (c002, shot 1): exported as shot 7"
+    kind = copy.deepcopy(snapped)
+    kind.clips[2].transition_in = Transition("dip_to_black", 0.5)
+    assert "exported transition dip_to_black != dissolve" in run(kind).errors[0]
+    key = copy.deepcopy(snapped)
+    key.clips[0].origin = "elsewhere"
+    assert "exported clip key elsewhere" in run(key).errors[0]
+    # the legitimate snap (at most one frame per edge) and a clip under two frames long pass
+    assert run(snapped).errors == []
+    tiny = Timeline(source="/x/media.mp4", fps=25.0, stage="roughcut", clips=[Clip("c001", 0, 1.0, 1.02), Clip("c002", 1, 5.0, 7.0)])
+    tsnap, _ = export_timeline(tiny, None, Fraction(25))
+    back, _ = import_edl(export_edl(tsnap, "roughcut", fake_src(Fraction(25)), "t"), Fraction(25), "/x/media.mp4")
+    assert check(tiny, back, "edl", Fraction(25), tsnap).errors == []
+
+
+def test_dips_to_black_are_counted_and_the_record_messages_print_the_field_that_differs():
+    tl = synthetic()
+    tl.clips[1].transition_in = Transition("dip_to_black", 0.5)
+    back, _ = import_otio(export_otio(tl, "final", fake_src(), []))
+    r = check(tl, back, "otio", RATE24)
+    assert "dip to black: 1 of 1 transition in this cut (approximated as described above)" in r.approximated
+    assert "dip to black: 0 of 1 transition in this cut" in check(synthetic(), import_otio(export_otio(synthetic(), "final", fake_src(), []))[0], "otio", RATE24).approximated
+    assert "dissolve lengths rounded" not in " ".join(r.approximated)  # 12 frames exactly: nothing to report
+    # a transition one frame longer moves the record start and the cut; each message prints its own field
+    a = synthetic()
+    b = copy.deepcopy(a)
+    b.clips[1].transition_in = Transition("dissolve", 13 / 24)
+    out = differences(a, b, RATE24, rec_tol=0)
+    assert "clip 2 (c002, shot 1): transition length 13 != 12 frames" in out
+    assert "clip 2 (c002, shot 1): record start 35 != 36 frames" in out
+    assert "clip 2 (c002, shot 1): cut at record frame 41 != 42" in out
+
+
+def test_the_timecode_conformance_caveat_is_in_every_format():
+    for fmt in KNOWN:
+        assert any("embedded start timecode" in a and "UNVERIFIED" in a for a in KNOWN[fmt]["approximated"]), fmt

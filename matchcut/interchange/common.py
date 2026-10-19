@@ -101,10 +101,54 @@ class SourceInfo:
     has_audio: bool
     size: int
     mtime_ns: int
+    start_tc_frames: int = 0  # the media's embedded start timecode as a frame count (0 = none, or unparsable)
+    start_tc_drop: bool = False  # that timecode was written drop-frame (29.97 / 59.94 only)
 
     @property
     def seconds(self) -> float:
         return float(Fraction(self.duration_frames) / self.rate)
+
+
+_TIMECODE = re.compile(r"^(\d{1,3}):(\d{2}):(\d{2})([:;.,])(\d{2,3})$")
+
+
+def nominal_base(rate: Fraction) -> int:
+    """The timecode base of a rate: 24 for 23.976, 30 for 29.97, 25 for 25."""
+    return max(1, int(round(float(rate))))
+
+
+def is_drop_rate(rate: Fraction) -> bool:
+    return Fraction(rate) in (Fraction(30000, 1001), Fraction(60000, 1001))
+
+
+def timecode_frames(h: int, m: int, s: int, f: int, rate: Fraction, drop: bool) -> int:
+    """Timecode fields -> frame count; ``drop`` removes the frame numbers drop-frame timecode skips (2 at 29.97, 4 at 59.94)."""
+    n = nominal_base(rate)
+    total = ((h * 60 + m) * 60 + s) * n + f
+    if drop:
+        minutes = 60 * h + m
+        total -= (2 if n == 30 else 4) * (minutes - minutes // 10)
+    return total
+
+
+def is_valid_timecode(m: int, s: int, f: int, rate: Fraction, drop: bool) -> bool:
+    """False for a frame number that does not exist: past the base, or ;00/;01 (;00-;03) at a minute not divisible by 10 in drop-frame."""
+    n = nominal_base(rate)
+    if f >= n or m >= 60 or s >= 60:
+        return False
+    return not (drop and s == 0 and m % 10 != 0 and f < (2 if n == 30 else 4))
+
+
+def parse_timecode(text: Any, rate: Fraction) -> Optional[Tuple[int, bool]]:
+    """``"01:00:00:00"`` / ``"01:00:00;00"`` -> (frame count, drop-frame); None when it is not a valid timecode at ``rate``."""
+    mt = _TIMECODE.match(str(text or "").strip())
+    if not mt:
+        return None
+    h, mi, s, f = int(mt.group(1)), int(mt.group(2)), int(mt.group(3)), int(mt.group(5))
+    drop = mt.group(4) in (";", ",") and is_drop_rate(rate)
+    if not is_valid_timecode(mi, s, f, rate, drop):
+        return None
+    return timecode_frames(h, mi, s, f, rate, drop), drop
 
 
 def _fraction(text: Any) -> Optional[Fraction]:
@@ -116,7 +160,7 @@ def _fraction(text: Any) -> Optional[Fraction]:
 
 
 def source_info(media_path: str, audio_only: bool = False) -> SourceInfo:
-    """Probe ``media_path``: absolute path and URL, exact rate, duration in frames, size, audio, content key.
+    """Probe ``media_path``: absolute path and URL, exact rate, duration in frames, size, audio, content key, start timecode.
 
     Cover art (a video stream with ``disposition.attached_pic``) is not footage and is ignored.  ``audio_only`` reads
     the audio stream even when the file also has real video (the music path); the rate is then the sample rate.
@@ -145,14 +189,19 @@ def source_info(media_path: str, audio_only: bool = False) -> SourceInfo:
             fps = _fraction(video.get("avg_frame_rate"))
             rate = snap_rate(float(fps)) if fps is not None else Fraction(25)
         rate = exact_rate(rate)
+        # the camera's start timecode: the video stream's tag, else the container's; none or unparsable = 0
+        tc = parse_timecode((video.get("tags") or {}).get("timecode") or (data.get("format", {}).get("tags") or {}).get("timecode"), rate)
+        start_tc, start_drop = tc if tc is not None else (0, False)
         nb = str(video.get("nb_frames") or "")
         frames = int(nb) if nb.isdigit() and int(nb) > 0 else to_frames(seconds, rate)
         width, height = int(video.get("width", 0)), int(video.get("height", 0))
     else:
         rate = Fraction(int(audio.get("sample_rate") or 44100))
         frames, width, height = to_frames(seconds, rate), 0, 0
+        start_tc, start_drop = 0, False
     return SourceInfo(path=str(p), url=p.as_uri(), rate=rate, duration_frames=frames, width=width, height=height,
-                      has_audio=audio is not None, size=st.st_size, mtime_ns=st.st_mtime_ns)
+                      has_audio=audio is not None, size=st.st_size, mtime_ns=st.st_mtime_ns,
+                      start_tc_frames=start_tc, start_tc_drop=start_drop)
 
 
 # -- what is exported ----------------------------------------------------------------------------
@@ -318,8 +367,11 @@ def record_frames(rows: Sequence[LaidClip]) -> int:
 
 
 def assemble(items: List[Tuple[str, Dict[str, Any]]], rate: Fraction, meta: Dict[str, Any], name: str, source: str,
-             bounds: Optional[Dict[int, Sequence[float]]]) -> Timeline:
+             bounds: Optional[Dict[int, Sequence[float]]], notes: Optional[List[str]] = None, duration_frames: Optional[int] = None) -> Timeline:
     """Back end of the importers: [("clip", {vis_in, dur, name, meta}), ("tr", {in, out, kind})] -> Timeline.
+
+    With ``notes``, a clip whose source range lies outside the media (``duration_frames``, when given) or in no shot (``bounds``) is
+    listed there instead of silently becoming shot -1.
 
     Converts centred transitions back to matchcut's overlap semantics (source_in = vis_in - in_off,
     source_out = vis_end + out_off).  ``meta`` of a clip may hold clip_id, clip_key, shot_index, beat_id.
@@ -352,6 +404,10 @@ def assemble(items: List[Tuple[str, Dict[str, Any]]], rate: Fraction, meta: Dict
             t0, t1 = in_f / fps, out_f / fps
             best = max(((max(0.0, min(b[1], t1) - max(b[0], t0)), s) for s, b in (bounds or {}).items()), default=(0.0, -1))
             shot = best[1] if best[0] > 0 else -1
+            if shot == -1 and notes is not None and bounds:
+                notes.append(f"clip {cid}: source range {in_f}-{out_f} frames lies in no shot, shot index -1")
+        if notes is not None and duration_frames is not None and (in_f < 0 or out_f > duration_frames):
+            notes.append(f"clip {cid}: source range {in_f}-{out_f} frames is outside the media (0-{duration_frames} frames); check the source start timecode")
         clips.append(Clip(cid, int(shot), round(in_f / fps, 4), round(out_f / fps, 4), str(cm.get("beat_id", "")),
                           transition_in=Transition(tin["kind"], round((tin["in"] + tin["out"]) / fps, 4)) if tin else Transition(),
                           origin=str(cm.get("clip_key") or "")))

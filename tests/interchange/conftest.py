@@ -82,6 +82,29 @@ def silent_footage(tmp_path_factory) -> Path:
     return make_demo_footage(tmp_path_factory.mktemp("silent") / "silent.mp4", audio=False)
 
 
+def _timecoded(path: Path, timecode: str, rate: str) -> Path:
+    """A 3 s clip with video and audio whose container carries a start timecode (what a camera writes)."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y", "-f", "lavfi", "-i", f"testsrc=size=160x90:rate={rate}:duration=3", "-f", "lavfi",
+           "-i", "sine=duration=3", "-timecode", timecode, "-c:v", "libx264", "-c:a", "aac", "-shortest", str(path)]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return path
+
+
+@pytest.fixture(scope="session")
+def tc_footage(tmp_path_factory) -> Path:
+    """25 fps, start timecode 01:00:00:00 (frame 90000)."""
+    return _timecoded(tmp_path_factory.mktemp("tc") / "cam.mp4", "01:00:00:00", "25")
+
+
+@pytest.fixture(scope="session")
+def df_footage(tmp_path_factory) -> Path:
+    """29.97 fps, start timecode 01:00:00;00 in drop-frame (frame 107892)."""
+    return _timecoded(tmp_path_factory.mktemp("tcdf") / "camdf.mp4", "01:00:00;00", "30000/1001")
+
+
 @pytest.fixture(scope="session")
 def music_file(tmp_path_factory) -> Path:
     return write_wav(tmp_path_factory.mktemp("music") / "score.wav")

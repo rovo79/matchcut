@@ -1,6 +1,7 @@
 """OpenTimelineIO JSON documents, written and read by hand (the OpenTimelineIO library is never imported).
 
-Export: ``Timeline.1`` with a video track ``V1`` (``Clip.2`` per matchcut clip, ``Transition.1`` centred on each cut,
+Export: source times are in the media's own timecode (``SourceInfo.start_tc_frames`` + frame; the reference's available range
+starts there), ``Timeline.1`` with a video track ``V1`` (``Clip.2`` per matchcut clip, ``Transition.1`` centred on each cut,
 a ``Marker.2`` per junction at the cut's record frame), an audio track ``A1`` mirroring the picture when the source has
 audio, and an audio track ``A2`` with the music file when music is configured.  The exact rate lives in
 ``metadata.matchcut.rate`` (``RationalTime.rate`` is only a float).
@@ -38,7 +39,7 @@ def _range(start: float, dur: float, rate: float) -> Dict[str, Any]:
 def _ref(src: SourceInfo, name: str) -> Dict[str, Any]:
     r = float(src.rate)
     return {"OTIO_SCHEMA": "ExternalReference.1", "name": name, "target_url": src.url,
-            "available_range": _range(0, src.duration_frames, r), "available_image_bounds": None,
+            "available_range": _range(src.start_tc_frames, src.duration_frames, r), "available_image_bounds": None,
             "metadata": {"matchcut": {"size": src.size, "mtime_ns": src.mtime_ns}}}
 
 
@@ -80,7 +81,7 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
                 kids.append({"OTIO_SCHEMA": "Transition.1", "metadata": {"matchcut": tmeta}, "name": "Dip To Black" if dip else "Cross Dissolve",
                              "in_offset": _rt(in_off, r), "out_offset": _rt(out_off, r),
                              "transition_type": "Custom_Transition" if dip else "SMPTE_Dissolve"})
-            kids.append(_clip(f"{c.id} shot{c.shot_index}", _range(row.vis_in, row.dur, r), ref,
+            kids.append(_clip(f"{c.id} shot{c.shot_index}", _range(src.start_tc_frames + row.vis_in, row.dur, r), ref,
                               {"clip_id": c.id, "clip_key": clip_key(c), "shot_index": c.shot_index, "beat_id": c.beat_id, "stage": stage}))
         return kids
 
@@ -102,7 +103,7 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
     if has_music:
         mrate = float(rate)
         start, dur, avail = music_window(music, music_src, rate, record_frames(rows))
-        mref = {**_ref(music_src, Path(music_src.path).stem), "available_range": _range(0, avail, mrate)}
+        mref = {**_ref(music_src, Path(music_src.path).stem), "available_range": _range(0, avail, mrate)}  # the music's own time starts at 0
         tracks.append(_track("Audio", "A2", [_clip(Path(music_src.path).name, _range(start, dur, mrate), mref,
                                                    {"kind": "music", "gain_db": music.gain_db, "duck": music.duck, "start": music.start,
                                                     "fade_out": music.fade_out, "only": music.only})]))
@@ -175,20 +176,21 @@ def _meta_rate(value: Any, notes: List[str]) -> Optional[Fraction]:
     return None
 
 
-def import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Timeline, List[str]]:
+def import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]] = None, src: Optional[SourceInfo] = None) -> Tuple[Timeline, List[str]]:
     """OTIO document (a dict) -> (Timeline, notes).  Everything that cannot be mapped is listed in ``notes``.
 
-    A malformed document raises ``InterchangeError`` (one line), never a bare KeyError or TypeError.
+    A malformed document raises ``InterchangeError`` (one line), never a bare KeyError or TypeError.  ``src`` (the probed source
+    footage) lets a clip outside the media's length be reported.
     """
     try:
-        return _import_otio(doc, bounds)
+        return _import_otio(doc, bounds, src)
     except InterchangeError:
         raise
     except (KeyError, TypeError, ValueError, AttributeError, IndexError, ZeroDivisionError, OverflowError) as exc:
         raise InterchangeError(f"invalid OTIO document: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
 
 
-def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]]) -> Tuple[Timeline, List[str]]:
+def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: Optional[SourceInfo]) -> Tuple[Timeline, List[str]]:
     if not isinstance(doc, dict):
         raise InterchangeError("invalid OTIO document: not a JSON object")
     meta = (doc.get("metadata") or {}).get("matchcut") or {}
@@ -285,4 +287,4 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]]) -> Tup
             continue
         cleaned.append((kind, d))
     source = meta.get("source") or want or ""
-    return assemble(cleaned, rate, meta, str(doc.get("name") or "cut"), str(source), bounds), notes
+    return assemble(cleaned, rate, meta, str(doc.get("name") or "cut"), str(source), bounds, notes, src.duration_frames if src else None), notes

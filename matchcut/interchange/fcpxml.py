@@ -1,6 +1,7 @@
 """FCPXML 1.10, written and read by hand (``xml.etree`` only).
 
-Export: one ``library/event`` with one ``project`` per exported stage.  The source is one ``format`` (the exact
+Export: one ``library/event`` with one ``project`` per exported stage; source times are in the media's own timecode (the asset
+``start`` is ``SourceInfo.start_tc_frames``, clip ``start``, marker and keyword times are asset times).  The source is one ``format`` (the exact
 ``frameDuration`` of the footage) and one ``asset``; the spine holds an ``asset-clip`` per matchcut clip and a
 ``transition`` centred on each cut (``Cross Dissolve``; ``Fade To Color`` for a dip to black, unverified).  Every junction
 leaves a ``marker`` (value: the junction id and its shots, note: why it was chosen, cut to 240 characters) and a
@@ -68,12 +69,13 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                   music_src: Optional[SourceInfo] = None, name: str = "matchcut") -> str:
     """One FCPXML 1.10 document: an event ``name`` with a project ``"<name> - <stage>"`` per stage (timelines normally frame-snapped)."""
     rate = src.rate
+    tc0 = src.start_tc_frames  # source times are in the media's own timecode: the asset starts there
     has_music = music is not None and bool(music.path)
     muted = bool(has_music and music.only and src.has_audio)  # the render drops the source audio entirely
     root = ET.Element("fcpxml", version=FCPXML_VERSION)
     res = ET.SubElement(root, "resources")
     ET.SubElement(res, "format", id="r1", frameDuration=rt(1, rate), width=str(src.width), height=str(src.height))
-    asset = ET.SubElement(res, "asset", id="r2", name=_x(Path(src.path).stem), uid=_uid(src), start="0s", duration=rt(src.duration_frames, rate),
+    asset = ET.SubElement(res, "asset", id="r2", name=_x(Path(src.path).stem), uid=_uid(src), start=rt(tc0, rate), duration=rt(src.duration_frames, rate),
                           hasVideo="1", hasAudio="1" if src.has_audio else "0", format="r1")
     ET.SubElement(asset, "media-rep", kind="original-media", src=src.url)
     ET.SubElement(res, "effect", id="r3", name="Cross Dissolve", uid=CROSS_DISSOLVE_UID)
@@ -106,21 +108,21 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                 if dip:
                     ET.SubElement(fv, "param", name="color", key="3", value="0 0 0 1")
                 _md(tr, kind=kind, **({"junction_id": by_in[i][1]} if i in by_in else {}), **({"unverified": UNVERIFIED_DIP} if dip else {}))
-            ac = ET.SubElement(spine, "asset-clip", name=_x(f"{c.id} shot{c.shot_index}"), ref="r2", offset=rt(row.cut, rate), start=rt(row.vis_in, rate),
+            ac = ET.SubElement(spine, "asset-clip", name=_x(f"{c.id} shot{c.shot_index}"), ref="r2", offset=rt(row.cut, rate), start=rt(tc0 + row.vis_in, rate),
                                duration=rt(row.dur, rate), tcFormat="NDF")
             if muted:
                 ac.set("srcEnable", "video")
             if i == 0 and has_music:  # connected to the first clip: its offset is in that clip's own time (where the cut starts)
                 start, dur, _ = music_window(music, music_src, rate, record_frames(rows))
-                mc = ET.SubElement(ac, "asset-clip", name=_x(Path(music_src.path).name), ref="r5", lane="-1", offset=rt(row.vis_in, rate),
+                mc = ET.SubElement(ac, "asset-clip", name=_x(Path(music_src.path).name), ref="r5", lane="-1", offset=rt(tc0 + row.vis_in, rate),
                                    start=rt(start, rate), duration=rt(dur, rate))
                 ET.SubElement(mc, "adjust-volume", amount=_db(music.gain_db))
                 _md(mc, kind="music", gain_db=music.gain_db, duck=music.duck, start=music.start, fade_out=music.fade_out, only=music.only)
             if i in by_in:  # marker + keyword (the likeliest to survive an editor) on the incoming clip
                 j, jid = by_in[i]
-                ET.SubElement(ac, "marker", start=rt(row.vis_in, rate), duration=rt(1, rate), value=_x(f"{jid} (s{j.out_shot} -> s{j.in_shot})"),
+                ET.SubElement(ac, "marker", start=rt(tc0 + row.vis_in, rate), duration=rt(1, rate), value=_x(f"{jid} (s{j.out_shot} -> s{j.in_shot})"),
                               note=_x(truncate(j.why())))
-                ET.SubElement(ac, "keyword", start=rt(row.vis_in, rate), duration=rt(row.dur, rate), value=_x(f"mc:{jid}"))
+                ET.SubElement(ac, "keyword", start=rt(tc0 + row.vis_in, rate), duration=rt(row.dur, rate), value=_x(f"mc:{jid}"))
             _md(ac, clip_key=clip_key(c), clip_id=c.id, shot_index=c.shot_index, beat_id=c.beat_id, stage=stage)
         smd: Dict[str, Any] = {"stage": stage, "source": src.path, "source_size": src.size, "source_mtime_ns": src.mtime_ns, "fade_in": tl.fade_in, "fade_out": tl.fade_out, "provenance_file": "provenance.json",
                                "matchcut_version": MATCHCUT_VERSION}
@@ -220,20 +222,22 @@ def _parse(xml: Any) -> ET.Element:
     return root
 
 
-def import_fcpxml(xml: Any, stage: Optional[str] = None, bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Timeline, List[str]]:
+def import_fcpxml(xml: Any, stage: Optional[str] = None, bounds: Optional[Dict[int, Sequence[float]]] = None,
+                  src: Optional[SourceInfo] = None) -> Tuple[Timeline, List[str]]:
     """FCPXML text -> (Timeline, notes) for the project of ``stage`` (the first project when None).  Anything not mapped is in ``notes``.
 
-    A malformed file raises ``InterchangeError`` (one line), never a bare KeyError or ValueError.
+    A malformed file raises ``InterchangeError`` (one line), never a bare KeyError or ValueError.  ``src`` (the probed source footage)
+    lets a clip outside the media's length be reported.
     """
     try:
-        return _import(xml, stage, bounds)
+        return _import(xml, stage, bounds, src)
     except InterchangeError:
         raise
     except (KeyError, TypeError, ValueError, AttributeError, IndexError, ZeroDivisionError, OverflowError, ET.ParseError) as exc:
         raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
 
 
-def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[float]]]) -> Tuple[Timeline, List[str]]:
+def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[float]]], src: Optional[SourceInfo]) -> Tuple[Timeline, List[str]]:
     root = _parse(xml)
     proj, others = _select(root, stage)
     seq = proj.find("sequence")
@@ -392,7 +396,7 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
                     d["meta"]["shot_index"] = int(idx)
                 except ValueError:
                     del d["meta"]["shot_index"]
-    return assemble(cleaned, rate, meta, proj.get("name") or "cut", source, bounds), notes
+    return assemble(cleaned, rate, meta, proj.get("name") or "cut", source, bounds, notes, src.duration_frames if src else None), notes
 
 
 def fcpxml_junction_ids(xml: Any, stage: Optional[str] = None) -> List[str]:
