@@ -129,3 +129,13 @@ def world(footage, tmp_path_factory) -> SimpleNamespace:
 def exported(world: SimpleNamespace, stage: str):
     """(snapped timeline, snap notes) of a world stage."""
     return export_timeline(world.by_stage[stage], world.bounds, world.src)
+
+
+@pytest.fixture
+def wsx(world, tmp_path) -> SimpleNamespace:
+    """A private copy of the finished mock workspace (an import writes into it) with its config."""
+    ws = tmp_path / "ws"
+    shutil.copytree(world.ws, ws)
+    cfg = PipelineConfig.load(ws / "config.json")
+    cfg.workspace = str(ws)
+    return SimpleNamespace(ws=ws, cfg=cfg, world=world, tmp=tmp_path)

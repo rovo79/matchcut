@@ -24,10 +24,14 @@ SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color",
 
 
 def stage_timeline_paths(ws: Path) -> List[Tuple[str, Path]]:
-    """(stage, path) for every place a stage timeline can live, in stage order, present or not."""
+    """(stage, path) for every place a stage timeline can live, in stage order, present or not.
+
+    ``human`` is last: the cut an editor's re-export came back as (``matchcut.interchange`` writes ``human.json``; the engine never does).
+    """
     entries = [("roughcut", ws / "roughcut.json")]
     entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
     entries.append(("final", ws / "final.json"))
+    entries.append(("human", ws / "human.json"))
     return entries
 
 

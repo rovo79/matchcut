@@ -361,6 +361,41 @@ def test_a_reverted_pin_reads_reverted_everywhere_after_a_run(mock_workspace, tm
     run_async(body())
 
 
+def test_an_imported_human_stage_is_the_last_stage_and_keeps_an_untouched_pin_applied(mock_workspace, tmp_path):
+    """After ``import`` the human stage is the latest: the Edit view lands on it, and a pin it did not touch still reads applied."""
+    from matchcut.interchange.workspace import export_workspace, import_timeline
+
+    ws = own_copy(mock_workspace, tmp_path)
+    j0 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j0.out_shot, j0.in_shot)
+    refine_in(ws, pin=Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3)))
+    cfg = PipelineConfig.load(ws / "config.json")
+    export_workspace(ws, cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((ws / "exports" / "final.otio").read_text())
+    clips = [k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Clip")]
+    pinned_clips = {j.out_clip for j in build_junctions(load_stage_timelines(ws)) if (j.out_shot, j.in_shot) == key} | \
+        {j.in_clip for j in build_junctions(load_stage_timelines(ws)) if (j.out_shot, j.in_shot) == key}
+    target = next(k for k in clips[1:] if k["metadata"]["matchcut"]["clip_id"] not in pinned_clips)
+    target["source_range"]["start_time"]["value"] += 3
+    target["source_range"]["duration"]["value"] -= 3
+    (tmp_path / "edit.otio").write_text(json.dumps(doc))
+    assert [d.action for d in import_timeline(ws, cfg, tmp_path / "edit.otio").decisions] == ["trim"]
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-1] == "human" and view.current_stage() == "human"
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pinned (locked)" in panel and "pending" not in panel and "locked by the editor" in panel
+            assert "human:" not in panel  # nothing human happened at this junction
+
+    run_async(body())
+
+
 def test_the_apply_hint_follows_where_the_run_is(mock_workspace):
     async def body():
         app = app_for(mock_workspace)

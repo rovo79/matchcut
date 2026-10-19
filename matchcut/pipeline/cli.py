@@ -84,18 +84,74 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     sp = sub.add_parser("junctions", help="list a workspace's junctions, or explain one with --index")
     sp.add_argument("workspace")
     sp.add_argument("--index", type=int, default=None, help="1-based junction number to explain")
+    sp = sub.add_parser("export", help="write stages as OpenTimelineIO, FCPXML and EDL files for an editor, with a fidelity report")
+    sp.add_argument("workspace")
+    sp.add_argument("--stage", action="append", default=None, dest="stages", metavar="S", help="stage to export, repeatable (default: roughcut and final)")
+    sp.add_argument("--format", action="append", default=None, dest="formats", choices=["otio", "fcpxml", "edl"], help="format, repeatable (default: all)")
+    sp.add_argument("--out", default=None, help="output directory (default: WORKSPACE/exports)")
+    sp = sub.add_parser("import", help="read an editor's re-export back as the workspace's human stage")
+    sp.add_argument("workspace")
+    sp.add_argument("file", help="the .otio, .fcpxml or .edl file the editor saved")
+    sp.add_argument("--format", default=None, choices=["otio", "fcpxml", "edl"], help="file format (default: from the extension)")
+    sp.add_argument("--stage", default=None, help="the stage the file was exported from (default: what the file says, else final)")
     return parser.parse_args(argv)
 
 
-def _junctions(ws: Path, index: Optional[int]) -> int:
+def _workspace_config(ws: Path) -> Optional[PipelineConfig]:
+    """The workspace's config, or None after printing why there is none."""
     cfg_path = ws / "config.json"
     if not cfg_path.exists():
         print(f"no workspace at {ws} (config.json missing)", file=sys.stderr)
+        return None
+    try:
+        return PipelineConfig.load(cfg_path)
+    except Exception as exc:  # corrupt or hand-edited JSON
+        print(f"cannot read {cfg_path}: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}", file=sys.stderr)
+        return None
+
+
+def _interchange(args: argparse.Namespace) -> int:
+    """``export`` and ``import``: the interchange package is imported here, never at start-up."""
+    from matchcut.interchange import InterchangeError, workspace
+
+    ws = Path(args.workspace)
+    cfg = _workspace_config(ws)
+    if cfg is None:
         return 1
     try:
-        cfg = PipelineConfig.load(cfg_path)
-    except Exception as exc:  # corrupt or hand-edited JSON
-        print(f"cannot read {cfg_path}: {exc}", file=sys.stderr)
+        if args.command == "export":
+            res = workspace.export_workspace(ws, cfg, tuple(args.stages or workspace.DEFAULT_STAGES), tuple(args.formats or workspace.FORMATS),
+                                             Path(args.out) if args.out else None)
+            out_dir = res.files[0].parent
+            print(f"exported {len(res.files)} files to {out_dir}")
+            for f in res.files:
+                print(f"  {f}")
+            print(f"fidelity: {len(res.results)} checks, {sum(len(r.errors) for r in res.results)} errors ({out_dir / 'fidelity.md'})")
+            for r in res.results:
+                print(f"  {r.stage}  {r.fmt}  {'ok' if r.ok else 'FAILED'}: {len(r.preserved)} preserved, {len(r.approximated)} approximated, {len(r.lost)} lost")
+            for n in res.notes:
+                print(f"note: {n}")
+        else:
+            imp = workspace.import_timeline(ws, cfg, Path(args.file), args.format, args.stage)
+            print(f"imported {Path(args.file).name} ({imp.fmt}) against {imp.stage}: {len(imp.decisions)} human decision"
+                  f"{'s' if len(imp.decisions) != 1 else ''} -> {imp.stage_path}")
+            for d in imp.decisions:
+                print(f"  {d.action} {' '.join(d.clip_ids)}  {d.detail}")
+            if not imp.decisions:
+                print(f"  (no changes: the file matches the {imp.stage} stage)")
+            if imp.notes:
+                print(f"import report: {len(imp.notes)} note{'s' if len(imp.notes) != 1 else ''}")
+                for n in imp.notes:
+                    print(f"  - {n}")
+    except InterchangeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
+def _junctions(ws: Path, index: Optional[int]) -> int:
+    cfg = _workspace_config(ws)
+    if cfg is None:
         return 1
     stages = load_stage_timelines(ws)
     if not stages:
@@ -118,6 +174,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
     if args.command == "junctions":
         return _junctions(Path(args.workspace), args.index)
+    if args.command in ("export", "import"):
+        return _interchange(args)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("PIL").setLevel(logging.WARNING)
     cfg = build_config(args)

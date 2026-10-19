@@ -94,8 +94,12 @@ def test_stage_layout_and_loading_skip_missing_and_corrupt_files(tmp_path):
     tl("roughcut", [clip("c001", 0, 0, 2)]).save(tmp_path / "roughcut.json")
     tl("matchcut", [clip("c001", 0, 0, 2)]).save(tmp_path / "passes" / "01_matchcut.json")
     (tmp_path / "passes" / "02_continuity.json").write_text("{not json")
-    assert [s for s, _ in stage_timeline_paths(tmp_path)] == ["roughcut", "matchcut", "continuity", "final"]
+    assert [s for s, _ in stage_timeline_paths(tmp_path)] == ["roughcut", "matchcut", "continuity", "final", "human"]
+    assert dict(stage_timeline_paths(tmp_path))["human"] == tmp_path / "human.json"
     assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut"]
+    tl("final", [clip("c001", 0, 0, 2)]).save(tmp_path / "final.json")
+    tl("human", [clip("c001", 0, 0, 2)]).save(tmp_path / "human.json")  # an editor's import: the last stage, after final
+    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut", "final", "human"]
     assert scorer_for_workspace(tmp_path, PipelineConfig()) is None
 
 

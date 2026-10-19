@@ -458,6 +458,19 @@ def test_a_reel_names_the_roll_so_it_never_outvotes_a_file_name():
                           RATE24, "/x/media.mp4")[0].clips) == 3
 
 
+def test_a_dotted_number_in_a_clip_name_is_not_a_file_extension():
+    cam = "/x/A001C003_230101.mov"
+    # "Sc 12.3" and "Take v1.2" are names, not files: on the source's roll they are the source (the reel decides), never other media
+    for name in ("Sc 12.3", "Take v1.2", "A001 take 2.10"):
+        back, notes = import_edl(_reel_edl("A001", name, name), RATE24, cam)
+        assert len(back.clips) == 2 and notes == [], name
+    # a real extension that starts with a letter is still a file name: another file on the same roll
+    with pytest.raises(InterchangeError, match="no event of the EDL references"):
+        import_edl(_reel_edl("A001", "A001C001.mov", "A001C001.mov"), RATE24, cam)
+    with pytest.raises(InterchangeError, match="no event of the EDL references"):
+        import_edl(_reel_edl("B001", "Sc 12.3", "Sc 12.3"), RATE24, cam)  # a name that is no file name falls back to the reel, which is another roll
+
+
 def test_a_comment_of_the_audio_line_does_not_overwrite_the_video_lines_name():
     text = """TITLE: x
 FCM: NON-DROP FRAME

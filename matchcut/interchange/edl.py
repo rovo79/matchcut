@@ -153,7 +153,7 @@ def _same_path(a: str, b: str) -> bool:
 _SHOT_NAME = re.compile(r"shot_?\d+\s*$", re.I)
 
 
-_FILE_LIKE = re.compile(r"\.[A-Za-z0-9]{1,5}\s*$")
+_FILE_LIKE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}\s*$")  # an extension starts with a letter: "Sc 12.3" and "v1.2" are names
 
 
 def _is_source(g: Dict[str, Any], reel: str, src_path: str) -> bool:

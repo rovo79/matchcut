@@ -400,6 +400,16 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
     return assemble(cleaned, rate, meta, proj.get("name") or "cut", source, bounds, notes, src.duration_frames if src else None), notes
 
 
+def fcpxml_stages(xml: Any) -> List[str]:
+    """The stage of every project (one with a sequence) of the file, in file order, as ``import_fcpxml(xml, stage)`` names it:
+    the sequence's ``stage`` md key, else the part of the project name after the last ``" - "``, else the whole name."""
+    try:
+        root = _parse(xml)
+        return [_stage_of(p) or p.get("name", "").rsplit(" - ", 1)[-1] for p in root.iter("project") if p.find("sequence") is not None]
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
+
+
 def fcpxml_junction_ids(xml: Any, stage: Optional[str] = None) -> List[str]:
     """The junction ids that survive in an (edited) file, for the project ``import_fcpxml`` would read: per clip, its marker value
     (``s3-s5 (...)``), else its ``mc:`` keyword."""
