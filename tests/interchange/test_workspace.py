@@ -1891,7 +1891,7 @@ def test_the_footage_the_workspace_was_analysed_from_wins_over_a_changed_config(
 
     probed = json.loads((wsx.ws / "probe.json").read_text())["path"]
     cfg = other_footage_cfg(wsx, tc_footage)
-    note = f"config.json names {tc_footage}, but this workspace was analysed from {probed}: exported/imported against {probed}; re-run the pipeline to use {tc_footage}"
+    note = f"config.json names {tc_footage}, but this workspace was analysed from {probed}: exported/imported against {probed}; re-run with --force (or force in Config) to analyse {tc_footage}"
     res = export_workspace(wsx.ws, cfg, stages=("final",), formats=("otio",))
     assert note in res.notes
     doc = json.loads((wsx.ws / "exports" / "final.otio").read_text())
@@ -1908,6 +1908,84 @@ def test_the_footage_the_workspace_was_analysed_from_wins_over_a_changed_config(
     assert f"note: {note}" in capsys.readouterr().out.splitlines()
     # the same file under its other name is no change
     assert not any("config.json names" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)
+
+
+def _ffmpeg(*args) -> None:
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", *args], check=True, capture_output=True)
+
+
+def moved_workspace(tmp: Path, original: Path) -> tuple:
+    """A workspace directory holding only the probe.json that ``original`` would have written, whose path is now gone: (ws, the moved copy)."""
+    from dataclasses import asdict
+
+    from matchcut.pipeline.media import probe
+
+    ws = tmp / "probed_ws"
+    ws.mkdir()
+    doc = asdict(probe(str(original)))
+    doc["path"] = str(tmp / "gone" / original.name)
+    (ws / "probe.json").write_text(json.dumps(doc))
+    moved = tmp / "moved" / original.name
+    moved.parent.mkdir()
+    shutil.copy(original, moved)
+    return ws, moved
+
+
+def test_identical_footage_that_moved_is_accepted_like_for_like(tmp_path):
+    """The review of 4828c96: probe.json holds the container's duration and the average frame rate; compare the same fields of the new file."""
+    cfg = PipelineConfig()
+    # 5 s of video with 5.5 s of AAC (common in camera files): the container says 5.5 s, the video stream 5 s
+    long_audio = tmp_path / "longaudio.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=5", "-f", "lavfi", "-i", "sine=duration=5.5", "-c:v", "libx264", "-c:a", "aac", str(long_audio))
+    # variable frame rate: seven frames dropped, so the average (28.6) is not the container's base rate (30)
+    vfr = tmp_path / "vfr.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=5", "-vf", "select='not(eq(n,10)+eq(n,11)+eq(n,50)+eq(n,51)+eq(n,90)+eq(n,91)+eq(n,92))'",
+            "-fps_mode", "vfr", "-c:v", "libx264", str(vfr))
+    for original in (long_audio, vfr):
+        sub = tmp_path / original.stem
+        sub.mkdir()
+        ws, moved = moved_workspace(sub, original)
+        cfg.source = str(moved)
+        info, notes = workspace._source(ws, cfg)
+        assert info.path == str(moved.resolve()), original.name
+        assert notes and "which has its frame rate, duration and size" in notes[0], notes
+
+
+def test_moved_footage_of_another_length_or_size_is_still_refused(tmp_path):
+    cfg = PipelineConfig()
+    base = tmp_path / "base.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=5", "-f", "lavfi", "-i", "sine=duration=5.5", "-c:v", "libx264", "-c:a", "aac", str(base))
+    ws, _ = moved_workspace(tmp_path, base)
+    shorter = tmp_path / "shorter.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=4", "-c:v", "libx264", str(shorter))
+    bigger = tmp_path / "bigger.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=5", "-f", "lavfi", "-i", "sine=duration=5.5", "-c:v", "libx264", "-c:a", "aac", str(bigger))
+    slower = tmp_path / "slower.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=24:duration=5", "-f", "lavfi", "-i", "sine=duration=5.5", "-c:v", "libx264", "-c:a", "aac", str(slower))
+    for other, what in ((shorter, "duration 4.00 s, analysed at 5.50"), (bigger, "size 320x180, analysed at 160x90"), (slower, "frame rate 24 fps, analysed at 30")):
+        cfg.source = str(other)
+        with pytest.raises(InterchangeError) as exc:
+            workspace._source(ws, cfg)
+        assert what in str(exc.value) and "is not the same footage" in str(exc.value) and "\n" not in str(exc.value), (other.name, str(exc.value))
+
+
+def test_the_moved_footage_note_lists_only_the_fields_that_were_compared(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    media = tmp_path / "m.mp4"
+    _ffmpeg("-f", "lavfi", "-i", "testsrc=size=160x90:rate=30:duration=2", "-c:v", "libx264", str(media))
+    cfg = PipelineConfig()
+    cfg.source = str(media)
+    for doc, said in (({"path": str(tmp_path / "gone.mp4"), "duration": 2.0}, "which has its duration"),
+                      ({"path": str(tmp_path / "gone.mp4"), "fps": 30.0, "width": 160, "height": 90}, "which has its frame rate and size"),
+                      ({"path": str(tmp_path / "gone.mp4")}, "which could not be compared (probe.json records no frame rate, duration or size)")):
+        (ws / "probe.json").write_text(json.dumps(doc))
+        info, notes = workspace._source(ws, cfg)
+        assert notes[0].endswith(said), notes
 
 
 def test_moved_footage_is_replaced_only_by_a_file_with_its_identity(wsx, tc_footage):

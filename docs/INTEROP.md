@@ -243,9 +243,11 @@ import with one line (`invalid EDL: event 001 is shorter than its transitions`).
 
 - **Which file is the workspace's footage** (export and import alike): the one the stage timelines were made from, `probe.json`'s path, when that is a file. If
   `config.json` (the Config view edits `source`) now names a different existing file, the stages still describe the probed one, so it is used and a note says so:
-  `config.json names <X>, but this workspace was analysed from <Y>: exported/imported against <Y>; re-run the pipeline to use <X>` (printed by `export` and `import`,
+  `config.json names <X>, but this workspace was analysed from <Y>: exported/imported against <Y>; re-run with --force (or force in Config) to analyse <X>` (printed by `export` and `import`,
   and kept in `human_import.json`). When the probed file is gone (the footage moved), the configured file is used only if it is the same footage by `probe.json`'s
-  record (frame rate, duration within a frame, width and height), with a note; otherwise the command stops with one line naming both files and what differs.
+  record, with a note listing the fields compared. The configured file is probed with the pipeline's own `media.probe` (the function that wrote `probe.json`), so the fields are compared like for like:
+  the average frame rate (within 1e-3, so variable-frame-rate footage matches itself), the container's duration (within one frame, so footage with longer audio matches itself), width and height;
+  a field `probe.json` does not record is skipped and not claimed; otherwise the command stops with one line naming both files and what differs.
   Without a `probe.json` the configured file is the footage.
 - **The source footage** is the workspace's: a clip is the footage when its media path is the footage's exact path (symbolic links resolved); only when no
   clip has the exact path are clips with the same file name taken for it, and the report says so (camera names such as `C0001.MP4` repeat across cards, so

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
 from matchcut.pipeline.editorial import Pin, pin_change
+from matchcut.pipeline.media import MediaError, probe as probe_media
 from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
@@ -110,25 +111,38 @@ def _source(ws: Path, cfg: PipelineConfig) -> Tuple[SourceInfo, List[str]]:
         notes: List[str] = []
         if configured and Path(configured).is_file() and not _same_file(configured, probed):
             notes.append(f"config.json names {configured}, but this workspace was analysed from {probed}: exported/imported against {probed}; "
-                         f"re-run the pipeline to use {configured}")
+                         f"re-run with --force (or force in Config) to analyse {configured}")
         return source_info(str(probed)), notes
     if not configured or not Path(configured).is_file():
         raise InterchangeError(f"source footage not found: {configured or probed}")
-    info = source_info(str(configured))
-    fps, seconds = probe.get("fps"), probe.get("duration")
-    differs = []
+    try:  # the same probe that wrote probe.json, so every field is compared like for like (average frame rate, the container's duration)
+        found = probe_media(str(configured))
+    except (MediaError, ValueError, KeyError, OSError) as exc:
+        raise InterchangeError(f"source footage not found: {probed} (the analysed footage); config.json names {configured}, which cannot be probed: "
+                               f"{str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from exc
+    compared: List[str] = []
+    differs: List[str] = []
     try:
-        if fps is not None and min(abs(float(info.rate) - float(fps)), abs(float(info.rate) - 2 * float(fps))) > 1e-3 * max(float(fps), 1.0):  # (r_frame_rate may be twice avg_frame_rate)
-            differs.append(f"frame rate {float(info.rate):g} fps, analysed at {float(fps):g}")
-        if seconds is not None and abs(info.duration_frames / float(info.rate) - float(seconds)) > 1.0 / float(info.rate) + 1e-6:
-            differs.append(f"duration {info.duration_frames / float(info.rate):.2f} s, analysed at {float(seconds):.2f}")
-        if probe.get("width") is not None and probe.get("height") is not None and (info.width, info.height) != (int(probe["width"]), int(probe["height"])):
-            differs.append(f"size {info.width}x{info.height}, analysed at {probe['width']}x{probe['height']}")
+        fps, seconds = probe.get("fps"), probe.get("duration")
+        if fps is not None:
+            compared.append("frame rate")
+            if abs(found.fps - float(fps)) > 1e-3 * max(float(fps), 1.0):
+                differs.append(f"frame rate {found.fps:g} fps, analysed at {float(fps):g}")
+        if seconds is not None:
+            compared.append("duration")
+            if abs(found.duration - float(seconds)) > 1.0 / max(float(fps) if fps else found.fps, 1.0) + 1e-6:
+                differs.append(f"duration {found.duration:.2f} s, analysed at {float(seconds):.2f}")
+        if probe.get("width") is not None and probe.get("height") is not None:
+            compared.append("size")
+            if (found.width, found.height) != (int(probe["width"]), int(probe["height"])):
+                differs.append(f"size {found.width}x{found.height}, analysed at {probe['width']}x{probe['height']}")
     except (TypeError, ValueError, ZeroDivisionError):
         differs.append("probe.json is not readable")
     if differs:
         raise InterchangeError(f"source footage not found: {probed} (the analysed footage); config.json names {configured}, which is not the same footage: " + "; ".join(differs))
-    return info, [f"the analysed footage {probed} is missing; using {configured}, which has its frame rate, duration and size"]
+    info = source_info(str(configured))
+    what = ("has its " + ", ".join(compared[:-1]) + (" and " if len(compared) > 1 else "") + compared[-1]) if compared else "could not be compared (probe.json records no frame rate, duration or size)"
+    return info, [f"the analysed footage {probed} is missing; using {configured}, which {what}"]
 
 
 def _music(cfg: PipelineConfig) -> Tuple[Optional[MusicConfig], Optional[SourceInfo]]:
