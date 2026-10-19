@@ -27,7 +27,7 @@ from typing import Any, List, Optional, Sequence, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from matchcut.pipeline.config import PipelineConfig  # noqa: E402
-from matchcut.review.controller import ReviewController  # noqa: E402
+from matchcut.review.controller import _SEEK_MARGIN, ReviewController  # noqa: E402
 from matchcut.review.items import ReviewItem, prepare_review  # noqa: E402
 from matchcut.review.mpv import MpvError, MpvSession  # noqa: E402
 from matchcut.review.window import ReviewError  # noqa: E402
@@ -157,7 +157,7 @@ def _play_once(cfg: PipelineConfig, pair: Any, frames_dir: Path, a_seconds: floa
             raise ReviewError("toggle did nothing")
         cap.status_b = controller.status
         cap.b_pos = float(session[0].get("time-pos"))
-        target = min(max(pair.b.cut + (cap.a_pos - pair.a.cut), 0), max(pair.b.duration - 0.05, 0))
+        target = min(max(pair.b.cut + (cap.a_pos - pair.a.cut), 0), max(pair.b.duration - _SEEK_MARGIN, 0))
         cap.target = target
         time.sleep(max(0.3, pair.b.duration - cap.b_pos - 0.15))  # to the end of B's window, short of the loop restart
         fps = float(session[0].get("container-fps") or 24)

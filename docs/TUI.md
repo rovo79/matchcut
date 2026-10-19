@@ -96,8 +96,8 @@ through an mpv EDL (exact source ranges, nothing rendered, instant). A window
 with a transition, a fade or music, or any window when `review.always_render`
 is set, is rendered by a short ffmpeg run at the source resolution (`review.width`
 0, the default; a non-zero width scales it) so that the
-transition, fades and music are exactly what ffmpeg makes, and so that a rendered
-window has the same pixel size as an EDL window; loudness
+transition, fades and music are exactly what ffmpeg makes, and so that for square-pixel sources a rendered
+window has the same size and aspect as an EDL window (an anamorphic source renders squashed, as `final.mp4` does); loudness
 normalisation and ducking run on the excerpt. Files go to `workspace/review/`
 (`<stage>_s<out>-s<in>_<key>.edl` or `.mp4`); the key is a hash of what the
 window depends on, so a repeat is instant and an edit to the cut or the config
@@ -115,7 +115,7 @@ plus the IPC socket, and nothing else is switched off, so your own `mpv.conf`,
 key bindings, scripts and OSC are honoured (a script that changes seeking or
 looping can change what you see). One exception, set over IPC after the first
 file has loaded: `auto-window-resize=no`, so the window keeps its size when you
-toggle between items (mpv would otherwise resize it to each file's video size;
+toggle between items (mpv would otherwise resize it to each file's video size; mpv documents the option for Wayland, Win32 and X11 only, and on a video output where it has no effect, only the default `review.width` 0 keeps the size, so a non-zero width or an old `640` config can still resize there;
 an older mpv without the option just ignores the request, and it overrides the
 same option in your `mpv.conf`). Every item is opened *at* its target position
 (`start` is set before the load and reset after it), so a toggle never flashes

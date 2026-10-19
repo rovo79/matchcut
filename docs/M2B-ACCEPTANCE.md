@@ -27,9 +27,9 @@ without it.
 | Module | What it proves |
 |---|---|
 | `tests/review/test_window.py` | The window around a junction (pre/post, clamping at 0 and at the end, a dissolve pulling the neighbouring clip in), the sub-timeline and its fades, when a window needs a render (a transition, a fade, music), the EDL text and its escaping, that an EDL is refused for a window that needs a render, a window reaching into the fade-out needing a render, and a zero `pre_seconds` window. |
-| `tests/review/test_items.py` | `prepare_review`: a hard-cut junction is an EDL and runs no ffmpeg; a dissolve is rendered and blends mid-transition; audio is present only when the source has it; the file name is a content key, an identical second call is a cache hit and a changed window, config, source or kind gives a new file (a sub-frame edit gives a new EDL); A is the baseline stage's hard cut and B the refined dissolve; a rendered window has the source's pixel size by default (320x180, `review.width` 0) and a non-zero width scales it; the A/B concat file; one-line errors that leave no media behind; the music offset; a rendered window cut on the frame-snapped timeline (an EDL on the unsnapped one); no music fade-out in a window that stops mid-cut (RMS of the last half second within 20 % of the middle, measured 0.999) and a fade where the window reaches the end of the cut (0.093); old files in `review/.tmp` swept. |
+| `tests/review/test_items.py` | `prepare_review`: a hard-cut junction is an EDL and runs no ffmpeg; a dissolve is rendered and blends mid-transition; audio is present only when the source has it; the file name is a content key, an identical second call is a cache hit and a changed window, config, source or kind gives a new file (a sub-frame edit gives a new EDL); A is the baseline stage's hard cut and B the refined dissolve; a rendered window has the source's size by default (320x180, `review.width` 0; square-pixel sources) and a non-zero width scales it; the A/B concat file; one-line errors that leave no media behind; the music offset; a rendered window cut on the frame-snapped timeline (an EDL on the unsnapped one); no music fade-out in a window that stops mid-cut (RMS of the last half second within 20 % of the middle, measured 0.999) and a fade where the window reaches the end of the cut (0.093); old files in `review/.tmp` swept. |
 | `tests/review/test_mpv.py` | The JSON IPC client against a real headless mpv: an EDL window loads with its chapters, `loop-file` wraps the window, a missing file or an unknown property raises, an idle session survives and answers after the command timeout, a late reply is dropped, `close` never hangs and removes the socket directory, a missing binary raises `MpvError`; the session args (`--hr-seek=yes`, `--no-resume-playback`); the second chapter at the cut; mpv exiting when the app is killed (Linux) and surviving the worker thread that started it. |
-| `tests/review/test_controller.py` | The controller's command order (open at the target, loop, unpause, label), no frame from before the target's frame after a toggle (real mpv, `--vo=image`, sources whose frames draw their own number as black and white blocks, so the check is exact: B opens on frame 83 and none earlier is written), `auto-window-resize` set to `no` exactly once per session right after the first load (fake session; a real headless mpv reads it back) and an mpv without the option tolerated, A to B to A at cut+0.3 landing within one frame on both with the same `width` and `height` (real mpv, held paused), A/B toggling that keeps the offset from the cut (real mpv, headless), a toggle when the position cannot be read, a dead mpv restarted once, the status strings, the system-opener fallback without mpv (and the refusal of an EDL item there), the session surviving pause and silence with no second mpv spawned, mpv closed by the controller, `s` after the window was closed, the retry of a failed mpv start (fake clock), and the `python -m matchcut.review` CLI (Enter after closing the window replays; a malformed workspace prints one line). |
+| `tests/review/test_controller.py` | The controller's command order (open at the target, loop, unpause, label), no frame from before the target's frame after a toggle (real mpv, `--vo=image`, sources whose frames draw their own number as black and white blocks, so the check is exact: B opens on frame 83 and none earlier is written), `auto-window-resize` set to `no` exactly once per session right after the first load (fake session; a real headless mpv reads it back) and an mpv without the option tolerated, A to B to A at cut+0.3 landing within one frame on both at the same offset from each cut (within half a frame) with the same display size, `dwidth` and `dheight` (real mpv, held paused), A/B toggling that keeps the offset from the cut (real mpv, headless), a toggle when the position cannot be read, a dead mpv restarted once, the status strings, the system-opener fallback without mpv (and the refusal of an EDL item there), the session surviving pause and silence with no second mpv spawned, mpv closed by the controller, `s` after the window was closed, the retry of a failed mpv start (fake clock), and the `python -m matchcut.review` CLI (Enter after closing the window replays; a malformed workspace prints one line). |
 | `tests/tui/test_review_ui.py` | `p`, `a` and `s` in the Edit view; the `#review-status` line and the idle hint naming the baseline stage; preparation in a thread worker that leaves the keys responsive; a second request for the same item ignored; a result for a junction no longer selected not overwriting the selected junction's status; errors shown without stopping the app; the rendered fallback without mpv; the controller closed on exit; the `s` key labelled Pause; and one test with a real headless mpv. |
 
 Measured A/B toggle accuracy (real mpv, headless, 25 fps footage): after toggling
@@ -38,8 +38,7 @@ Measured window size (mpv 0.37 with a real X11 window under Xvfb, `--vo=x11`, 32
 source, one run per setting): with the renders scaled to 160 px (`review.width=160`) and
 `auto-window-resize` left alone the window went 320x180 -> 160x90 -> 320x180 over A -> B -> A;
 with the setting it stayed 320x180 in all three; with the default `review.width` of 0 it
-stayed 320x180 either way. This is a software X server, not a desktop: how a real window
-manager treats the size is still part of the pending checklist.
+stayed 320x180 either way. This used `--vo=x11`. mpv documents `auto-window-resize` for Wayland, Win32 and X11 only: with the controller's real arguments (no `--vo`) mpv 0.37 under Xvfb picked `vo=sdl` and resized 320x180 -> 160x90 with `review.width=160` despite the setting. So on other video outputs and platforms only the default width 0 keeps the size, and a non-zero width (or an old 640 config) can still resize there. This is a software X server, not a desktop: how a real window manager (or macOS) treats the size is still part of the pending checklist.
 
 ## Demonstration
 
@@ -135,7 +134,7 @@ with the Edit tab open (`4`).
    also appears as a label in the mpv window for about 2 s after each load
    (never verified in a real window).
    The window must also keep its size (no resize) and show both items at the
-   same pixel size when you toggle (checked under Xvfb only).
+   same display size when you toggle (checked under Xvfb with `--vo=x11` only).
 2. Let a window loop at least three times in the real mpv window, with `p` and
    again after `a`, and press `a` just before and just after the wrap: no crash,
    stutter or lost position (looping was never exercised with a visible VO).
@@ -184,13 +183,17 @@ with the Edit tab open (`4`).
   instead (from the render code; not listened to). The
   excerpt is trimmed from a render of the clips around the junction, so only a
   fade at the very end of the cut, in a window that reaches the last clip, is
-  reproduced.
+  reproduced. Also, when the window's clips total less than 2 x `music.fade_out` while
+  the whole cut is longer, a window that reaches the end shows a shorter fade than
+  `final.mp4` (the fade is `min(fade_out, available / 2)` on the sub-timeline).
 - Rendered windows are at the source resolution by default (`review.width` 0), so a
   4K source renders 4K windows (slower to prepare, bigger files); set a non-zero
   `review.width` to scale them, and the A/B windows then differ in size (the
   window no longer resizes, but the scaled item is fitted into it). A `config.json`
   written by an earlier version holds `"width": 640` until changed. A user's
   `auto-window-resize` setting in `mpv.conf` is overridden by the session.
+- Shot starts come from the 8 fps analysis grid: a detected start lies on a 1/8 s step, from about one frame early to about 1.4 frames late (25 fps), so a clip can open with one frame of the previous shot; this is visible in review windows and in `final.mp4`. Full-rate refinement is a follow-up.
+- Rendered windows follow `final.mp4` for anamorphic (non-square-pixel) sources: `setsar=1` without scaling squashes them, while an EDL item plays at the display aspect, so for such sources A and B differ in aspect (pipeline follow-up: scale by `iw*sar` before `setsar=1`).
 - If starting mpv fails, the app plays through the system player and tries mpv
   again after 30 s or when `review.mpv` changes. On macOS and Windows an mpv left
   open by a killed app is not closed automatically (Linux does it).

@@ -422,7 +422,7 @@ def test_the_real_mpv_window_is_told_not_to_resize_after_the_first_load(demo_vid
 
 
 @needs_mpv
-def test_toggling_a_and_b_lands_within_a_frame_of_cut_plus_0_3_and_keeps_the_window_size(demo_video, tmp_path):
+def test_toggling_a_and_b_lands_within_a_frame_of_cut_plus_0_3_at_the_same_offset_and_keeps_the_display_size(demo_video, tmp_path):
     ws = ab_workspace(tmp_path, demo_video)
     cfg = PipelineConfig()  # the defaults: rendered windows have the source size
     cfg.review.pre_seconds = cfg.review.post_seconds = 1.0
@@ -435,18 +435,19 @@ def test_toggling_a_and_b_lands_within_a_frame_of_cut_plus_0_3_and_keeps_the_win
         c._session.set("pause", True)
         c.play_pair(pair)
         assert c.current is pair.a
-        size_a = (c._session.get("width"), c._session.get("height"))
+        size_a = (c._session.get("dwidth"), c._session.get("dheight"))  # display size (what the window shows)
         c._session.command("seek", pair.a.cut + 0.3, "absolute+exact")
         c._session.wait_restart(1.0)
         pos_a = c._session.get("time-pos")
         assert abs(pos_a - (pair.a.cut + 0.3)) <= frame
         assert c.toggle() is True and c.current is pair.b
         pos_b = c._session.get("time-pos")
-        size_b = (c._session.get("width"), c._session.get("height"))
+        size_b = (c._session.get("dwidth"), c._session.get("dheight"))
         assert abs(pos_b - (pair.b.cut + 0.3)) <= frame, (pos_b, pair.b.cut + 0.3)
+        assert abs((pos_b - pair.b.cut) - (pos_a - pair.a.cut)) < 0.5 * frame, ((pos_a - pair.a.cut), (pos_b - pair.b.cut))  # the same offset from each cut
         assert c.toggle() is True and c.current is pair.a
         pos_a2 = c._session.get("time-pos")
-        size_a2 = (c._session.get("width"), c._session.get("height"))
+        size_a2 = (c._session.get("dwidth"), c._session.get("dheight"))
         assert abs(pos_a2 - (pair.a.cut + 0.3)) <= frame, (pos_a2, pair.a.cut + 0.3)
         print(f"A {pos_a:.3f} (cut+0.3 = {pair.a.cut + 0.3:.3f}) -> B {pos_b:.3f} (cut+0.3 = {pair.b.cut + 0.3:.3f}) -> A {pos_a2:.3f}; sizes {size_a} {size_b} {size_a2}")
     finally:

@@ -357,7 +357,7 @@ there; a pipeline command's `--set review.pre_seconds=3` writes it):
 |---|---|---|
 | `pre_seconds` | 2.0 | shown before the cut |
 | `post_seconds` | 2.0 | shown after the transition |
-| `width` | 0 | width of rendered windows; 0 is the source resolution, so a rendered window has the same pixel size as an EDL window (a non-zero value scales it, and then the two differ in size; a `config.json` saved by an earlier version holds `640` and keeps it until set to 0) |
+| `width` | 0 | width of rendered windows; 0 is the source resolution, so for square-pixel sources a rendered window has the same size and aspect as an EDL window (anamorphic sources render squashed, as `final.mp4` does; pipeline follow-up: scale by `iw*sar` before `setsar=1`); a non-zero value scales it, and then the two differ in size, and mpv may resize its window on a toggle on a video output where `auto-window-resize` has no effect; a `config.json` saved by an earlier version holds `640` and keeps it until set to 0) |
 | `crf` | 23 | quality of rendered windows |
 | `mpv` | `mpv` | the mpv binary |
 | `always_render` | false | render every window instead of playing hard cuts from an EDL |
@@ -398,6 +398,7 @@ request. Every call is logged to `workspace/llm_calls.jsonl` with usage.
 
 * Shot detection handles hard cuts and ignores fades to/from black; long
   dissolves between two bright shots are not split.
+* Shot starts are detected on the 8 fps analysis grid: a detected start lies on a 1/8 s step, from about one frame early to about 1.4 frames late at 25 fps, so a clip can open with one frame of the previous shot (visible in review windows and `final.mp4`). Full-rate refinement of the boundary is a follow-up.
 * The match-cut scorer is intentionally cheap. It finds compositional and
   motion rhymes; semantic matches (e.g. a bone cut to a spaceship) rely on the
   model's verdict on the side-by-side sheets, so keep `matchcut.verify_with_llm`

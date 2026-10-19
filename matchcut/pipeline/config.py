@@ -160,7 +160,7 @@ class ReviewConfig:
 
     pre_seconds: float = 2.0  # shown before the cut
     post_seconds: float = 2.0  # shown after the transition
-    width: int = 0  # width of rendered windows; 0 = the source resolution, so a rendered window matches an EDL window pixel for pixel
+    width: int = 0  # width of rendered windows; 0 = the source resolution, so a rendered window matches an EDL window in size (square-pixel sources)
     crf: int = 23  # quality of rendered windows
     mpv: str = "mpv"  # the mpv binary
     always_render: bool = False  # render every window instead of playing hard cuts from an EDL
