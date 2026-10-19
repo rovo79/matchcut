@@ -429,6 +429,14 @@ def fcpxml_stages(xml: Any) -> List[str]:
         raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
 
 
+def fcpxml_project_names(xml: Any) -> List[str]:
+    """The ``name`` of every project (one with a sequence) of the file, in file order."""
+    try:
+        return [p.get("name", "") for p in _parse(xml).iter("project") if p.find("sequence") is not None]
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
+
+
 def placement_errors(xml: Any, stage: str, rows: Sequence[LaidClip], rate: Fraction) -> List[str]:
     """Where matchcut's own FCPXML puts the clips and transitions on the spine against the layout: the sequence's duration and start, each
     clip's ``offset`` (its cut) and each transition's ``offset`` and ``duration``.  An editor places clips by these."""

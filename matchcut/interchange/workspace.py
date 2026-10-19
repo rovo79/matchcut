@@ -36,7 +36,7 @@ from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, cli
 from . import InterchangeError, fidelity, resolve
 from .common import LaidClip, SourceInfo, clip_key, export_timeline, is_drop_rate, junction_ids, layout, plain, source_info, truncate
 from .edl import export_edl, import_edl, placement_errors as edl_placement, stage_fingerprint as edl_fingerprint
-from .fcpxml import export_fcpxml, fcpxml_stages, import_fcpxml, placement_errors as fcpxml_placement, stage_fingerprint as fcpxml_fingerprint
+from .fcpxml import export_fcpxml, fcpxml_project_names, fcpxml_stages, import_fcpxml, placement_errors as fcpxml_placement, stage_fingerprint as fcpxml_fingerprint
 from .fidelity import FORMATS, FidelityResult
 from .otio import export_otio, import_otio, placement_errors as otio_placement, stage_fingerprint as otio_fingerprint
 from .provenance import write_provenance
@@ -80,17 +80,55 @@ def _bounds(ws: Path) -> Optional[Dict[int, Tuple[float, float]]]:
         return None
 
 
-def _source(ws: Path, cfg: PipelineConfig) -> SourceInfo:
-    """The source footage: the configured file, else the one the workspace was probed from."""
-    probed = None
+def _same_file(a: str, b: str) -> bool:
     try:
-        probed = json.loads((ws / "probe.json").read_text()).get("path")
-    except (OSError, ValueError, AttributeError):
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def _source(ws: Path, cfg: PipelineConfig) -> Tuple[SourceInfo, List[str]]:
+    """The source footage and the notes about choosing it.
+
+    The media the workspace's stage timelines were made from wins: ``probe.json``'s path when that is a file, even if ``config.json`` now names another
+    file (its ranges describe the probed footage; a note says so).  When the probed file is gone (the footage moved), ``config.json``'s file is used
+    only if it has the probed footage's identity (frame rate, duration within a frame, size when ``probe.json`` records it); otherwise a one-line
+    error names both.  Without ``probe.json`` the configured file is the footage.
+    """
+    probe: Dict[str, Any] = {}
+    try:
+        doc = json.loads((ws / "probe.json").read_text())
+        probe = doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
         pass
-    for candidate in (cfg.source, probed):
-        if candidate and Path(candidate).is_file():
-            return source_info(str(candidate))
-    raise InterchangeError(f"source footage not found: {cfg.source or probed or '(no source configured)'}")
+    probed, configured = probe.get("path"), cfg.source
+    if not probed:
+        if configured and Path(configured).is_file():
+            return source_info(str(configured)), []
+        raise InterchangeError(f"source footage not found: {configured or '(no source configured)'}")
+    if Path(probed).is_file():
+        notes: List[str] = []
+        if configured and Path(configured).is_file() and not _same_file(configured, probed):
+            notes.append(f"config.json names {configured}, but this workspace was analysed from {probed}: exported/imported against {probed}; "
+                         f"re-run the pipeline to use {configured}")
+        return source_info(str(probed)), notes
+    if not configured or not Path(configured).is_file():
+        raise InterchangeError(f"source footage not found: {configured or probed}")
+    info = source_info(str(configured))
+    fps, seconds = probe.get("fps"), probe.get("duration")
+    differs = []
+    try:
+        if fps is not None and min(abs(float(info.rate) - float(fps)), abs(float(info.rate) - 2 * float(fps))) > 1e-3 * max(float(fps), 1.0):  # (r_frame_rate may be twice avg_frame_rate)
+            differs.append(f"frame rate {float(info.rate):g} fps, analysed at {float(fps):g}")
+        if seconds is not None and abs(info.duration_frames / float(info.rate) - float(seconds)) > 1.0 / float(info.rate) + 1e-6:
+            differs.append(f"duration {info.duration_frames / float(info.rate):.2f} s, analysed at {float(seconds):.2f}")
+        if probe.get("width") is not None and probe.get("height") is not None and (info.width, info.height) != (int(probe["width"]), int(probe["height"])):
+            differs.append(f"size {info.width}x{info.height}, analysed at {probe['width']}x{probe['height']}")
+    except (TypeError, ValueError, ZeroDivisionError):
+        differs.append("probe.json is not readable")
+    if differs:
+        raise InterchangeError(f"source footage not found: {probed} (the analysed footage); config.json names {configured}, which is not the same footage: " + "; ".join(differs))
+    return info, [f"the analysed footage {probed} is missing; using {configured}, which has its frame rate, duration and size"]
 
 
 def _music(cfg: PipelineConfig) -> Tuple[Optional[MusicConfig], Optional[SourceInfo]]:
@@ -303,11 +341,10 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
             raise InterchangeError("the human stage is an import result, not a canonical stage: export one of the stages it was imported against")
         if s not in by_stage:
             raise InterchangeError(f"cannot read stage {s} ({stage_files[s]})" if s in stage_files and stage_files[s].exists() else f"no stage {s} in {ws}")
-    src = _source(ws, cfg)
+    src, notes = _source(ws, cfg)
     bounds = _bounds(ws)
     music, music_src = _music(cfg)
     out = Path(out_dir) if out_dir else ws / "exports"
-    notes: List[str] = []
     if bounds is None:
         notes.append("no shots.json: clips were snapped to the frame grid without shot bounds")
     if music is not None and music.only:
@@ -731,13 +768,13 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
             raise InterchangeError("the human stage is an import result: name one of the stages it is compared with")
         if stage not in names:
             raise InterchangeError(f"no stage {stage} in {ws}")
-    src = _source(ws, cfg)
+    src, notes = _source(ws, cfg)
     bounds = _bounds(ws)
-    notes: List[str] = []
     if bounds is None:
         notes.append("no shots.json: clips without a shot could not be placed by their source range")
     # read the file
     claimed = ""
+    only_project: Optional[Tuple[str, str]] = None  # FCPXML with a single project: (its stage as the reader names it, its name)
     fingerprint = ""  # the sha256 of the stage file the editor's file was exported from, when it says
     if fmt == "fcpxml":
         keys = fcpxml_stages(text)
@@ -745,10 +782,13 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         pick = stage  # when the file has no such project the reader says so
         if pick is None and known:
             pick = "final" if "final" in known else known[-1]
+        if len(keys) == 1:
+            pick = None  # the only project is read whatever it is called: --stage (or detection) only picks the stage it is compared with
+            only_project = (keys[0], fcpxml_project_names(text)[0])
         if len(keys) > 1:
             notes.append(f"the file has projects for {', '.join(keys)}; read the {pick or keys[0]} one" + ("" if stage else " (--stage reads another)"))
         edited, inotes = import_fcpxml(text, pick, bounds, src)
-        claimed = pick if pick in names else ""
+        claimed = (pick or keys[0]) if (pick or keys[0]) in names else ""
         fingerprint = fcpxml_fingerprint(text, pick)
     elif fmt == "otio":
         try:
@@ -778,6 +818,8 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         notes.append("the file does not say which stage it was exported from; compared with the final stage")
     else:
         raise InterchangeError(f"no stage final in {ws}: name the stage the file was exported from (--stage)")
+    if only_project is not None and only_project[0] not in names and only_project[0] != chosen:
+        notes.append(f"the file's only project is named {only_project[1]}; compared with {chosen}")
     canon = dict(canonical)[chosen]
     latest_name, latest = canonical[-1]
     stage_files = dict(stage_timeline_paths(ws))

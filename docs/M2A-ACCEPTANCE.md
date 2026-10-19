@@ -338,17 +338,20 @@ Human-stage integrity (the rulings of this wave):
 - **A key on other footage.** A known clip key is trusted only while the edited range still overlaps the shot of the canonical clip. A key (with its shot metadata) carried onto the footage of
   another shot is a new clip (`clip key ... now covers shot 7 (12.20-13.00s), not shot 3: read as a new clip (h001), ...`, its shot taken from the range) and the canonical clip reads as removed;
   a slip anywhere inside the same shot is still a trim. Without `shots.json` the key is trusted and the import says it could not check. Tests: OTIO, FCPXML and EDL, both cases, and the no-`shots.json` note.
+- **Source footage and renamed projects (review of PR #3).** The footage the workspace was analysed from (`probe.json`) wins over a `source` the Config view changed, with a note; a moved
+  file is replaced only by one with the same frame rate, duration and size, else one line naming both. An FCPXML with a single project is read whatever the project is called; `--stage` only picks the comparison stage.
+  Tests: `test_workspace.py` (different existing footage, moved footage with a matching and a non-matching replacement, a renamed single project with and without metadata and with and without `--stage`, a multi-project file still selecting by name).
 - **Valid provenance is preserved.** Everything that maps unambiguously keeps its id, key and history; canonical files and `provenance.json` stay byte-identical after an import
   (the existing tests, and the hash comparison in the 84-edit proof).
 
 Verification at the stabilization commit: `python -m pytest tests/interchange tests/pipeline tests/tui tests/review -q`, run per directory:
-interchange 425 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
-`test_timecode` 9, `test_workspace` 122), pipeline 195, tui 148, review 87: 855 passed, 0 failed (the two known load-flaky TUI tests passed; the optional OpenTimelineIO and
+interchange 432 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
+`test_timecode` 9, `test_workspace` 129), pipeline 195, tui 148, review 87: 862 passed, 0 failed (the two known load-flaky TUI tests passed; the optional OpenTimelineIO and
 `xmllint` checks ran). The new pin, inherited-decision and ambiguity tests are in `tests/pipeline/test_editorial.py`, `tests/pipeline/test_junctions.py`, `tests/interchange/test_workspace.py` and `tests/tui/test_edit.py`.
 
 The tester's 84-edit proof was re-run against this commit with the tester's own `scripts/editor.py`: fresh workspaces made with the report's commands (a25 at 25 fps, b2398 at 23.976 fps
 with music, c2997 at 29.97 fps drop-frame with a start timecode), 14 edit sets, six files each (OTIO, FCPXML, EDL, with matchcut's metadata kept and stripped): 84 imports, all exit 0, the
-header, every decision line and the note count equal to what the tester recorded (the control sets give 0 decisions), and every canonical file (stage and pass files, analysis,
+header, every decision line and the note count equal to what the tester recorded (the control sets give 0 decisions; the stripped, renamed FCPXML files now add one note, `the file's only project is named matchcut edit (FCP); compared with final`, and nothing else differs), and every canonical file (stage and pass files, analysis,
 `exports/` with `provenance.json`, `fidelity.*` and `.stages/`) byte-identical before and after every import.
 
 Limits that remain: without `shots.json` a known key is trusted whatever its range (the import says so); the pin check compares source times, not what an editor shows after a transition trim; a shot-based pin (no clip instances) is

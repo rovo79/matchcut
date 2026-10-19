@@ -230,7 +230,9 @@ the start is on the grid, and the EDL carries no music.
 
 `import WORKSPACE FILE` reads an OTIO, FCPXML or EDL file (the format from the extension,
 or `--format`; a Final Cut Pro `.fcpxmld` bundle, which is a directory, is read through the `Info.fcpxml` inside it). The stage it was exported from is read from the file (OTIO timeline metadata
-or name, FCPXML project, EDL title) or given with `--stage`, else `final`. Clips are matched
+or name, FCPXML project, EDL title) or given with `--stage`, else `final`. An FCPXML with exactly one project is read whatever the project is called (an editor may
+rename it, and drop the metadata that names the stage); `--stage` or detection then only chooses the stage it is compared with, and a note says so (`the file's only project is named My Edit; compared with final`).
+Projects are selected by name only in a file with several. Clips are matched
 back to matchcut's clips by clip key, then by name, then by source range; arbitrary rational time bases and
 renumbered ids are accepted. Anything it cannot map (other media, gaps, extra video tracks,
 audio-only items, speed changes, effects, nested items) is listed in the **import report**
@@ -239,6 +241,12 @@ listed (`clip <name>: source range duration is -20 frames (not positive), ignore
 so `human.json` never holds a clip whose source out is not after its in; the clip then reads as `removed`. An EDL event shorter than its transitions stops the
 import with one line (`invalid EDL: event 001 is shorter than its transitions`).
 
+- **Which file is the workspace's footage** (export and import alike): the one the stage timelines were made from, `probe.json`'s path, when that is a file. If
+  `config.json` (the Config view edits `source`) now names a different existing file, the stages still describe the probed one, so it is used and a note says so:
+  `config.json names <X>, but this workspace was analysed from <Y>: exported/imported against <Y>; re-run the pipeline to use <X>` (printed by `export` and `import`,
+  and kept in `human_import.json`). When the probed file is gone (the footage moved), the configured file is used only if it is the same footage by `probe.json`'s
+  record (frame rate, duration within a frame, width and height), with a note; otherwise the command stops with one line naming both files and what differs.
+  Without a `probe.json` the configured file is the footage.
 - **The source footage** is the workspace's: a clip is the footage when its media path is the footage's exact path (symbolic links resolved); only when no
   clip has the exact path are clips with the same file name taken for it, and the report says so (camera names such as `C0001.MP4` repeat across cards, so
   a name never outvotes an exact path). A clip whose media is a generator, an offline or missing reference, or none (OTIO) is not footage: it is listed

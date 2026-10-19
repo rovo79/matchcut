@@ -1834,6 +1834,105 @@ def stripped_files(wsx) -> dict:
     return {"otio": wsx.tmp / "s.otio", "fcpxml": wsx.tmp / "s.fcpxml", "edl": wsx.tmp / "s.edl"}
 
 
+def renamed_single_project(wsx, strip: bool, name: str = "My Rough Edit") -> Path:
+    """The final stage as matchcut.fcpxml with one project, which the editor renamed (and, with ``strip``, whose matchcut metadata the application dropped)."""
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("fcpxml",))
+    root = ET.fromstring((wsx.ws / "exports" / "matchcut.fcpxml").read_text())
+    for el in root.iter():
+        if strip:
+            for md in el.findall("metadata"):
+                el.remove(md)
+        if el.tag == "project":
+            el.set("name", name)
+    path = wsx.tmp / ("renamed_stripped.fcpxml" if strip else "renamed.fcpxml")
+    path.write_text(ET.tostring(root, encoding="unicode"))
+    return path
+
+
+@pytest.mark.parametrize("strip", [False, True])
+@pytest.mark.parametrize("stage", [None, "final"])
+def test_a_renamed_single_project_fcpxml_is_read_whatever_it_is_called(wsx, strip, stage):
+    """Codex finding: an editor renamed the only project; --stage final asked for a project named final and refused the file."""
+    path = renamed_single_project(wsx, strip)
+    res = import_timeline(wsx.ws, wsx.cfg, path, stage=stage)
+    assert res.stage == "final" and res.decisions == [], [d.detail for d in res.decisions]
+    note = "the file's only project is named My Rough Edit; compared with final"
+    assert (note in res.notes) is strip, res.notes  # with the stage md key the file still says "final"; without it the name differs
+    assert not any(n.startswith("no project for stage") for n in res.notes)
+
+
+def test_a_renamed_single_project_is_compared_with_the_stage_asked_for_and_a_multi_project_file_still_selects_by_name(wsx):
+    path = renamed_single_project(wsx, True)
+    res = import_timeline(wsx.ws, wsx.cfg, path, stage="roughcut")
+    assert res.stage == "roughcut" and "the file's only project is named My Rough Edit; compared with roughcut" in res.notes
+    export_workspace(wsx.ws, wsx.cfg, stages=("roughcut", "final"), formats=("fcpxml",))
+    root = ET.fromstring((wsx.ws / "exports" / "matchcut.fcpxml").read_text())
+    for el in root.iter():
+        for md in el.findall("metadata"):
+            el.remove(md)
+    two = wsx.tmp / "two.fcpxml"
+    two.write_text(ET.tostring(root, encoding="unicode"))
+    res = import_timeline(wsx.ws, wsx.cfg, two, stage="final")
+    assert res.stage == "final" and res.decisions == [] and any("the file has projects for roughcut, final; read the final one" in n for n in res.notes)
+    assert import_timeline(wsx.ws, wsx.cfg, two, stage="roughcut").stage == "roughcut"
+    with pytest.raises(InterchangeError, match=r"^no project for stage 'polish' \(the file has: "):
+        import_timeline(wsx.ws, wsx.cfg, two, stage="polish")
+
+
+def other_footage_cfg(wsx, path):
+    cfg = copy.deepcopy(wsx.cfg)
+    cfg.source = str(path)
+    return cfg
+
+
+def test_the_footage_the_workspace_was_analysed_from_wins_over_a_changed_config(wsx, tc_footage, capsys):
+    """Codex finding: config.json now names another file; the stage ranges still describe the probed one."""
+    from matchcut.pipeline import cli
+
+    probed = json.loads((wsx.ws / "probe.json").read_text())["path"]
+    cfg = other_footage_cfg(wsx, tc_footage)
+    note = f"config.json names {tc_footage}, but this workspace was analysed from {probed}: exported/imported against {probed}; re-run the pipeline to use {tc_footage}"
+    res = export_workspace(wsx.ws, cfg, stages=("final",), formats=("otio",))
+    assert note in res.notes
+    doc = json.loads((wsx.ws / "exports" / "final.otio").read_text())
+    assert doc["metadata"]["matchcut"]["source"] == str(Path(probed).resolve()) and tc_footage.name not in json.dumps(doc)
+    assert doc["metadata"]["matchcut"]["rate"] == [25, 1] and doc["tracks"]["children"][0]["children"][0]["media_references"]["DEFAULT_MEDIA"]["target_url"].endswith(Path(probed).name)
+    imp = import_timeline(wsx.ws, cfg, wsx.ws / "exports" / "final.otio")
+    assert note in imp.notes and imp.decisions == []
+    assert note in json.loads((wsx.ws / "human_import.json").read_text())["notes"]
+    # the CLI prints it (its config is the workspace's: point that at the other file too)
+    conf = json.loads((wsx.ws / "config.json").read_text())
+    conf["source"] = str(tc_footage)
+    (wsx.ws / "config.json").write_text(json.dumps(conf))
+    assert cli.main(["export", str(wsx.ws), "--stage", "final", "--format", "edl"]) == 0
+    assert f"note: {note}" in capsys.readouterr().out.splitlines()
+    # the same file under its other name is no change
+    assert not any("config.json names" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)
+
+
+def test_moved_footage_is_replaced_only_by_a_file_with_its_identity(wsx, tc_footage):
+    probe = json.loads((wsx.ws / "probe.json").read_text())
+    original = Path(probe["path"])
+    copy_of = wsx.tmp / "moved" / original.name
+    copy_of.parent.mkdir()
+    shutil.copy(original, copy_of)
+    probe["path"] = str(wsx.tmp / "gone" / original.name)  # the footage moved: the probed path is not a file any more
+    (wsx.ws / "probe.json").write_text(json.dumps(probe))
+    res = export_workspace(wsx.ws, other_footage_cfg(wsx, copy_of), stages=("final",), formats=("otio",))
+    assert f"the analysed footage {probe['path']} is missing; using {copy_of}, which has its frame rate, duration and size" in res.notes
+    assert json.loads((wsx.ws / "exports" / "final.otio").read_text())["metadata"]["matchcut"]["source"] == str(copy_of.resolve())
+    with pytest.raises(InterchangeError) as exc:  # other footage (160x90, 3 s)
+        export_workspace(wsx.ws, other_footage_cfg(wsx, tc_footage), stages=("final",), formats=("otio",))
+    msg = str(exc.value)
+    assert "\n" not in msg and probe["path"] in msg and str(tc_footage) in msg and "is not the same footage" in msg and "duration" in msg and "size" in msg, msg
+    with pytest.raises(InterchangeError, match="source footage not found"):
+        import_timeline(wsx.ws, other_footage_cfg(wsx, tc_footage), wsx.ws / "exports" / "final.otio")
+    # nothing to fall back on
+    cfg = other_footage_cfg(wsx, wsx.tmp / "nothing.mp4")
+    with pytest.raises(InterchangeError, match=r"^source footage not found: .*nothing\.mp4$"):
+        export_workspace(wsx.ws, cfg, stages=("final",), formats=("otio",))
+
+
 def test_an_untouched_dip_to_black_reads_back_the_same_without_matchcut_metadata_except_in_an_edl(wsx):
     """Final review M1: OTIO recognises a Custom_Transition called a dip like FCPXML does; an EDL cannot say it (documented)."""
     tl = dip_workspace(wsx)
@@ -1860,7 +1959,7 @@ def test_the_edl_report_says_drop_frame_for_drop_frame_media_and_non_drop_otherw
     assert EDL_NON_DROP in res.results[0].approximated and EDL_DROP_FRAME not in res.results[0].approximated
     src = wsx.world.src
     df = replace(src, rate=Fraction(30000, 1001), duration_frames=int(src.seconds * 29.97), start_tc_frames=107892, start_tc_drop=True)
-    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: df)
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: (df, []))
     res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio", "edl"), out_dir=wsx.tmp / "df")
     by_fmt = {r.fmt: r for r in res.results}
     assert "FCM: DROP FRAME" in (wsx.tmp / "df" / "final.edl").read_text()
@@ -1966,7 +2065,7 @@ def test_export_notes_a_frame_rate_the_pipeline_did_not_use(wsx, monkeypatch):
 
     assert not any("frame rate" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)
     wide = replace(wsx.world.src, rate=Fraction(50), duration_frames=int(wsx.world.src.seconds * 50))
-    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: wide)
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: (wide, []))
     res = export_workspace(wsx.ws, wsx.cfg, formats=("edl",), out_dir=wsx.tmp / "wide")
     (note,) = [n for n in res.notes if "frame rate" in n]  # one line for both stages
     assert note.startswith("frame rate: ffprobe reports 50 fps (r_frame_rate) but the pipeline cut at 25 fps (avg_frame_rate): the exports are written at 50 fps")
@@ -1975,5 +2074,5 @@ def test_export_notes_a_frame_rate_the_pipeline_did_not_use(wsx, monkeypatch):
     doc = json.loads((wsx.ws / "final.json").read_text())
     doc["fps"] = 23.976
     (wsx.ws / "final.json").write_text(json.dumps(doc))
-    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: replace(wsx.world.src, rate=Fraction(24000, 1001)))
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: (replace(wsx.world.src, rate=Fraction(24000, 1001)), []))
     assert not any("frame rate" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",), out_dir=wsx.tmp / "ntsc").notes)
