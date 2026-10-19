@@ -29,17 +29,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def build_config(args: argparse.Namespace) -> PipelineConfig:
+    from_file = True
     if args.config:
         cfg = PipelineConfig.load(Path(args.config))
     elif args.workspace and (Path(args.workspace) / "config.json").exists():
         cfg = PipelineConfig.load(Path(args.workspace) / "config.json")
     else:
-        cfg = PipelineConfig()
+        cfg, from_file = PipelineConfig(), False
     if args.source:
         cfg.source = args.source
     if not cfg.source:
         raise SystemExit("give a footage file, or a --workspace that already holds a config.json")
-    cfg.workspace = args.workspace or cfg.workspace or f"{Path(cfg.source).with_suffix('')}_edit"
+    # without a config file, PipelineConfig's own default ("workspace") would make every footage file share one cache
+    derived = f"{Path(cfg.source).with_suffix('')}_edit"
+    cfg.workspace = args.workspace or (cfg.workspace if from_file else "") or derived
     if args.brief:
         cfg.brief = args.brief
     if args.target_duration is not None:

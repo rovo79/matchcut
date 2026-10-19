@@ -163,6 +163,10 @@ class ConfigView(Vertical):
         if event.node.data is None or self._state is None:
             return
         section, field = event.node.data
+        if (section, field) == (None, "workspace"):
+            # every view, pin and review reads the workspace the app was started on: changing it mid-session would split them
+            self.app.notify("workspace is fixed for this session: restart with --workspace to use another", severity="warning")
+            return
         self._editing = (section, field)
         current = _get_value(self._state.config, section, field)
         edit = self.query_one("#config-edit", Input)

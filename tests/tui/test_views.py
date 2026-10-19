@@ -397,6 +397,30 @@ async def _config(mock_workspace):
         assert cfg.target_duration == 12.5
 
 
+def test_config_view_does_not_edit_the_workspace_of_a_running_session(mock_workspace):
+    run_async(_workspace_is_fixed(mock_workspace))
+
+
+async def _workspace_is_fixed(mock_workspace):
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    before = cfg.workspace
+    app = MatchcutApp(cfg)
+    notes = []
+    app.notify = lambda message, **kw: notes.append(message)
+    async with app.run_test(size=(120, 40)) as pilot:
+        await pilot.press("5")
+        await pilot.pause()
+        view = app.query_one(ConfigView)
+        tree = view.query_one("#config-tree")
+        node = next(n for n in tree.root.children if str(n.label).startswith("workspace"))
+        tree.select_node(node)
+        tree.action_select_cursor()
+        await pilot.pause()
+        assert view.query_one("#config-edit").display is False  # no editor opens
+        assert cfg.workspace == before and str(app.state.workspace) == str(before)
+        assert any("--workspace" in n for n in notes)
+
+
 def test_config_view_rejects_bad_values_with_a_notification(mock_workspace):
     run_async(_config_bad_value(mock_workspace))
 

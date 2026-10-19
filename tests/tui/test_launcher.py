@@ -36,6 +36,20 @@ def test_build_config_applies_flags_and_set_overrides(tmp_path):
     assert cfg.render.enabled is False and cfg.seed == 7
 
 
+def test_build_config_derives_the_workspace_from_the_source_without_a_config():
+    # PipelineConfig's own default ("workspace") must not win: two footage files would share one cache
+    assert build_config(parse_args(["shoot/a.mp4"])).workspace == "shoot/a_edit"
+    assert build_config(parse_args(["shoot/b.mp4"])).workspace == "shoot/b_edit"
+
+
+def test_build_config_keeps_the_workspace_a_config_file_names(tmp_path):
+    from matchcut.pipeline.config import PipelineConfig
+    path = tmp_path / "cfg.json"
+    PipelineConfig(source="x.mp4", workspace=str(tmp_path / "chosen")).save(path)
+    assert build_config(parse_args(["--config", str(path)])).workspace == str(tmp_path / "chosen")
+    assert build_config(parse_args(["--config", str(path), "-w", str(tmp_path / "flag")])).workspace == str(tmp_path / "flag")
+
+
 def test_build_config_needs_a_source():
     with pytest.raises(SystemExit):
         build_config(parse_args([]))

@@ -37,6 +37,21 @@ def test_full_run_with_mock_backend(demo_video, tmp_path):
     assert pipe2.llm.calls == 1  # only the polish pass (not cached) hits the backend
 
 
+def test_a_shorter_pass_list_leaves_no_snapshots_of_the_old_passes(demo_video, tmp_path):
+    from matchcut.pipeline.junctions import stage_timeline_paths
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    Pipeline(cfg).run()
+    ws = tmp_path / "ws"
+    assert len(list((ws / "passes").glob("*.json"))) == 6
+    cfg2 = PipelineConfig.load(ws / "config.json")
+    cfg2.passes = (cfg2.passes[0],)
+    Pipeline(cfg2).refine()
+    assert [p.name for p in (ws / "passes").glob("*.json")] == [f"01_{cfg2.passes[0]}.json"]
+    assert [s for s, _ in stage_timeline_paths(ws)] == ["roughcut", cfg2.passes[0], "final"]
+
+
 def test_cli_subcommands(demo_video, tmp_path):
     ws = str(tmp_path / "cli_ws")
     common = [str(demo_video), "-w", ws, "--backend", "mock", "-t", "6", "--no-render"]
