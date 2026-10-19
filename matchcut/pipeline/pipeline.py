@@ -316,6 +316,8 @@ class Pipeline:
         names = list(passes or self.cfg.passes)
         passes_dir = self.ws / "passes"
         passes_dir.mkdir(exist_ok=True)
+        for old in passes_dir.glob("[0-9][0-9]_*.json"):  # snapshots of an earlier pass list would read as stages of this cut
+            old.unlink()
 
         def after_pass(name: str, result: PassResult) -> CheckpointAnswer:
             return self._ask(f"pass:{name}", self.summary_for(f"pass:{name}", result))
