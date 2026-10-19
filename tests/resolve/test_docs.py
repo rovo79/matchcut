@@ -34,7 +34,7 @@ def test_the_probe_doc_lists_every_call_the_script_can_make():
 
 def test_the_probe_doc_names_the_safety_rules_the_commands_and_what_to_send():
     text = PROBE.read_text(encoding="utf-8")
-    for needle in ("Untitled Project that is empty", "matchcut-probe-<UTC time>", "folder `matchcut-probe`", "open a new, empty project (or quit and reopen Resolve)",
+    for needle in ("verifiably empty, whatever its name", "empty bins are fine", "runs the whole check again", "before every call that changes something", "matchcut-probe-<UTC time>", "folder `matchcut-probe`", "open a new, empty project (or quit and reopen Resolve)",
                    "earlier `matchcut-probe-*` project", "type `yes`", "`--yes`", "never asks and never switches", "shared or remote project database",
                    "External scripting using = Local", "Python 3.6 or later", "DaVinci Resolve Studio", "`runs/<UTC time>/`", "`exports/`",
                    "python -m matchcut.resolve probe WORKSPACE", "python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe", "--dry-run",

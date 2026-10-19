@@ -59,24 +59,32 @@ lands, and says so when no route manages that. If no route is usable, it says so
 ## Safety
 
 - **It never switches away from work of yours.** Before anything else it records the open project's name and contents,
-  with documented reads only: `Project.GetTimelineCount()`, and the media pool root folder's `GetClipList()` and
-  `GetSubFolderList()`. It continues only from:
-  - an **Untitled Project that is empty**: no timeline, no clip, no media pool folder;
-  - an **earlier `matchcut-probe-*` project**. That project is allowed as it is: if you edited it, save it first,
+  with documented reads only. It reads `Project.GetTimelineCount()`, then walks the media pool from its root folder with
+  `Folder.GetSubFolderList()` and reads `Folder.GetClipList()` in every folder. The walk goes three levels of bins deep
+  and covers at most 50 folders. It continues only from:
+  - **a project that is verifiably empty, whatever its name** (so a localised Resolve's untitled project works too). No
+    timeline, and no clip in any media pool folder; empty bins are fine;
+  - **an earlier `matchcut-probe-*` project**. That project is allowed as it is: if you edited it, save it first,
     because the probe switches away from it.
 
-  Otherwise it stops and tells you to save your work, then open a new, empty project (or quit and reopen Resolve) and
-  run it again. The README does not say what `CreateProject` does to the open project, and the API cannot tell whether
-  that project has unsaved changes. The counts are recorded in the JSON (`safety`).
-- **It asks first.** Before it switches projects it prints the open project, the new project's name and the folder,
-  and waits for you to type `yes`. Anything else, or a closed input, stops it with nothing created (exit 5). `--yes`
-  answers in advance. `--dry-run` never asks and never switches.
+  It also refuses when emptiness cannot be confirmed: a read returns nothing or fails, or the bins go deeper or number
+  more than the walk covers. Its message ends:
+  "Save your work, then open a new, empty project (or quit and reopen Resolve) and run the probe again".
+  The README does not say what `CreateProject` does to the open project, and the API cannot tell whether that project has
+  unsaved changes. The counts (timelines, clips, folders, depth) are recorded in the JSON (`safety`).
+- **It asks first, then looks again.** Before it switches projects it prints the open project, the new project's name
+  (a `-2` suffix is added if that name is taken) and the folder, and waits for you to type `yes`. Anything else, or a
+  closed input, stops it with nothing created (exit 5). `--yes` answers in advance.
+  `--dry-run` never asks and never switches.
+  Right after your answer it runs the whole check again. If the open project or its contents changed while it waited,
+  it stops with nothing created (exit 3) and says what changed.
 - **Its own project:** `matchcut-probe-<UTC time>`, in a Project Manager folder `matchcut-probe` (created if missing).
   - After `CreateProject` it checks that the new project is the open one; otherwise it stops (exit 4).
   - It sets that project's `timelineFrameRate` to the cut's rate (with ` DF` for drop-frame footage, as the README's
     notes describe).
-  - It checks again that its project is the open one before each part of the run and before `SaveProject`. If you switch
-    projects while it runs, it stops and saves nothing.
+  - From then on it checks that its project is the open one before every call that changes something: imports, timeline
+    building, markers, transitions, settings, the playhead, the page, exports and `SaveProject`. If you switch projects
+    while it runs, it stops before the next such call and saves nothing (exit 4).
   - It never deletes, renames, saves, loads or exports any other project. Running it again makes a new project.
 - **Shared databases:** on a shared or remote project database, the `matchcut-probe` folder and its projects are visible
   to everyone who uses that database. Use a local database if that matters (the JSON records which database was current).
@@ -137,7 +145,7 @@ that failed.
 - **Preferences > System > General > External scripting using = Local**, then restart Resolve.
 - **Python 3.6 or later, 64-bit** (the README's minimum), on the machine running Resolve.
 - matchcut, to make the bundle and read the result (not needed to run the script itself).
-- **An empty Untitled Project open** (for example, just after starting Resolve), with your own work saved.
+- **An empty project open** (for example the untitled project Resolve opens at start), with your own work saved.
 - The source footage at the path the bundle names (the bundle's files and `expected.json` hold its absolute path). Make the
   bundle on the machine that runs Resolve, or put the footage at the same path there.
 
@@ -151,7 +159,7 @@ python -m matchcut.resolve probe WORKSPACE --stage roughcut --out DIR
 python -m matchcut.resolve probe WORKSPACE --run           # also runs it, if Resolve's scripting module can be imported here
 ```
 
-Run the probe with Resolve Studio open and an empty Untitled Project as the open project. Try `--dry-run` first: it
+Run the probe with Resolve Studio open and an empty project as the open project. Try `--dry-run` first: it
 connects, records the environment and the safety check, and creates nothing. The real run asks before it switches
 projects; type `yes` (or pass `--yes`).
 
@@ -192,11 +200,14 @@ there.)
   it cannot find the module.
 - **A module that fails to import:** when the module file is there but fails to import, the script prints `found <path>
   but it failed to import: <error>` and records it. This usually means a Python that does not match Resolve's, or a
-  `RESOLVE_SCRIPT_LIB` that does not point at fusionscript.
+  `RESOLVE_SCRIPT_LIB` that does not point at fusionscript. The setup lines then follow as "set these if Resolve is
+  installed elsewhere".
 - **`--out FILE`** writes the JSON elsewhere; the exports still go to the run's directory.
 
-Read the result (offline, anywhere matchcut runs). Give it the bundle for its latest run (not a dry run), or a run's
-directory or `resolve_probe.json`. It writes `probe_report.md` in that run's directory:
+Read the result (offline, anywhere matchcut runs). Give it a run's directory or `resolve_probe.json`, or the bundle. Given
+the bundle, it reports the newest run that is complete or recorded timelines. Without one, it reports the newest run that
+is not a dry run (or the newest dry run), and it says which run it took and why. It writes `probe_report.md` in that
+run's directory:
 
 ```shell
 python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe
@@ -209,8 +220,8 @@ Exit codes of the script:
 |---|---|
 | 0 | done (failed steps are measurements and are recorded) |
 | 2 | the module was not found or failed to import, or Resolve did not answer |
-| 3 | refused by the safety check |
-| 4 | the probe could not make its own project, or the open project changed while it ran |
+| 3 | refused by the safety check (also when the open project changed while it waited for your answer) |
+| 4 | the probe could not make its own project, or the open project changed while it ran (it stops before the next write) |
 | 5 | not confirmed |
 | 1 | an error of the probe itself (also recorded in the JSON) |
 
@@ -251,10 +262,14 @@ catalogue documents them.
 
 - keeps everything, loses dissolves, shifts frames by 1, drops markers;
 - AddTransition not documented, `AppendToTimeline` returns `[None]`, scripting not connected;
-- a user project open, and an Untitled Project with a timeline, with a pool clip, or with a pool folder (all refused);
-- `CreateProject` does not switch, the open project changes mid-run;
+- refused: a user project with work, an untitled project with a timeline, with a pool clip, or with a clip in a nested bin;
+- refused because emptiness cannot be confirmed: the timeline count cannot be read, the root folder cannot be read, bins
+  past the depth cap, bins past the count cap;
+- allowed: an empty project with another name, empty nested bins, a project opened while the prompt waits (refused after
+  the yes);
+- `CreateProject` does not switch, the open project changes between two calls of one part;
 - `GetSourceEndFrame` inclusive, `endFrame` inclusive;
-- transition items in the track, `GetMarkerByCustomData` without a frame;
+- transition items in the track (centred, or starting at the cut), `GetMarkerByCustomData` without a frame;
 - Resolve 18.5.
 
 **What the tests check:**

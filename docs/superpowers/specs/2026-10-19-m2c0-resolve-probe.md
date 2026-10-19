@@ -36,7 +36,8 @@ fidelity differences.
   environment variables and default install paths, and says exactly what to set when it cannot (and names a module
   file that exists but fails to import). Every run writes its own `DIR/runs/<UTC time>/` (`resolve_probe.json`,
   `exports/`), so no run replaces another's (review M6).
-- `python -m matchcut.resolve report WS DIR` (the latest run) or `... report WS DIR/runs/<UTC time>/resolve_probe.json`
+- `python -m matchcut.resolve report WS DIR` (the newest run that is complete or recorded timelines, else the newest real
+  run, and it says which) or `... report WS DIR/runs/<UTC time>/resolve_probe.json`
   - prints, per route, what was preserved, approximated and lost, compared with `expected.json` and
     with the stage;
   - re-imports each OTIO/FCPXML/EDL the probe exported with M2a's `import_timeline` readers, in a
@@ -48,17 +49,20 @@ fidelity differences.
 
 - **The probe never modifies an existing user project.**
   - Before anything else it records the current project's name and contents, with documented reads:
-    `Project.GetTimelineCount()`, and the media pool root folder's `GetClipList()` and `GetSubFolderList()`.
-  - It refuses to continue unless that project is an **empty** "Untitled Project" (no timeline, no clip, no media pool
-    folder) or an earlier `matchcut-probe-*` project (allowed as it is; the docs say to save it if it was edited). The
-    message says to save your work, then open a new, empty project (or quit and reopen Resolve) and run again. The
-    README does not say what `CreateProject` does to the open project, and the API cannot tell whether it has unsaved
-    changes. The counts are recorded in `safety`.
+    `Project.GetTimelineCount()`, and `Folder.GetClipList()` in every folder of the media pool, walked from the root with
+    `Folder.GetSubFolderList()` (three levels of bins, at most 50 folders).
+  - It refuses to continue unless that project is **verifiably empty, whatever its name** (no timeline, no clip in any
+    folder; empty bins are tolerated), or an earlier `matchcut-probe-*` project (allowed as it is; the docs say to save it
+    if it was edited). A read that returns nothing or fails, or a tree past the cap, means emptiness is not confirmed:
+    refused. The message says "Save your work, then open a new, empty project (or quit and reopen Resolve) and run the
+    probe again". The README does not say what `CreateProject` does to the open project, and the API cannot tell whether
+    it has unsaved changes. The counts and the folder tree size are recorded in `safety`.
   - Before switching it prints the open project, the new project and its folder, and asks for confirmation: the user
-    types `yes`. `--yes` skips the prompt; `--dry-run` never prompts and never switches.
-  - After `CreateProject` it checks that its project is the open one, and checks again before each part of the run
-    and before `SaveProject`; otherwise it stops and saves nothing. It never calls `SaveProject` on a project it did not
-    create.
+    types `yes`. `--yes` skips the prompt; `--dry-run` never prompts and never switches. Right after the answer the whole
+    check runs again; if the open project or its counts changed, it stops (exit 3) and says why.
+  - After `CreateProject` it checks that its project is the open one, and checks again before every call that writes
+    (imports, timeline building, markers, transitions, settings, playhead, page, exports, `SaveProject`). A mismatch stops
+    the run (exit 4) and nothing is saved. It never calls `SaveProject` on a project it did not create.
 - **Its own project:** it creates a fresh project, `matchcut-probe-<UTC timestamp>`, inside a project
   manager folder `matchcut-probe`, created if missing, and leaves it there for inspection. Re-running
   creates a new project. It never deletes, renames or exports any other project. Delete the probe
