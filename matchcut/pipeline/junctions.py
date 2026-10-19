@@ -9,25 +9,72 @@ workspace's cached analysis, so the numbers shown are the numbers the pass compa
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from .config import PipelineConfig
 from .features import Analysis
 from .matching import MatchScore, MatchScorer
-from .timeline import Clip, Decision, Timeline
+from .editorial import Pin, pin_change, pin_site, pin_states
+from .timeline import HUMAN_STAGE, Clip, Decision, Timeline, clip_origin
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
 WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades", "notes")
+STALE_HINT = "(re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
 
-def stage_timeline_paths(ws: Path) -> List[Tuple[str, Path]]:
-    """(stage, path) for every place a stage timeline can live, in stage order, present or not."""
+def _canonical_paths(ws: Path) -> List[Tuple[str, Path]]:
     entries = [("roughcut", ws / "roughcut.json")]
     entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
     entries.append(("final", ws / "final.json"))
+    return entries
+
+
+def _sha256(path: Optional[Path]) -> Optional[str]:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path is not None else None
+    except OSError:
+        return None
+
+
+def stale_human(ws: Path) -> Optional[str]:
+    """The one-line reason ``human.json`` (the stage an editor's re-export was imported as) no longer fits the workspace, or None.
+
+    ``matchcut.interchange`` records, in ``human_import.json``, the sha256 of the canonical stage it compared with and of the latest
+    canonical stage whose history it continues; the human stage is stale when either file has changed since (or is gone).  A
+    ``human.json`` without a readable record is stale too.  No human.json: None.  The engine only reads these files.
+    """
+    ws = Path(ws)
+    if not (ws / "human.json").exists():
+        return None
+    try:
+        record = json.loads((ws / "human_import.json").read_text())
+        checks = [(str(record["stage"]), record["stage_sha256"])]
+        if "latest_stage" in record:
+            checks.append((str(record["latest_stage"]), record["latest_stage_sha256"]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return f"human.json is stale: human_import.json is missing or unreadable {STALE_HINT}"
+    paths = dict(_canonical_paths(ws))
+    for stage, want in checks:
+        path = paths.get(stage)
+        if path is None or _sha256(path) != want:
+            return f"human.json is stale: {path.name if path is not None else stage + '.json'} changed since the import {STALE_HINT}"
+    return None
+
+
+def stage_timeline_paths(ws: Path) -> List[Tuple[str, Path]]:
+    """(stage, path) for every place a stage timeline can live, in stage order, present or not.
+
+    ``human`` is last: the cut an editor's re-export came back as (``matchcut.interchange`` writes ``human.json``; the engine never does).
+    A stale ``human.json`` (``stale_human``) is left out, so it is never the latest stage; it is not deleted.
+    """
+    entries = _canonical_paths(ws)
+    if stale_human(ws) is None:
+        entries.append((HUMAN_STAGE, ws / "human.json"))
     return entries
 
 
@@ -120,6 +167,9 @@ class Junction:
     decisions: List[Decision] = field(default_factory=list)  # stage order: decisions that name this junction or one of its clips
     clip_level: List[bool] = field(default_factory=list)  # parallel to decisions: True when it names only one of the two clips (a trim, a drop)
     decision_stage: List[str] = field(default_factory=list)  # parallel to decisions: the stage whose timeline recorded it
+    pin_lost: str = ""  # human stage only: why a pin that sits at this junction no longer holds in the editor's cut (one line)
+    pin_key: Optional[Tuple[int, int]] = None  # (out shot, in shot) of that pin: the key its stored pin has
+    pin_undone: bool = False  # human stage only: the pin the history applied here is not held by the editor's cut (whatever the store holds now)
     first_stage: str = ""  # the first stage this junction was built from; a later baseline means a pass made the two clips adjacent
     adjacent_detail: str = ""  # the drop/insert that made them adjacent, when the baseline stage is not the first
 
@@ -151,7 +201,9 @@ class Junction:
 
     @property
     def pinned(self) -> bool:
-        return any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
+        """The editor's pin holds this junction in this stage.  On the human stage the inherited decision is not enough: ``pin_lost`` says the
+        editor's cut no longer holds it."""
+        return not self.pin_lost and not self.pin_undone and any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
 
     @property
     def pin_origin(self) -> Optional[str]:
@@ -166,13 +218,21 @@ class Junction:
         return i < len(self.clip_level) and self.clip_level[i]
 
     def why(self) -> str:
-        """The decision that best explains this junction: editor, then the match-cut verdicts, then pass decisions about the junction, then about one of its clips."""
-        ranked = list(enumerate(self.decisions))[::-1]
+        """The decision that best explains this junction: editor, then the match-cut verdicts, then pass decisions about the junction, then about one of its clips.
+
+        On the human stage a pin the editor's cut no longer holds comes first: the inherited editor decision describes a state the editor undid (it stays in the history).
+        """
+        if self.pin_lost:
+            return f"pin changed by the editor: {self.pin_lost}"
+        # (a pin the store no longer holds, or holds at other points, says nothing about a cut the editor moved: the editor's decisions are history only)
+        ranked = [(i, d) for i, d in enumerate(self.decisions) if not (self.pin_undone and d.pass_name == "editor")][::-1]
+        joined = bool(self.first_stage) and self.baseline.stage != self.first_stage  # a stage made the two clips adjacent
         tiers = (
             lambda i, d: d.pass_name == "editor",
             lambda i, d: d.action in ("match_cut", "rejected", "jump_cut_risk") and not self._is_clip_level(i),
             lambda i, d: not self._is_clip_level(i),
-            lambda i, d: True,
+            # a trim of one clip, taken in the stage that joined the two, does not say why they are joined: the drop or removal does
+            lambda i, d: not (joined and self._is_clip_level(i) and self._decided_in(i) == self.baseline.stage),
         )
         for tier in tiers:
             d = next((d for i, d in ranked if tier(i, d)), None)
@@ -184,6 +244,9 @@ class Junction:
         if self.first_stage and self.baseline.stage != self.first_stage:
             return f"made adjacent by {self.baseline.stage}" + (f": {self.adjacent_detail}" if self.adjacent_detail else "")
         return "no pass changed this junction"
+
+    def _decided_in(self, i: int) -> str:
+        return self.decision_stage[i] if i < len(self.decision_stage) else ""
 
     def _changes(self) -> List[Tuple[str, str]]:
         """(stage, change) for every stage after the baseline that moved something, in stage order."""
@@ -234,6 +297,22 @@ def _locate(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
     return best
 
 
+def _locate_instance(timeline: Timeline, a_ref: Clip, b_ref: Clip, present: Set[str]) -> Optional[int]:
+    """Index i where clip i and clip i+1 are the same clip instances (``clip_origin``) as ``a_ref`` and ``b_ref``, in that order.  When no such pair is
+    adjacent, lineage looks (a merge keeps only the earlier piece's origin and the absorbed piece sits between the two instances), and its answer is
+    taken only if each clip it found is the wanted instance or an instance the cut being judged (``present``) no longer has: an absorbed piece.  A
+    clip that is another instance the cut still has is never the junction (a swapped pair stays a new pairing)."""
+    oa, ob = clip_origin(a_ref), clip_origin(b_ref)
+    origins = [clip_origin(c) for c in timeline.clips]
+    for i in range(len(origins) - 1):
+        if origins[i] == oa and origins[i + 1] == ob:
+            return i
+    i = _locate(timeline, a_ref, b_ref)
+    if i is None:
+        return None
+    return i if all(o == want or o not in present for o, want in ((origins[i], oa), (origins[i + 1], ob))) else None
+
+
 def locate_junction(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
     """Index i where clip i descends from ``a_ref`` and clip i+1 from ``b_ref`` (same shot, overlapping source), or None."""
     return _locate(timeline, a_ref, b_ref)
@@ -256,8 +335,13 @@ def _adjacency_detail(considered: Sequence[Tuple[str, Timeline]], k: int, a_ref:
     if pa is not None and pb is not None and pa < pb:
         named |= {c.id for c in prev.clips[pa + 1 : pb]}
     new = timeline.history[len(prev.history):]
-    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved") and named & set(d.clip_ids)), None)
-    return d.detail if d is not None else ""
+    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved", "removed", "added") and named & set(d.clip_ids)), None)
+    if d is None:
+        # the editor's reorder names every clip, so it only says why when nothing more specific does
+        if any(r.pass_name == HUMAN_STAGE and r.action == "reorder" for r in new):
+            return f"reordered {cur_ids[0]}, {cur_ids[1]}"
+        return ""
+    return d.detail[len("human "):] if d.pass_name == "human" and d.detail.startswith("human ") else d.detail  # "made adjacent by human: removed c002 ..."
 
 
 def _state(stage: str, timeline: Timeline, i: int, scorer: Optional[MatchScorer]) -> JunctionState:
@@ -286,7 +370,8 @@ def _attribute(
     in this stage but not all in the previous one (a clip the pass created) is read against this
     stage's ids. In the first stage there is no previous one and its own ids apply.
     ``prev_pair_only``: the previous ids are those of clips that were not adjacent there, so only a decision naming
-    both of them (a pin's move) counts; one naming a single clip (a trim) says nothing about this junction.
+    both of them (a pin's move) counts; one naming a single clip (a pass's trim) says nothing about this junction.  The
+    human stage's own trim of one of the two clips does count: it is what the editor did to this very cut.
     """
     found: List[Tuple[Decision, bool]] = []
     for d in new:
@@ -302,27 +387,62 @@ def _attribute(
             if all(i in ids for i in pair):
                 found.append((d, False))
                 break
-            if len(ids) == 1 and ids[0] in pair and not (prev_pair_only and pair is prev_ids):
+            # (the editor's own trim of a clip is the editor's word about this junction even when a removal is what joined the clips)
+            if len(ids) == 1 and ids[0] in pair and not (prev_pair_only and pair is prev_ids and d.pass_name != HUMAN_STAGE):
                 found.append((d, True))
                 break
     return found
 
 
-def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[MatchScorer] = None, upto: Optional[str] = None) -> List[Junction]:
-    """Junctions of stage ``upto`` (default: the last stage), each followed through the stages up to it."""
+def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[MatchScorer] = None, upto: Optional[str] = None,
+                    pins: Optional[Sequence[Pin]] = None) -> List[Junction]:
+    """Junctions of stage ``upto`` (default: the last stage), each followed through the stages up to it.
+
+    ``pins`` (the workspace's stored pins) decide, on the human stage, which junctions carry a changed pin (``Junction.pin_lost``): the same pins and the same
+    ``pin_states`` answer the Edit view's header and the ``junctions`` footer give.  Without them the pins the history applied are read.
+    """
     if not stages:
         return []
     names = [s for s, _ in stages]
     end = names.index(upto) if upto in names else len(stages) - 1
     considered = list(stages[: end + 1])
     ref = considered[-1][1]
+    # The human stage (an editor's re-export) can hold clips that are not instances of any canonical clip (added, replaced, copied).  Lineage
+    # (same shot, overlapping source range) would give such a clip the history and the pass verdicts of the clip it overlaps, so a junction of
+    # the human stage follows the earlier stages only when both its clips are instances the canonical stages have (``clip_origin``).
+    known = {clip_origin(c) for _, t in considered[:-1] for c in t.clips} if considered[-1][0] == HUMAN_STAGE else None
+    # instances a pipeline merge absorbed: in neither the human cut nor the latest canonical stage (an instance the editor deleted is in the latter)
+    present = {clip_origin(c) for c in ref.clips} | ({clip_origin(c) for c in considered[-2][1].clips} if known is not None and len(considered) > 1 else set())
+    lost: Dict[int, Tuple[str, Tuple[int, int]]] = {}  # human stage: junction index -> (why a stored pin that sits there no longer holds, its key)
+    undone: Set[int] = set()  # human stage: junctions where a pin the history holds is no longer held by the editor's cut
+    if known is not None:
+        # The pins shown are the stored ones (``pins``: the answer ``pin_states`` gives the footer and the header); a caller with no store reads the
+        # pins the history applied.  The history's pins also decide that a junction is no longer "pinned" whatever the store says now.
+        pinned_last: Dict[Tuple[int, int], Decision] = {}
+        for d in ref.history:
+            if d.pass_name == "editor" and d.action == "pinned":
+                pinned_last[(d.data.get("out_shot"), d.data.get("in_shot"))] = d
+        history_pins: List[Pin] = []
+        for d in pinned_last.values():
+            try:
+                pin = Pin.from_dict(d.data)
+                if pin_change(ref, pin, float(d.data["out"]), float(d.data["in_"])) and (site := pin_site(ref, pin)) is not None:
+                    undone.add(site)
+                history_pins.append(pin)
+            except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+                continue
+        for st in pin_states(ref, history_pins if pins is None else pins, HUMAN_STAGE):
+            site = pin_site(ref, st.pin) if st.state == "changed" else None
+            if site is not None:
+                lost.setdefault(site, (st.reason, st.pin.key))
     out: List[Junction] = []
     for i in range(len(ref.clips) - 1):
         a, b = ref.clips[i], ref.clips[i + 1]
         j = Junction(i, a.id, b.id, a.shot_index, b.shot_index, a.beat_id, b.beat_id, ref.fps, first_stage=names[0])
+        inherited = known is None or (clip_origin(a) in known and clip_origin(b) in known)
         at: List[Optional[int]] = []  # index of the junction's first clip in each considered stage
         for k, (stage, timeline) in enumerate(considered):
-            idx = i if k == len(considered) - 1 else _locate(timeline, a, b)
+            idx = i if k == len(considered) - 1 else ((_locate_instance(timeline, a, b, present) if known is not None else _locate(timeline, a, b)) if inherited else None)
             at.append(idx)
             if idx is not None:
                 j.states.append(_state(stage, timeline, idx, scorer))
@@ -333,7 +453,7 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
             prev_idx = at[k - 1] if k else None
             prev_ids = (prev.clips[prev_idx].id, prev.clips[prev_idx + 1].id) if prev is not None and prev_idx is not None else None
             pair_only = False
-            if prev is not None and prev_ids is None:
+            if prev is not None and prev_ids is None and inherited and (known is None or at[k] is not None):
                 # Not adjacent before this stage (a pin's move joined them): the stage's decisions still name the previous
                 # stage's clips, so read them against the clips the two descend from.
                 pa, pb = _best_clip(prev, a), _best_clip(prev, b)
@@ -349,6 +469,9 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
         if first > 0:  # the clips were not adjacent before stage ``first``: a pass joined them
             tl_first = considered[first][1]
             j.adjacent_detail = _adjacency_detail(considered, first, a, b, (tl_first.clips[at[first]].id, tl_first.clips[at[first] + 1].id))
+        if i in lost:  # the human stage: a pin counts only if the editor's cut still holds it
+            j.pin_lost, j.pin_key = lost[i]
+        j.pin_undone = i in undone
         out.append(j)
     return out
 
@@ -356,7 +479,7 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
 def junction_line(j: Junction) -> str:
     cur = j.current
     score = f"{cur.score.combined:.2f}" if cur.score is not None else "  - "
-    tags = ([f"match:{j.match_type}"] if j.match_type else []) + (["locked"] if cur.locked else []) + (["pinned"] if j.pinned else []) + (["beat"] if j.beat_boundary else [])
+    tags = ([f"match:{j.match_type}"] if j.match_type else []) + (["locked"] if cur.locked else []) + (["pinned"] if j.pinned else []) + (["pin-changed"] if j.pin_lost else []) + (["beat"] if j.beat_boundary else [])
     return (
         f"{j.index + 1:>3}  {j.out_clip}->{j.in_clip}  s{j.out_shot}->s{j.in_shot}  "
         f"out {cur.out_time:7.2f}  in {cur.in_time:7.2f}  {cur.transition:<12} score {score}  {' '.join(tags)}"
@@ -364,7 +487,7 @@ def junction_line(j: Junction) -> str:
 
 
 def junction_detail(j: Junction) -> str:
-    lines = [junction_line(j), f"why: {j.why()}", "history:"] + [f"  {h}" for h in j.history()]
+    lines = [junction_line(j), f"why: {j.why()}"] + ([f"pin: changed by the editor: {j.pin_lost}"] if j.pin_lost else []) + ["history:"] + [f"  {h}" for h in j.history()]
     b, c = j.baseline, j.current
     if b.score is not None and c.score is not None:
         lines.append(f"scores ({b.stage} -> {c.stage}):")

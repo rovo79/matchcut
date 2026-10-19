@@ -1,0 +1,1002 @@
+{
+ "schema": "matchcut.provenance/1",
+ "source": "/ABSOLUTE/PATH/TO/demo.mp4",
+ "rate": [
+  25,
+  1
+ ],
+ "id_scheme": {
+  "junction": "s<out_shot>-s<in_shot> (#n for repeats within a stage)",
+  "clip": "timeline.clip_origin: the clip instance's lineage key (<shot>@<in>-<out> of the rough cut)"
+ },
+ "stage_order": [
+  "roughcut",
+  "final"
+ ],
+ "stages": {
+  "roughcut": {
+   "timeline": {
+    "name": "rough cut",
+    "duration": 8.0,
+    "fade_in": 0.0,
+    "fade_out": 0.0
+   },
+   "clips": {
+    "0@0.000-2.000": {
+     "id": "c001",
+     "shot_index": 0,
+     "source_in": 0.0,
+     "source_out": 2.0,
+     "beat_id": "b1",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "",
+     "duration": 2.0,
+     "key": "0@0.000-2.000",
+     "stage": "roughcut",
+     "source_frames": [
+      0,
+      50
+     ]
+    },
+    "1@4.250-5.000": {
+     "id": "c002",
+     "shot_index": 1,
+     "source_in": 4.25,
+     "source_out": 5.0,
+     "beat_id": "b1",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "",
+     "duration": 0.75,
+     "key": "1@4.250-5.000",
+     "stage": "roughcut",
+     "source_frames": [
+      106,
+      125
+     ]
+    },
+    "3@6.500-9.000": {
+     "id": "c003",
+     "shot_index": 3,
+     "source_in": 6.5,
+     "source_out": 9.0,
+     "beat_id": "b2",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "",
+     "duration": 2.5,
+     "key": "3@6.500-9.000",
+     "stage": "roughcut",
+     "source_frames": [
+      163,
+      225
+     ]
+    },
+    "6@14.000-16.000": {
+     "id": "c004",
+     "shot_index": 6,
+     "source_in": 14.0,
+     "source_out": 16.0,
+     "beat_id": "b3",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "",
+     "duration": 2.0,
+     "key": "6@14.000-16.000",
+     "stage": "roughcut",
+     "source_frames": [
+      350,
+      400
+     ]
+    },
+    "7@17.750-18.500": {
+     "id": "c005",
+     "shot_index": 7,
+     "source_in": 17.75,
+     "source_out": 18.5,
+     "beat_id": "b3",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "",
+     "duration": 0.75,
+     "key": "7@17.750-18.500",
+     "stage": "roughcut",
+     "source_frames": [
+      444,
+      463
+     ]
+    }
+   },
+   "junctions": {
+    "s0-s1": {
+     "junction_id": "s0-s1",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 2.00s / in 4.25s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.5,
+      "luminance": 0.5117,
+      "color": 0.0003,
+      "frame": 0.2012,
+      "motion": 0.2,
+      "combined": 0.2008,
+      "jump_cut_risk": false,
+      "motion_type": "mixed"
+     },
+     "index": 0,
+     "out_clip": "c001",
+     "in_clip": "c002",
+     "beat_boundary": false,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      }
+     ],
+     "decisions": []
+    },
+    "s1-s3": {
+     "junction_id": "s1-s3",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 5.00s / in 6.50s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.4325,
+      "luminance": 0.5117,
+      "color": 0.0958,
+      "frame": 0.1953,
+      "motion": 0.2,
+      "combined": 0.1967,
+      "jump_cut_risk": false,
+      "motion_type": "mixed"
+     },
+     "index": 1,
+     "out_clip": "c002",
+     "in_clip": "c003",
+     "beat_boundary": true,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      }
+     ],
+     "decisions": []
+    },
+    "s3-s6": {
+     "junction_id": "s3-s6",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 9.00s / in 14.00s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.5432,
+      "luminance": 0.4326,
+      "color": 0.4944,
+      "frame": 0.2804,
+      "motion": 0.5,
+      "combined": 0.3463,
+      "jump_cut_risk": false,
+      "motion_type": "static"
+     },
+     "index": 2,
+     "out_clip": "c003",
+     "in_clip": "c004",
+     "beat_boundary": true,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      }
+     ],
+     "decisions": []
+    },
+    "s6-s7": {
+     "junction_id": "s6-s7",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 16.00s / in 17.75s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.356,
+      "luminance": 0.1851,
+      "color": 0.1544,
+      "frame": 0.1485,
+      "motion": 0.5,
+      "combined": 0.2539,
+      "jump_cut_risk": false,
+      "motion_type": "static"
+     },
+     "index": 3,
+     "out_clip": "c004",
+     "in_clip": "c005",
+     "beat_boundary": false,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      }
+     ],
+     "decisions": []
+    }
+   },
+   "history": [
+    {
+     "pass_name": "roughcut",
+     "action": "notes",
+     "clip_ids": [
+      "c001",
+      "c002",
+      "c003",
+      "c004",
+      "c005"
+     ],
+     "detail": "mock rough cut",
+     "score": null,
+     "data": {}
+    }
+   ],
+   "canonical_sha256": "8b79a32f2f815b1b25b47038d7e3f2a5b0c9ae521d832b3b1ffccf2c041691bb"
+  },
+  "final": {
+   "timeline": {
+    "name": "final cut",
+    "duration": 6.91,
+    "fade_in": 0.8,
+    "fade_out": 0.3
+   },
+   "clips": {
+    "0@0.000-2.000": {
+     "id": "c001",
+     "shot_index": 0,
+     "source_in": 0.0,
+     "source_out": 2.0,
+     "beat_id": "b1",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "0@0.000-2.000",
+     "duration": 2.0,
+     "key": "0@0.000-2.000",
+     "stage": "final",
+     "source_frames": [
+      0,
+      50
+     ]
+    },
+    "1@4.250-5.000": {
+     "id": "c002",
+     "shot_index": 1,
+     "source_in": 4.24,
+     "source_out": 5.0,
+     "beat_id": "b1",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "1@4.250-5.000",
+     "duration": 0.76,
+     "key": "1@4.250-5.000",
+     "stage": "final",
+     "source_frames": [
+      106,
+      125
+     ]
+    },
+    "3@6.500-9.000": {
+     "id": "c003",
+     "shot_index": 3,
+     "source_in": 6.52,
+     "source_out": 9.0,
+     "beat_id": "b2",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "dissolve",
+      "duration": 0.3
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "3@6.500-9.000",
+     "duration": 2.48,
+     "key": "3@6.500-9.000",
+     "stage": "final",
+     "source_frames": [
+      163,
+      225
+     ]
+    },
+    "6@14.000-16.000": {
+     "id": "c004",
+     "shot_index": 6,
+     "source_in": 14.0,
+     "source_out": 16.0,
+     "beat_id": "b3",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "dissolve",
+      "duration": 0.75
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "6@14.000-16.000",
+     "duration": 2.0,
+     "key": "6@14.000-16.000",
+     "stage": "final",
+     "source_frames": [
+      350,
+      400
+     ]
+    },
+    "7@17.750-18.500": {
+     "id": "c005",
+     "shot_index": 7,
+     "source_in": 17.76,
+     "source_out": 18.48,
+     "beat_id": "b3",
+     "purpose": "mock",
+     "transition_in": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "locked_in": false,
+     "locked_out": false,
+     "tags": [],
+     "notes": [],
+     "origin": "7@17.750-18.500",
+     "duration": 0.72,
+     "key": "7@17.750-18.500",
+     "stage": "final",
+     "source_frames": [
+      444,
+      462
+     ]
+    }
+   },
+   "junctions": {
+    "s0-s1": {
+     "junction_id": "s0-s1",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 2.00s / in 4.25s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.5,
+      "luminance": 0.5117,
+      "color": 0.0003,
+      "frame": 0.2012,
+      "motion": 0.2,
+      "combined": 0.2008,
+      "jump_cut_risk": false,
+      "motion_type": "mixed"
+     },
+     "index": 0,
+     "out_clip": "c001",
+     "in_clip": "c002",
+     "beat_boundary": false,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "matchcut",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "continuity",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "pacing",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "transitions",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "polish",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "beatsync",
+       "out_time": 2.0,
+       "in_time": 4.25,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      },
+      {
+       "stage": "final",
+       "out_time": 2.0,
+       "in_time": 4.24,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.20084561559429856
+      }
+     ],
+     "decisions": []
+    },
+    "s1-s3": {
+     "junction_id": "s1-s3",
+     "why": "transitions: beat b1 -> b2: dissolve 0.30s",
+     "history": [
+      "roughcut: cut at out 5.00s / in 6.50s",
+      "transitions: dissolve 0.30s",
+      "final: in +0.02s (+1f)"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "dissolve",
+      "duration": 0.3
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.4325,
+      "luminance": 0.5117,
+      "color": 0.0958,
+      "frame": 0.1953,
+      "motion": 0.2,
+      "combined": 0.1967,
+      "jump_cut_risk": false,
+      "motion_type": "mixed"
+     },
+     "index": 1,
+     "out_clip": "c002",
+     "in_clip": "c003",
+     "beat_boundary": true,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "matchcut",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "continuity",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "pacing",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "transitions",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "dissolve",
+       "transition_seconds": 0.3,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "polish",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "dissolve",
+       "transition_seconds": 0.3,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "beatsync",
+       "out_time": 5.0,
+       "in_time": 6.5,
+       "transition": "dissolve",
+       "transition_seconds": 0.3,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      },
+      {
+       "stage": "final",
+       "out_time": 5.0,
+       "in_time": 6.52,
+       "transition": "dissolve",
+       "transition_seconds": 0.3,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.19669505640864374
+      }
+     ],
+     "decisions": [
+      {
+       "pass_name": "transitions",
+       "action": "dissolve",
+       "clip_ids": [
+        "c002",
+        "c003"
+       ],
+       "detail": "beat b1 -> b2: dissolve 0.30s",
+       "score": null,
+       "data": {},
+       "stage": "transitions",
+       "clip_level": false
+      }
+     ]
+    },
+    "s3-s6": {
+     "junction_id": "s3-s6",
+     "why": "transitions: beat b2 -> b3: dissolve 0.75s",
+     "history": [
+      "roughcut: cut at out 9.00s / in 14.00s",
+      "transitions: dissolve 0.75s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "dissolve",
+      "duration": 0.75
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.5432,
+      "luminance": 0.4326,
+      "color": 0.4944,
+      "frame": 0.2804,
+      "motion": 0.5,
+      "combined": 0.3463,
+      "jump_cut_risk": false,
+      "motion_type": "static"
+     },
+     "index": 2,
+     "out_clip": "c003",
+     "in_clip": "c004",
+     "beat_boundary": true,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "matchcut",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "continuity",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "pacing",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "transitions",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "dissolve",
+       "transition_seconds": 0.75,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "polish",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "dissolve",
+       "transition_seconds": 0.75,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "beatsync",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "dissolve",
+       "transition_seconds": 0.75,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      },
+      {
+       "stage": "final",
+       "out_time": 9.0,
+       "in_time": 14.0,
+       "transition": "dissolve",
+       "transition_seconds": 0.75,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.3462595747411251
+      }
+     ],
+     "decisions": [
+      {
+       "pass_name": "transitions",
+       "action": "dissolve",
+       "clip_ids": [
+        "c003",
+        "c004"
+       ],
+       "detail": "beat b2 -> b3: dissolve 0.75s",
+       "score": null,
+       "data": {},
+       "stage": "transitions",
+       "clip_level": false
+      }
+     ]
+    },
+    "s6-s7": {
+     "junction_id": "s6-s7",
+     "why": "no pass changed this junction",
+     "history": [
+      "roughcut: cut at out 16.00s / in 17.75s"
+     ],
+     "pinned": false,
+     "pin_origin": null,
+     "transition": {
+      "kind": "cut",
+      "duration": 0.0
+     },
+     "scores": {
+      "structure": 0.0,
+      "composition": 0.356,
+      "luminance": 0.1851,
+      "color": 0.1544,
+      "frame": 0.1485,
+      "motion": 0.5,
+      "combined": 0.2539,
+      "jump_cut_risk": false,
+      "motion_type": "static"
+     },
+     "index": 3,
+     "out_clip": "c004",
+     "in_clip": "c005",
+     "beat_boundary": false,
+     "states": [
+      {
+       "stage": "roughcut",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "matchcut",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "continuity",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "pacing",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "transitions",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "polish",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "beatsync",
+       "out_time": 16.0,
+       "in_time": 17.75,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      },
+      {
+       "stage": "final",
+       "out_time": 16.0,
+       "in_time": 17.76,
+       "transition": "cut",
+       "transition_seconds": 0.0,
+       "locked_out": false,
+       "locked_in": false,
+       "combined": 0.2539255683869123
+      }
+     ],
+     "decisions": []
+    }
+   },
+   "history": [
+    {
+     "pass_name": "roughcut",
+     "action": "notes",
+     "clip_ids": [
+      "c001",
+      "c002",
+      "c003",
+      "c004",
+      "c005"
+     ],
+     "detail": "mock rough cut",
+     "score": null,
+     "data": {}
+    },
+    {
+     "pass_name": "transitions",
+     "action": "dissolve",
+     "clip_ids": [
+      "c002",
+      "c003"
+     ],
+     "detail": "beat b1 -> b2: dissolve 0.30s",
+     "score": null,
+     "data": {}
+    },
+    {
+     "pass_name": "transitions",
+     "action": "dissolve",
+     "clip_ids": [
+      "c003",
+      "c004"
+     ],
+     "detail": "beat b2 -> b3: dissolve 0.75s",
+     "score": null,
+     "data": {}
+    },
+    {
+     "pass_name": "transitions",
+     "action": "fades",
+     "clip_ids": [
+      "c001",
+      "c005"
+     ],
+     "detail": "fade in 0.80s, fade out 0.30s",
+     "score": null,
+     "data": {}
+    },
+    {
+     "pass_name": "polish",
+     "action": "assessment",
+     "clip_ids": [
+      "c001",
+      "c002",
+      "c003",
+      "c004",
+      "c005"
+     ],
+     "detail": "mock: cut left unchanged",
+     "score": null,
+     "data": {}
+    }
+   ],
+   "canonical_sha256": "91f151f8efa00133829b2f598bc8297a277cb77ded4de18417319ac26de7efdf"
+  }
+ }
+}

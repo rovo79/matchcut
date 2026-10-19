@@ -11,10 +11,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
-from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
-from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace
+from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states
+from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_human
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import clip_origin
+from matchcut.pipeline.timeline import HUMAN_STAGE, clip_origin
 from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
@@ -90,7 +90,7 @@ class EditView(Vertical):
     @staticmethod
     def _data_fingerprint(state: RunState) -> tuple:
         ws = state.workspace
-        files = [ws / "probe.json", ws / "analysis.npz", ws / "narrative.json", ws / "editorial.json"] + state.timeline_files()
+        files = [ws / "probe.json", ws / "analysis.npz", ws / "narrative.json", ws / "editorial.json", ws / "human.json", ws / "human_import.json"] + state.timeline_files()
         return tuple(file_fingerprint(f) for f in files)
 
     def refresh_from_state(self, state: RunState) -> None:
@@ -122,7 +122,7 @@ class EditView(Vertical):
         upto = self.stages[: self.stages.index(stage) + 1]
         pairs = [(s, state.timeline(s)) for s in upto]
         pairs = [(s, t) for s, t in pairs if t is not None]
-        self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config)) if pairs else []
+        self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config), pins=PinStore(state.workspace).load()) if pairs else []
         pair, self._keep_pair = self._keep_pair, None
         kept = next((i for i, j in enumerate(self.junctions) if (j.out_shot, j.in_shot) == pair), None) if pair is not None else None
         self.selected = kept if kept is not None else min(self.selected, max(0, len(self.junctions) - 1))
@@ -134,7 +134,10 @@ class EditView(Vertical):
         summary = f" ({self.stages.index(stage) + 1}/{len(self.stages)}) · {len(tl.clips) if tl else 0} clips · {tl.duration if tl else 0:.1f}s · {len(self.junctions)} junctions · {len(pins)} pinned"
         if unplaced:
             summary += f" · {len(unplaced)} pin(s) not placed"
-        header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim")))
+        for line in self._changed_pins(state, pins):
+            summary += f" · {line}"
+        stale = stale_human(state.workspace)  # an imported editor cut that no longer fits is left out of the stages: say why
+        header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
         self._show_junction()
 
@@ -167,7 +170,9 @@ class EditView(Vertical):
         key = (self._fingerprint, stage, self.selected, self.expanded)
         if self._shown != key or force:
             self._shown = key
-            pin = PinStore(self._state.workspace).get(j.out_shot, j.in_shot)
+            store = PinStore(self._state.workspace)
+            # where the human stage says a pin changed, the badge is on the junction the pin now sits at (its pair, or its surviving clip), not by shots
+            pin = (store.get(*j.pin_key) if j.pin_lost and j.pin_key else None) or store.get(j.out_shot, j.in_shot)
             panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin)))
         # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
         shown = j.state_at(stage) or j.current
@@ -177,12 +182,19 @@ class EditView(Vertical):
             self._frames_key = frames_key
             self._show_frames(j, stage)
 
+    def _changed_pins(self, state: RunState, pins: List[Pin]) -> List[str]:
+        """One header phrase per pin the latest stage reports as changed by the editor, with its reason (only the human stage can: an imported
+        editor cut that no longer holds the pin).  The same ``pin_states`` the ``junctions`` command prints."""
+        if not pins or not self.stages or self.stages[-1] != HUMAN_STAGE:
+            return []
+        return [f"pin {st.label} changed by the editor: {st.reason}" for st in pin_states(state.timeline(HUMAN_STAGE), pins, HUMAN_STAGE) if st.state == "changed"]
+
     def _pin_decision(self, pin: Optional[Pin]):
         """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
         if pin is None or self._state is None or not self.stages:
             return None
         latest = self._state.timeline(self.stages[-1])
-        return pin_outcome(latest, pin) if latest is not None else None
+        return pin_outcome(latest, pin, stage=self.stages[-1]) if latest is not None else None
 
     def _show_frames(self, j: Junction, stage: str) -> None:
         frames = self._frames()

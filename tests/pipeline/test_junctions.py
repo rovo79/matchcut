@@ -1,6 +1,8 @@
 """Junctions followed across stages, rescored with the match-cut scorer, and the CLI listing."""
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from matchcut.pipeline.junctions import (
 )
 from matchcut.pipeline.passes import run_passes
 from matchcut.pipeline.pipeline import Pipeline
-from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition
+from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 
 
 def clip(cid, shot, a, b, beat="b1", **attrs):
@@ -94,9 +96,71 @@ def test_stage_layout_and_loading_skip_missing_and_corrupt_files(tmp_path):
     tl("roughcut", [clip("c001", 0, 0, 2)]).save(tmp_path / "roughcut.json")
     tl("matchcut", [clip("c001", 0, 0, 2)]).save(tmp_path / "passes" / "01_matchcut.json")
     (tmp_path / "passes" / "02_continuity.json").write_text("{not json")
-    assert [s for s, _ in stage_timeline_paths(tmp_path)] == ["roughcut", "matchcut", "continuity", "final"]
+    assert [s for s, _ in stage_timeline_paths(tmp_path)] == ["roughcut", "matchcut", "continuity", "final", "human"]
+    assert dict(stage_timeline_paths(tmp_path))["human"] == tmp_path / "human.json"
     assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut"]
+    tl("final", [clip("c001", 0, 0, 2)]).save(tmp_path / "final.json")
+    tl("human", [clip("c001", 0, 0, 2)]).save(tmp_path / "human.json")
+    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut", "final"]  # a human.json with no import record is stale: left out
     assert scorer_for_workspace(tmp_path, PipelineConfig()) is None
+
+
+def human_workspace(tmp_path):
+    """roughcut, a pass, final and an imported human stage with a matching import record (what matchcut.interchange writes)."""
+    (tmp_path / "passes").mkdir(exist_ok=True)
+    tl("roughcut", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "roughcut.json")
+    tl("pacing", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "passes" / "01_pacing.json")
+    tl("final", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "final.json")
+    tl("human", [clip("c001", 0, 0, 2), clip("c002", 1, 4.2, 6)]).save(tmp_path / "human.json")
+    sha = lambda f: hashlib.sha256((tmp_path / f).read_bytes()).hexdigest()  # noqa: E731
+    record = {"stage": "roughcut", "stage_sha256": sha("roughcut.json"), "latest_stage": "final", "latest_stage_sha256": sha("final.json")}
+    (tmp_path / "human_import.json").write_text(json.dumps(record))
+    return record
+
+
+def test_a_human_stage_is_listed_last_until_either_stage_file_it_was_built_from_changes(tmp_path):
+    from matchcut.pipeline.junctions import stale_human
+
+    assert stale_human(tmp_path) is None  # no human.json
+    human_workspace(tmp_path)
+    assert stale_human(tmp_path) is None
+    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final", "human"]
+    kept = (tmp_path / "human.json").read_bytes()
+    # the latest stage (the one whose history it copies) changes, the compared one does not
+    tl("final", [clip("c001", 0, 0, 2.5), clip("c002", 1, 4, 6)]).save(tmp_path / "final.json")
+    assert stale_human(tmp_path) == "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
+    assert [s for s, _ in stage_timeline_paths(tmp_path)][-1] == "final" and [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
+    assert (tmp_path / "human.json").read_bytes() == kept  # left out, never deleted
+    # the compared stage changes
+    human_workspace(tmp_path)
+    tl("roughcut", [clip("c001", 0, 0, 2.5), clip("c002", 1, 4, 6)]).save(tmp_path / "roughcut.json")
+    assert stale_human(tmp_path).startswith("human.json is stale: roughcut.json changed since the import")
+    # a stage file that is gone
+    human_workspace(tmp_path)
+    (tmp_path / "final.json").unlink()
+    assert "final.json changed since the import" in stale_human(tmp_path)
+
+
+def test_a_human_json_without_a_readable_import_record_is_stale(tmp_path):
+    from matchcut.pipeline.junctions import stale_human
+
+    human_workspace(tmp_path)
+    for text in (None, "{not json", "[]", json.dumps({"stage": "final"})):
+        if text is None:
+            (tmp_path / "human_import.json").unlink()
+        else:
+            (tmp_path / "human_import.json").write_text(text)
+        assert stale_human(tmp_path) == "human.json is stale: human_import.json is missing or unreadable (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)", text
+        assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
+
+
+def test_a_junction_made_adjacent_by_a_removal_names_it():
+    from matchcut.pipeline.timeline import Decision as D
+
+    three = tl("final", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6), clip("c003", 2, 8, 10)])
+    human = tl("human", [clip("c001", 0, 0, 2), clip("c003", 2, 8, 10)], history=[D("human", "removed", ["c002"], "human removed c002 (shot 1, 4.00-6.00s)")])
+    j = build_junctions([("final", three), ("human", human)])[0]
+    assert j.why() == "made adjacent by human: removed c002 (shot 1, 4.00-6.00s)"
 
 
 # -- real footage: the scores shown are the scores the pass compared ---------------------------
@@ -494,3 +558,198 @@ def test_a_reorder_made_junction_gets_the_match_cut_and_rejected_verdicts_about_
     assert first.why() == "matchcut: graphic match cut: accepted on feature score alone"
     assert second.decisions == [rejected]
     assert second.why() == "matchcut: no match: scores below the threshold"
+
+
+# -- the human stage: inherited decisions belong to the same pair of clip instances only ------------------------------------
+def stamped(stage, clips, history=()):
+    """A stage whose clips carry the origin the pipeline stamps (the instance they descend from)."""
+    for c in clips:
+        c.origin = c.origin or f"{c.shot_index}@{c.source_in:.3f}-{c.source_out:.3f}"
+    return tl(stage, clips, history)
+
+
+def verdicts(n=5):
+    return [Decision("matchcut", "match_cut", [f"c{k:03d}", f"c{k + 1:03d}"], f"verdict about c{k:03d}->c{k + 1:03d}", 0.6, {"match_type": "graphic"}) for k in range(1, n)]
+
+
+def canonical_final(n=5):
+    return stamped("final", [clip(f"c{k:03d}", k, 4.0 * k, 4.0 * k + 2.0) for k in range(1, n + 1)], verdicts(n))
+
+
+def human_from(final, clips, decisions):
+    return tl("human", clips, list(final.history) + list(decisions))
+
+
+def test_a_replaced_clip_in_the_human_stage_does_not_borrow_the_passes_verdict_of_the_clip_it_overlaps():
+    final = canonical_final()
+    kept = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips]
+    # the editor put another piece of shot 3 (overlapping c003's range, a different clip instance) between c002 and c003
+    extra = clip("h001", 3, 12.5, 14.0, origin="human:h001")
+    clips = kept[:2] + [extra] + kept[2:]
+    human = human_from(final, clips, [Decision("human", "added", ["h001"], "human added h001 (shot 3, 12.50-14.00s)")])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions([("final", final), ("human", human)])}
+    for pair in (("c002", "h001"), ("h001", "c003")):
+        j = js[pair]
+        assert [s.stage for s in j.states] == ["human"], pair
+        assert not any(d.pass_name == "matchcut" for d in j.decisions), (pair, j.decisions)
+        assert "verdict" not in j.why(), (pair, j.why())
+    # the junctions the editor did not touch keep their inherited verdict and history
+    for pair in (("c003", "c004"), ("c004", "c005"), ("c001", "c002")):
+        j = js[pair]
+        assert [s.stage for s in j.states] == ["final", "human"] and j.why() == f"matchcut: verdict about {pair[0]}->{pair[1]}", pair
+
+
+def test_a_reorder_that_creates_a_pairing_shows_no_verdict_about_the_old_pairings():
+    final = canonical_final()
+    by_id = {c.id: clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips}
+    order = ["c001", "c004", "c003", "c002", "c005"]  # c002 and c004 swapped
+    human = human_from(final, [by_id[i] for i in order], [Decision("human", "reorder", order, "human reordered clips: " + " ".join(order))])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions([("final", final), ("human", human)])}
+    assert set(js) == {("c001", "c004"), ("c004", "c003"), ("c003", "c002"), ("c002", "c005")}
+    for pair, j in js.items():
+        assert not any(d.pass_name == "matchcut" for d in j.decisions) and "verdict" not in j.why(), (pair, j.why())
+    # the untouched pair keeps its verdict
+    kept = build_junctions([("final", final), ("human", human_from(final, [by_id[i] for i in ["c001", "c002", "c003", "c005", "c004"]], []))])
+    assert next(j for j in kept if (j.out_clip, j.in_clip) == ("c002", "c003")).why() == "matchcut: verdict about c002->c003"
+
+
+def staged(n=4, pinned=False):
+    """roughcut, a pass that recorded a dissolve between c002 and c003 (and, optionally, an editor pin on c001->c002), and final: the same four clips."""
+    def clips():
+        return [clip(f"c{k:03d}", k, 4.0 * k, 4.0 * k + 2.0) for k in range(1, n + 1)]
+    pin = {"out_shot": 1, "in_shot": 2, "out_time": 6.0, "in_time": 8.0, "origin": "locked", "note": "", "out_origin": "1@4.000-6.000", "in_origin": "2@8.000-10.000",
+           "out": 6.0, "in_": 8.0}
+    decisions = [Decision("transitions", "dissolve", ["c002", "c003"], "beat b1 -> b2: dissolve 0.30s")] + (
+        [Decision("editor", "pinned", ["c001", "c002"], "locked by the editor: out 6.00s, in 8.00s", None, pin)] if pinned else [])
+    rough = stamped("roughcut", clips())
+    passed = stamped("transitions", clips(), decisions)
+    final = stamped("final", clips(), decisions)
+    for t in (passed, final):
+        if pinned:
+            t.clips[0].locked_out = t.clips[1].locked_in = True
+    return [("roughcut", rough), ("transitions", passed), ("final", final)]
+
+
+def swapped_human(stages, a, b):
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin, locked_in=c.locked_in, locked_out=c.locked_out) for c in final.clips]
+    ia, ib = (next(k for k, c in enumerate(clips) if c.id == x) for x in (a, b))
+    clips[ia], clips[ib] = clips[ib], clips[ia]
+    order = [c.id for c in clips]
+    return human_from(final, clips, [Decision("human", "reorder", order, "human reordered clips: " + " ".join(order))])
+
+
+def test_a_reversed_pair_of_known_clips_borrows_no_inherited_decision():
+    """The reviewer's I1: swapping c002 and c003 made c003->c002 show the pass's dissolve between c002 and c003."""
+    stages = staged()
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", swapped_human(stages, "c002", "c003"))])}
+    assert set(js) == {("c001", "c003"), ("c003", "c002"), ("c002", "c004")}
+    for pair, j in js.items():
+        assert not any(d.pass_name == "transitions" for d in j.decisions) and "dissolve" not in j.why(), (pair, j.why())
+        assert [s.stage for s in j.states] == ["human"], pair
+    assert js[("c003", "c002")].why() == "made adjacent by human: reordered c003, c002"
+    assert js[("c001", "c003")].why() == "made adjacent by human: reordered c001, c003"
+
+
+def test_a_reversed_pinned_pair_is_not_held_by_the_editor_and_shows_no_pin_why():
+    stages = staged(pinned=True)
+    human = swapped_human(stages, "c001", "c002")
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", human)])}
+    reversed_pair = js[("c002", "c001")]
+    assert not reversed_pair.pinned and not any(d.pass_name == "editor" for d in reversed_pair.decisions)
+    assert reversed_pair.why() == "made adjacent by human: reordered c002, c001"
+    # the pin changed, and the junction where its outgoing clip now sits says so (the one after c001)
+    sited = js[("c001", "c003")]
+    assert sited.pin_lost == "clips are no longer adjacent" and sited.pin_key == (1, 2) and not sited.pinned
+
+
+def test_a_keyed_slip_inside_the_shot_keeps_the_junction_its_history_and_why():
+    """The reviewer's I3: c002 keeps its key and moves to other footage of its shot; the clips were adjacent all along."""
+    stages = staged(pinned=True)
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin, locked_in=c.locked_in, locked_out=c.locked_out) for c in final.clips]
+    clips[1].source_in, clips[1].source_out = 10.4, 11.0  # c002 (shot 2, 8.0-10.0 s) slipped to other footage of its own shot: no overlap with the old range
+    human = human_from(final, clips, [Decision("human", "trim", ["c002"], "human trimmed c002: in +60f, out +25f")])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", human)])}
+    j = js[("c001", "c002")]
+    assert [s.stage for s in j.states] == ["roughcut", "transitions", "final", "human"] , (j.states, j.why())
+    assert j.pin_lost.startswith("cut trimmed by") and not j.pinned
+    assert j.why() == f"pin changed by the editor: {j.pin_lost}" and any(d.pass_name == "editor" for d in j.decisions)  # the pin's decision stays in the history
+    other = js[("c002", "c003")]
+    assert other.why() == "transitions: beat b1 -> b2: dissolve 0.30s" and other.pin_lost == ""
+
+
+def test_a_human_reorder_is_named_only_when_nothing_more_specific_made_the_clips_adjacent():
+    stages = staged()
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips]
+    del clips[2]  # c003 removed, and the order is also reported: the removal is the story
+    human = human_from(final, clips, [Decision("human", "reorder", ["c001", "c002", "c004"], "human reordered clips: c001 c002 c004"),
+                                       Decision("human", "removed", ["c003"], "human removed c003 (shot 3, 12.00-14.00s)")])
+    j = next(j for j in build_junctions(stages + [("human", human)]) if (j.out_clip, j.in_clip) == ("c002", "c004"))
+    assert j.why() == "made adjacent by human: removed c003 (shot 3, 12.00-14.00s)"
+
+
+# -- a clip continuity merged: the junction after it keeps its history on the human stage -------------------------------------
+def merged_stages():
+    """roughcut [c001, c002, c003, c004] (c002 and c003 contiguous pieces of shot 1) -> continuity merges them: final [c001, c002 (2-4 s), c003]."""
+    r = [clip("c001", 0, 0, 2), clip("c002", 1, 2, 3), clip("c003", 1, 3, 4), clip("c004", 2, 5, 7)]
+    for c in r:
+        c.origin = clip_origin(c)
+    verdict = Decision("matchcut", "match_cut", ["c003", "c004"], "match cut c003->c004", 0.9, {"match_type": "action"})
+    matched = tl("matchcut", [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in r], [verdict])
+    merge = Decision("continuity", "merge", ["c002", "c003"], "contiguous pieces of the same shot merged")
+    # (the merged clip keeps the earlier piece's origin)
+    merged = [clip("c001", 0, 0, 2, origin=r[0].origin), clip("c002", 1, 2, 4, origin=r[1].origin), clip("c003", 2, 5, 7, origin=r[3].origin)]
+    history = [verdict, merge]
+    return [("roughcut", tl("roughcut", r, [])), ("matchcut", matched), ("continuity", tl("continuity", merged, history)),
+            ("final", tl("final", [Clip.from_dict(c.to_dict()) for c in merged], history))]
+
+
+def test_the_junction_after_a_merged_clip_keeps_its_history_and_verdict_on_the_human_stage():
+    """The re-review's R1: both instances exist in the earlier stages but the absorbed piece sits between them; lineage must still find the junction."""
+    stages = merged_stages()
+    final = stages[-1][1]
+    canonical = build_junctions(stages)[1]
+    human = tl("human", [Clip.from_dict(c.to_dict()) for c in final.clips], final.history)
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c002", "c003") and j.match_type == "action"
+    assert [s.stage for s in j.states] == [s.stage for s in canonical.states] + ["human"] and j.why() == canonical.why() == "matchcut: match cut c003->c004"
+    assert [d.action for d in j.decisions] == [d.action for d in canonical.decisions]
+    # with a human trim of the merged clip the history and the verdict are still there, and the trim is listed
+    trimmed = tl("human", [Clip.from_dict(c.to_dict()) for c in final.clips], list(final.history) + [Decision("human", "trim", ["c002"], "human trimmed c002: out -5f")])
+    trimmed.clips[1].source_out = 3.8
+    j = build_junctions(stages + [("human", trimmed)])[1]
+    assert j.match_type == "action" and [s.stage for s in j.states][:-1] == [s.stage for s in canonical.states]
+    assert j.why() == "matchcut: match cut c003->c004" and any(d.pass_name == "human" and d.action == "trim" for d in j.decisions)
+    assert any("human: out" in h for h in j.history())
+
+
+def test_a_lineage_hit_on_the_wrong_instance_is_not_taken_for_a_merged_clips_junction():
+    """A located clip whose origin is another instance the human cut still has is not the junction (the swap case stays a new pairing)."""
+    stages = merged_stages()
+    final = stages[-1][1]
+    clips = [Clip.from_dict(c.to_dict()) for c in final.clips]
+    clips[1], clips[2] = clips[2], clips[1]  # c003, c002 swapped
+    human = tl("human", clips, list(final.history) + [Decision("human", "reorder", ["c001", "c003", "c002"], "human reordered clips: c001 c003 c002")])
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c003", "c002") and [s.stage for s in j.states] == ["human"] and j.match_type == ""
+
+
+def test_an_instance_the_editor_deleted_is_not_an_absorbed_piece_so_the_junction_borrows_no_verdict():
+    """The re-review's N1: the editor deletes c003 and extends c002 over it; the pass verdict about c003->c004 is not the new c002->c004's."""
+    r = [clip("c001", 0, 0, 2), clip("c002", 1, 2, 3), clip("c003", 1, 3, 4), clip("c004", 2, 5, 7)]
+    for c in r:
+        c.origin = clip_origin(c)
+    verdict = Decision("matchcut", "match_cut", ["c003", "c004"], "match cut c003->c004", 0.9, {"match_type": "action"})
+    final = tl("final", [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in r], [verdict])
+    stages = [("roughcut", tl("roughcut", r, [])), ("final", final)]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in (r[0], r[1], r[3])]
+    clips[1].source_out = 4.0  # c002 extended over the deleted c003 (trim out +25f)
+    human = tl("human", clips, [verdict, Decision("human", "removed", ["c003"], "human removed c003 (shot 1, 3.00-4.00s)"),
+                                Decision("human", "trim", ["c002"], "human trimmed c002: out +25f")])
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c002", "c004")
+    assert j.why() == "made adjacent by human: removed c003 (shot 1, 3.00-4.00s)", j.why()
+    assert [s.stage for s in j.states] == ["human"] and j.match_type == ""
+    assert [(d.pass_name, d.action) for d in j.decisions] == [("human", "trim")]

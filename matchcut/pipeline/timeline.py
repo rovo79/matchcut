@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from .media import seconds_to_timecode
 
 TRANSITION_KINDS = ("cut", "dissolve", "dip_to_black")
+HUMAN_STAGE = "human"  # the stage an editor's re-export is imported as (matchcut.interchange writes it; the engine only reads it)
 
 
 @dataclass

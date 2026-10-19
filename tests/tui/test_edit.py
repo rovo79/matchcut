@@ -361,6 +361,127 @@ def test_a_reverted_pin_reads_reverted_everywhere_after_a_run(mock_workspace, tm
     run_async(body())
 
 
+def test_an_imported_human_stage_is_the_last_stage_and_keeps_an_untouched_pin_applied(mock_workspace, tmp_path):
+    """After ``import`` the human stage is the latest: the Edit view lands on it, and a pin it did not touch still reads applied."""
+    from matchcut.interchange.workspace import export_workspace, import_timeline
+
+    ws = own_copy(mock_workspace, tmp_path)
+    j0 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j0.out_shot, j0.in_shot)
+    refine_in(ws, pin=Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3)))
+    cfg = PipelineConfig.load(ws / "config.json")
+    export_workspace(ws, cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((ws / "exports" / "final.otio").read_text())
+    clips = [k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Clip")]
+    pinned_clips = {j.out_clip for j in build_junctions(load_stage_timelines(ws)) if (j.out_shot, j.in_shot) == key} | \
+        {j.in_clip for j in build_junctions(load_stage_timelines(ws)) if (j.out_shot, j.in_shot) == key}
+    target = next(k for k in clips[1:] if k["metadata"]["matchcut"]["clip_id"] not in pinned_clips)
+    target["source_range"]["start_time"]["value"] += 3
+    target["source_range"]["duration"]["value"] -= 3
+    (tmp_path / "edit.otio").write_text(json.dumps(doc))
+    assert [d.action for d in import_timeline(ws, cfg, tmp_path / "edit.otio").decisions] == ["trim"]
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-1] == "human" and view.current_stage() == "human"
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pinned (locked)" in panel and "pending" not in panel and "locked by the editor" in panel
+            assert "human:" not in panel  # nothing human happened at this junction
+
+    run_async(body())
+
+
+def test_an_imported_human_stage_shows_a_pin_the_editor_changed_as_changed_not_applied(mock_workspace, tmp_path):
+    """The canonical editor decision is repeated in human.json's history; the Edit view must judge the editor's cut, in the panel and in the header."""
+    from matchcut.interchange.workspace import export_workspace, import_timeline
+
+    for how in ("trim", "delete"):
+        (tmp_path / how).mkdir()
+        ws = own_copy(mock_workspace, tmp_path / how)
+        j0 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+        key = (j0.out_shot, j0.in_shot)
+        pin = Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3))
+        refine_in(ws, pin=pin)
+        cfg = PipelineConfig.load(ws / "config.json")
+        export_workspace(ws, cfg, stages=("final",), formats=("otio",))
+        doc = json.loads((ws / "exports" / "final.otio").read_text())
+        kids = doc["tracks"]["children"][0]["children"]
+        clips = [k for k in kids if k["OTIO_SCHEMA"].startswith("Clip")]
+        jf = next(j for j in build_junctions(load_stage_timelines(ws)) if (j.out_shot, j.in_shot) == key)
+        out_k = next(k for k, c in enumerate(clips) if c["metadata"]["matchcut"]["clip_id"] == jf.out_clip)
+        if how == "trim":
+            clips[out_k]["source_range"]["duration"]["value"] -= 3  # the pinned cut moves 3 frames earlier
+        else:
+            victim = clips[out_k + 1]
+            at = kids.index(victim)
+            del kids[at]
+            if at < len(kids) and kids[at]["OTIO_SCHEMA"].startswith("Transition"):
+                del kids[at]
+            if at - 1 >= 0 and kids[at - 1]["OTIO_SCHEMA"].startswith("Transition"):
+                del kids[at - 1]
+        (tmp_path / f"{how}.otio").write_text(json.dumps(doc))
+        import_timeline(ws, cfg, tmp_path / f"{how}.otio")
+
+        async def body():
+            app = app_for(ws)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.press("4")
+                view = app.query_one(EditView)
+                await wait_for(pilot, lambda: bool(view.junctions))
+                assert view.stages[-1] == "human" and view.current_stage() == "human"
+                assert f"pin s{key[0]}->s{key[1]} changed by the editor: " in str(app.query_one("#edit-header").content)
+                if how == "trim":
+                    await pilot.press(*(["right"] * select_pair(view, key)))
+                    panel = str(app.query_one("#junction-panel").content)
+                    assert "pin changed by the editor: cut trimmed by 3 frames (out)" in panel
+                    badge_line = panel.splitlines()[1]
+                    assert "pinned (" not in badge_line and "pending" not in badge_line and "locked by the editor" not in badge_line
+
+        run_async(body())
+
+
+def test_a_stale_human_stage_is_left_out_and_the_edit_view_says_why(mock_workspace, tmp_path):
+    """A re-run after an import: the human stage no longer fits, so it is not the latest stage and a new pin is judged by the real one."""
+    from matchcut.interchange.workspace import export_workspace, import_timeline
+    from matchcut.pipeline.junctions import stale_human
+
+    ws = own_copy(mock_workspace, tmp_path)
+    cfg = PipelineConfig.load(ws / "config.json")
+    export_workspace(ws, cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((ws / "exports" / "final.otio").read_text())
+    clips = [k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Clip")]
+    clips[1]["source_range"]["start_time"]["value"] += 3
+    clips[1]["source_range"]["duration"]["value"] -= 3
+    (tmp_path / "edit.otio").write_text(json.dumps(doc))
+    import_timeline(ws, cfg, tmp_path / "edit.otio")
+    assert stale_human(ws) is None
+    j1 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j1.out_shot, j1.in_shot)
+    refine_in(ws, pin=Pin(j1.out_shot, j1.in_shot, round(j1.baseline.out_time, 3), round(j1.baseline.in_time, 3)))
+    message = stale_human(ws)
+    assert message and message.startswith("human.json is stale: ")
+    assert (ws / "human.json").exists()
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-1] == "final" and view.current_stage() == "final" and "human" not in view.stages
+            assert message in str(app.query_one("#edit-header").content)
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pinned (" in panel and "pending" not in panel
+
+    run_async(body())
+
+
 def test_the_apply_hint_follows_where_the_run_is(mock_workspace):
     async def body():
         app = app_for(mock_workspace)

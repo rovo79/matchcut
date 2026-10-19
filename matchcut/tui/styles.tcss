@@ -17,7 +17,7 @@ TabbedContent { height: 1fr; }
 #shot-desc { height: auto; }
 .beat-card { border: round $secondary; padding: 0 1; margin: 0 0 1 0; height: auto; }
 #story-head { height: auto; padding: 0 1; }
-#edit-header { height: 1; }
+#edit-header { height: auto; min-height: 1; }
 #beat-strip { height: 1; color: $text-muted; }
 #junction-frames { height: 16; }
 #review-status { height: 1; }
