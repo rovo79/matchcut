@@ -382,7 +382,8 @@ after someone with Studio has run the live checklist.
 and `resolve_probe.py`). You run the script once in Resolve Studio. In a project of its own, it tries every route to a
 timeline: the three imports, a native build with `AppendToTimeline`, and `AddTransition` where the installed API catalogue
 documents it. It then reads each timeline back, tests markers and the playhead, and exports each one again.
-`python -m matchcut.resolve report WORKSPACE .../resolve_probe.json` compares the result with the cut offline and
+It only starts from an empty Untitled Project (or an earlier probe project) and asks before it switches projects.
+`python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe` compares the latest run with the cut offline and
 recommends a route for M2c-1. Safety rules, the allow-list of calls, the per-OS commands, what to send back and how
 to delete the probe projects: [M2C-PROBE.md](M2C-PROBE.md). Status: not run against a live Resolve; human gate PENDING.
 

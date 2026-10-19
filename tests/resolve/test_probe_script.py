@@ -20,7 +20,7 @@ from .fake_resolve import DOCUMENTED, GATED, VARIANTS, Variant, World
 
 ROUTES = ["import-otio", "import-fcpxml", "import-edl", "build", "build+transitions"]
 TOP_KEYS = {"schema", "probe_version", "created_utc", "status", "dry_run", "bundle", "resolve", "platform", "scripting", "catalogue", "mcp",
-            "safety", "database", "project", "media", "steps", "timelines", "failures", "notes"}
+            "safety", "database", "project", "media", "steps", "timelines", "failures", "notes", "run_dir", "version_notes"}
 ROUTE_KEYS = {"name", "route", "created", "steps", "readback", "markers", "navigation", "exports"}
 CREATING = {"ProjectManager.CreateProject", "ProjectManager.CreateFolder", "ProjectManager.GotoRootFolder", "ProjectManager.OpenFolder",
             "ProjectManager.SaveProject", "MediaPool.ImportMedia", "MediaPool.ImportTimelineFromFile", "MediaPool.CreateEmptyTimeline",
@@ -52,6 +52,8 @@ def test_the_probe_runs_every_route_in_a_project_of_its_own(bundle, monkeypatch,
     assert not user.touched and not user.timelines and not user.pool and user.settings == {"timelineFrameRate": "24"}
     assert not world.projects[("Client work",)]["Client job v2"].touched
     assert doc["project"]["user_current_project"] == "Untitled Project" and doc["safety"]["allowed"] is True
+    assert doc["safety"]["counts"] == {"timelines": 0, "clips": 0, "subfolders": 0} and doc["safety"]["empty"] is True
+    assert doc["safety"]["confirmed"] == "--yes" and doc["version_notes"] == []
     assert doc["project"]["frame_rate_requested"] == "25" and doc["project"]["frame_rate_setting"] == "25"
     # every route made its own timeline and was read back
     assert list(doc["timelines"]) == ROUTES
@@ -92,10 +94,14 @@ def test_the_probe_runs_every_route_in_a_project_of_its_own(bundle, monkeypatch,
     added = doc["timelines"]["import-otio"]["markers"]["added"]
     assert all(a["add_marker"] is False and a["update_marker_custom_data"] is True for a in added.values())
     assert doc["media"]["found_in_pool_by"] == ["File Path"] and doc["timelines"]["import-edl"]["media_imported_first"] is True
-    # files: only inside the bundle (the JSON and exports/)
+    # files: only inside the bundle, in this run's own directory (the JSON and exports/)
+    run = doc["run_dir"]
+    assert re.fullmatch(r"runs/\d{8}T\d{6}Z", run)
     new_files = tree(bundle.dir) - before
-    assert new_files == {"resolve_probe.json", "exports"} | {f"exports/{r.replace('+', '-')}.{x}" for r in ROUTES for x in ("otio", "fcpxml", "edl")}
-    assert "send back resolve_probe.json and the exports folder" in out
+    assert new_files == {"runs", run, f"{run}/resolve_probe.json", f"{run}/exports"} | {
+        f"{run}/exports/{r.replace('+', '-')}.{x}" for r in ROUTES for x in ("otio", "fcpxml", "edl")}
+    assert doc["timelines"]["build"]["exports"]["otio"]["file"] == f"{run}/exports/build.otio"
+    assert "send back that folder" in out and str(bundle.dir / run) in out
 
 
 def test_the_json_records_the_environment_bundle_catalogue_and_mcp(bundle, monkeypatch):
@@ -126,8 +132,9 @@ def test_the_guard_refuses_a_user_project_and_creates_nothing(bundle, monkeypatc
     assert code == 3 and doc["status"] == "refused" and doc["safety"]["allowed"] is False
     assert doc["safety"]["current_project"] == doc["project"]["user_current_project"] == "Client job v3"
     assert made(world) == [] and world.saved == [] and world.current.name == "Client job v3" and world.rejected == []
-    assert "Save and close your project first" in out and "'Client job v3'" in out
-    assert doc["timelines"] == {} and not (bundle.dir / "exports").exists()
+    assert "open a new, empty project (or quit and reopen Resolve) and run the probe again" in out and "'Client job v3'" in out
+    assert "File > Close Project" not in out
+    assert doc["timelines"] == {} and not list(bundle.dir.glob("runs/*/exports"))
 
 
 def test_an_earlier_probe_project_is_allowed_and_a_rerun_makes_a_new_project(bundle, monkeypatch):
@@ -143,10 +150,12 @@ def test_an_earlier_probe_project_is_allowed_and_a_rerun_makes_a_new_project(bun
 
 
 def test_the_dry_run_connects_and_checks_and_creates_nothing(bundle, monkeypatch, capsys):
-    code, doc, world = run_probe(bundle, monkeypatch, args=["--dry-run"])
+    code, doc, world = run_probe(bundle, monkeypatch, args=["--dry-run"], answer=EOFError)
     assert code == 0 and doc["status"] == "dry-run" and doc["dry_run"] is True and doc["safety"]["allowed"] is True
     assert made(world) == [] and doc["project"]["created"] is False and doc["timelines"] == {}
-    assert not (bundle.dir / "resolve_probe.json").exists() and (bundle.dir / "resolve_probe_dry_run.json").exists()
+    assert world.calls("input") == []  # a dry run never asks and never switches
+    assert doc["run_dir"].endswith("-dry-run") and (bundle.dir / doc["run_dir"] / "resolve_probe.json").exists()
+    assert not (bundle.dir / doc["run_dir"] / "exports").exists()
     assert "nothing was created" in capsys.readouterr().out
     # a dry run with a user project open says so too
     code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["a user project is open"], args=["--dry-run"])
@@ -156,7 +165,8 @@ def test_the_dry_run_connects_and_checks_and_creates_nothing(bundle, monkeypatch
 def test_out_overrides_the_json_path(bundle, monkeypatch, tmp_path):
     target = tmp_path / "elsewhere" / "result.json"
     code, doc, world = run_probe(bundle, monkeypatch, args=["--out", str(target)])
-    assert code == 0 and target.exists() and doc["status"] == "complete" and not (bundle.dir / "resolve_probe.json").exists()
+    assert code == 0 and target.exists() and doc["status"] == "complete"
+    assert not (bundle.dir / doc["run_dir"] / "resolve_probe.json").exists() and (bundle.dir / doc["run_dir"] / "exports" / "build.otio").exists()
 
 
 def test_scripting_not_connected_says_what_to_set(bundle, monkeypatch, capsys):
@@ -181,12 +191,17 @@ def test_no_module_prints_the_exact_setup_for_every_os(bundle, monkeypatch, caps
         assert line in out, line
 
 
-def test_an_early_stop_never_replaces_a_complete_result(bundle, monkeypatch):
+def test_every_run_writes_its_own_directory_and_never_replaces_another(bundle, monkeypatch):
     code, done, world = run_probe(bundle, monkeypatch)
     assert code == 0
-    code, _, _ = run_probe(bundle, monkeypatch, VARIANTS["scripting not connected"])
-    assert code == 2 and json.loads((bundle.dir / "resolve_probe.json").read_text())["status"] == "complete"
-    assert json.loads((bundle.dir / "resolve_probe_last_attempt.json").read_text())["status"] == "not connected"
+    first = bundle.dir / done["run_dir"]
+    before = {p: p.read_bytes() for p in first.rglob("*") if p.is_file()}
+    code, again, _ = run_probe(bundle, monkeypatch, VARIANTS["the open project changes mid-run"])  # a second real run that fails part-way
+    assert code == 4 and again["status"] == "aborted" and again["run_dir"] != done["run_dir"]
+    assert {p: p.read_bytes() for p in first.rglob("*") if p.is_file()} == before  # the earlier complete run is untouched
+    code, third, _ = run_probe(bundle, monkeypatch, VARIANTS["scripting not connected"])
+    assert code == 2 and third["run_dir"] not in (done["run_dir"], again["run_dir"])
+    assert json.loads((first / "resolve_probe.json").read_text())["status"] == "complete"
 
 
 # -- documented calls only --------------------------------------------------------------------------------------------------------
@@ -211,11 +226,16 @@ def test_without_any_catalogue_only_readme_calls_are_made(bundle, monkeypatch):
 def test_the_option_keys_come_from_the_catalogue_text_only():
     opts, why = template.transition_options('options: {"type": "Cross Dissolve", "alignment": "center", "duration": <frames>}', 12)
     assert opts == {"type": "Cross Dissolve", "alignment": "center", "duration": 12} and "catalogue" in why
-    opts, why = template.transition_options('AddTransition(options) adds a transition. Keys: "duration".', 8)
+    opts, why = template.transition_options('AddTransition(options) adds a transition. Keys: "duration" (in frames).', 8)
     assert opts == {"duration": 8}
+    # the unit of duration is not stated: duration is not passed, and with nothing else named AddTransition is not called
+    opts, why = template.transition_options('AddTransition(options) adds a transition. Keys: "duration".', 8)
+    assert opts is None and "does not say the unit of duration" in why
+    opts, why = template.transition_options('Keys: "duration", "alignment" ("center")', 8)
+    assert opts == {"alignment": "center"} and "duration not passed" in why
     opts, why = template.transition_options("AddTransition(TransitionOptions) -> TimelineItem", 8)
     assert opts is None and "names none of the option keys" in why
-    opts, _ = template.transition_options('"type", "position", "duration"', 6)  # a key without a value the text names is left out
+    opts, _ = template.transition_options('"type", "position", "duration" in frames', 6)  # a key without a value the text names is left out
     assert opts == {"duration": 6}
 
 
@@ -302,6 +322,146 @@ def test_the_catalogue_definition_and_its_options_type_are_excerpted(tmp_path, m
     monkeypatch.setenv("RESOLVE_SCRIPT_API", str(tmp_path))
     cat = template.find_catalogue()
     text = cat["excerpts"]["AddTransition"]
-    assert "def AddTransition" in text and "class TransitionOptions" in text and cat["gated"]["TimelineItem.AddTransition"]
-    opts, why = template.transition_options(text, 10)
+    assert text.lstrip().startswith("def AddTransition") and cat["excerpt_files"]["AddTransition"].endswith(".pyi")
+    assert cat["gated"]["TimelineItem.AddTransition"] and list(cat["option_types"]) == ["TransitionOptions"]
+    opts, why = template.transition_options(text + "\n" + cat["option_types"]["TransitionOptions"], 10)
     assert opts == {"type": "Cross Dissolve", "alignment": "center"}  # durationFrames is not a key the probe knows: left out, not guessed
+
+
+# -- the review's safety and catalogue fixes -----------------------------------------------------------------------------------
+@pytest.mark.parametrize("variant, counts", [("untitled with a timeline", {"timelines": 1, "clips": 0, "subfolders": 0}),
+                                             ("untitled with a pool clip", {"timelines": 0, "clips": 1, "subfolders": 0}),
+                                             ("untitled with a pool folder", {"timelines": 0, "clips": 0, "subfolders": 1})])
+def test_an_untitled_project_with_anything_in_it_is_refused(bundle, monkeypatch, capsys, variant, counts):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS[variant])
+    out = capsys.readouterr().out
+    assert code == 3 and doc["status"] == "refused" and doc["safety"]["allowed"] is False and doc["safety"]["empty"] is False
+    assert doc["safety"]["counts"] == counts and doc["safety"]["current_project"] == "Untitled Project"
+    assert made(world) == [] and world.saved == [] and world.current is world.user and world.rejected == []
+    assert f"(it has {counts['timelines']} timelines, {counts['clips']} clips and {counts['subfolders']} folders in its media pool)" in out
+    assert "open a new, empty project (or quit and reopen Resolve)" in out
+
+
+@pytest.mark.parametrize("answer", ["no", "", "y", EOFError])
+def test_without_a_yes_nothing_is_switched_or_created(bundle, monkeypatch, capsys, answer):
+    code, doc, world = run_probe(bundle, monkeypatch, answer=answer)
+    out = capsys.readouterr().out
+    assert code == 5 and doc["status"] == "not confirmed" and doc["safety"]["confirmed"] is False
+    assert made(world) == [] and world.current is world.user and doc["timelines"] == {}
+    (prompt,) = [c[1] for c in world.calls("input")]
+    assert "'Untitled Project'" in prompt and "matchcut-probe-" in prompt and "'matchcut-probe'" in prompt and prompt.endswith("Type yes to continue: ")
+    assert "nothing was created and the open project was not switched" in out
+
+
+def test_typing_yes_proceeds_and_yes_flag_skips_the_question(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, answer="yes")
+    assert code == 0 and doc["status"] == "complete" and doc["safety"]["confirmed"] is True and len(world.calls("input")) == 1
+    code, doc, world = run_probe(bundle, monkeypatch)  # --yes
+    assert code == 0 and doc["safety"]["confirmed"] == "--yes" and world.calls("input") == []
+
+
+def test_an_earlier_probe_project_is_allowed_even_with_timelines(bundle, monkeypatch):
+    code, first, world = run_probe(bundle, monkeypatch)
+    code, second, world = run_probe(bundle, monkeypatch, world=world)
+    s = second["safety"]
+    assert code == 0 and s["earlier_probe_project"] is True and s["allowed"] is True and s["counts"]["timelines"] == 5
+
+
+def test_a_module_that_is_found_but_fails_to_import_is_named(bundle, monkeypatch, capsys, tmp_path):
+    api = tmp_path / "Scripting"
+    (api / "Modules").mkdir(parents=True)
+    (api / "Modules" / "DaVinciResolveScript.py").write_text("raise ImportError('cannot load fusionscript: wrong architecture')\n")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    code, doc, world = run_probe(bundle, monkeypatch, inject=False, catalogue_dir=api, world=World(Variant(catalogue=False), None))
+    out = capsys.readouterr().out
+    path = str(api / "Modules" / "DaVinciResolveScript.py")
+    assert code == 2 and doc["status"] == "module failed to import" and doc["scripting"]["module_found"] is False
+    assert doc["scripting"]["module_errors"] == [{"where": str(api / "Modules"), "file": path,
+                                                  "error": "ImportError: cannot load fusionscript: wrong architecture"}]
+    assert f"found {path} but it failed to import: ImportError: cannot load fusionscript: wrong architecture" in out
+    assert "a Python that does not match Resolve's" in out and "export RESOLVE_SCRIPT_API=" in out
+    monkeypatch.setattr(sys, "argv", [str(bundle.script), "--check-module"])
+    import runpy
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_path(str(bundle.script), run_name="__main__")
+    assert exc.value.code == 2 and f"found {path} but it failed to import" in capsys.readouterr().out
+
+
+def test_create_project_that_does_not_switch_stops_before_anything_else(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["CreateProject does not switch"])
+    assert code == 4 and doc["status"] == "aborted" and world.calls("ProjectManager.SaveProject") == []
+    assert [c for c in made(world) if c not in ("ProjectManager.GotoRootFolder", "ProjectManager.CreateFolder", "ProjectManager.OpenFolder",
+                                                 "ProjectManager.CreateProject")] == []
+    assert any("stopped before touching anything" in n for n in doc["notes"]) and not world.user.touched
+
+
+def test_a_project_switch_mid_run_stops_the_probe_and_nothing_is_saved(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["the open project changes mid-run"])
+    assert code == 4 and doc["status"] == "aborted" and doc["project"]["saved"] is False
+    assert world.calls("ProjectManager.SaveProject") == [] and not world.user.touched
+    assert any(n.startswith("not saved: the open project is no longer the probe's") for n in doc["notes"])
+    assert any("build+transitions: the open project is 'Untitled Project', not the probe's" in n for n in doc["notes"])
+    assert "build+transitions" not in doc["timelines"]
+
+
+PYI_NEIGHBOUR = '''class Timeline:
+    def AddTransition(self, opts) -> bool:
+        """not TimelineItem's: {"type": "Cross Dissolve", "duration": 5 frames}"""
+
+class TimelineItem:
+    def AddTransition(self, options) -> TimelineItem:
+        """Adds a transition."""
+    def SetFades(self, fades: dict) -> bool:
+        """fades: {"position": "end", "duration": 12 frames, "alignment": "center"}"""
+'''
+
+
+def test_add_transition_keys_never_come_from_a_neighbouring_def(tmp_path, monkeypatch):
+    (tmp_path / "DaVinciResolveScript.pyi").write_text(PYI_NEIGHBOUR)
+    monkeypatch.setenv("RESOLVE_SCRIPT_API", str(tmp_path))
+    cat = template.find_catalogue()
+    text = cat["excerpts"]["AddTransition"]
+    assert "SetFades" not in text and "Timeline:" not in text and text.strip().endswith('"""Adds a transition."""')
+    assert template.transition_options(text, 12)[0] is None  # nothing named: not called
+    assert cat["gated"]["TimelineItem.AddTransition"] is True and cat["excerpt_files"]["AddTransition"].endswith(".pyi")
+
+
+def test_gating_is_per_class(tmp_path, monkeypatch):
+    (tmp_path / "DaVinciResolveScript.pyi").write_text("class Timeline:\n    def AddTransition(self): ...\n    def GetType(self): ...\n")
+    (tmp_path / "README.md").write_text("Timeline\n  AddTransition() on a timeline\n\nTimelineItem\n  GetName()\n")
+    monkeypatch.setenv("RESOLVE_SCRIPT_API", str(tmp_path))
+    cat = template.find_catalogue()
+    assert cat["gated"] == {"TimelineItem.AddTransition": False, "TimelineItem.GetType": False}
+    (tmp_path / "README.md").write_text("Timeline\n  GetName()\n\nTimelineItem\n  GetType() --> string  # new in 21.1\n")
+    assert template.find_catalogue()["gated"] == {"TimelineItem.AddTransition": False, "TimelineItem.GetType": True}
+
+
+def test_marker_answers_without_a_frame_are_recorded_raw(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["marker info without frame"])
+    exp = expected_of(bundle)
+    found = doc["timelines"]["build"]["markers"]["found_after"]
+    assert code == 0 and all(v is not None and v["frame"] is None and v["raw"]["customData"] == j["id"] for j, v in zip(exp["junctions"], found.values()))
+    nav = doc["timelines"]["build"]["navigation"]["attempts"]
+    assert {a["how"] for a in nav} == {"start timecode + record frame"}  # no frame to navigate to from the marker
+
+
+def test_the_frame_rate_setting_and_the_timeline_settings_snapshot(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch)
+    rb = doc["timelines"]["build"]["readback"]
+    assert rb["settings"] == {"timelineFrameRate": "25"} and rb["frame_rate_setting"] == "25" and rb["frame_rate_setting_from"] == "Timeline.GetSetting() snapshot"
+    monkeypatch.setattr(template, "EXPECTED", {"rate": [30000, 1001], "source": {"start_tc_drop": True}})
+    assert template.rate_setting() == "29.97 DF"
+    monkeypatch.setattr(template, "EXPECTED", {"rate": [30000, 1001], "source": {"start_tc_drop": False}})
+    assert template.rate_setting() == "29.97"
+    monkeypatch.setattr(template, "EXPECTED", {"rate": [24000, 1001], "source": {"start_tc_drop": True}})
+    assert template.rate_setting() == "23.976"
+
+
+def test_an_older_resolve_gets_the_version_note(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["Resolve 18.5"])
+    assert code == 0 and len(doc["version_notes"]) == 1 and "18.5.0.0" in doc["version_notes"][0]
+    assert "not in the 18.5 README" in doc["version_notes"][0]
+
+
+def test_the_linux_lib_defaults_follow_the_readme():
+    assert template.LIB_DEFAULTS["linux"] == ["/opt/resolve/libs/Fusion/fusionscript.so", "/home/resolve/libs/Fusion/fusionscript.so"]

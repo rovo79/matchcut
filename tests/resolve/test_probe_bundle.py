@@ -46,9 +46,10 @@ def test_probe_cli_prints_the_one_command_and_says_it_is_not_live(wsp, capsys):
     code = main(["probe", str(wsp.ws), "--stage", "roughcut", "--out", str(out_dir)])
     out = capsys.readouterr().out
     assert code == 0 and (out_dir / "roughcut.otio").exists() and (out_dir / "resolve_probe.py").exists()
-    assert f'  python3 "{out_dir / "resolve_probe.py"}"' in out.splitlines()
-    assert "not run against a live Resolve" in out and "External scripting using = Local" in out
-    assert f'python -m matchcut.resolve report "{wsp.ws}" "{out_dir / "resolve_probe.json"}"' in out
+    script = out_dir / "resolve_probe.py"
+    assert f'  python3 "{script}" --dry-run' in out.splitlines() and f'  python3 "{script}"' in out.splitlines()
+    assert "not run against a live Resolve" in out and "External scripting using = Local" in out and "--yes" in out
+    assert f'python -m matchcut.resolve report "{wsp.ws}" "{out_dir}"' in out and f"{out_dir / 'runs'}/<UTC time>/" in out
     assert json.loads((out_dir / "expected.json").read_text())["stage"] == "roughcut"
 
 
@@ -76,11 +77,11 @@ def test_bad_input_is_a_one_line_error(wsp, capsys, argv, message):
 def test_report_cli_prints_and_writes_the_report(wsp, bundle, capsys, monkeypatch):
     from .conftest import run_probe
 
-    run_probe(bundle, monkeypatch)
+    code, doc, _ = run_probe(bundle, monkeypatch)
     capsys.readouterr()
-    assert main(["report", str(wsp.ws), str(bundle.dir / "resolve_probe.json")]) == 0
+    assert main(["report", str(wsp.ws), str(bundle.dir)]) == 0
     out = capsys.readouterr().out
-    assert out.startswith("# Resolve probe report") and out.rstrip().endswith(f"wrote {bundle.dir / 'probe_report.md'}")
+    assert out.startswith("# Resolve probe report") and out.rstrip().endswith(f"wrote {bundle.dir / doc['run_dir'] / 'probe_report.md'}")
 
 
 def test_the_package_stays_out_of_the_tui_review_and_engine():
@@ -101,6 +102,14 @@ def test_the_template_imports_nothing_but_the_standard_library():
     tree = ast.parse(Path(t.__file__).read_text(), feature_version=(3, 6))
     mods = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names} | {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     assert mods == {"argparse", "datetime", "hashlib", "json", "os", "platform", "re", "sys", "traceback", "DaVinciResolveScript"}
+
+
+def test_the_command_suits_the_platform(tmp_path):
+    from matchcut.resolve.probe import command
+
+    assert command(tmp_path / "resolve_probe.py", "win32") == f'py -3 "{tmp_path / "resolve_probe.py"}"'
+    assert command(tmp_path / "resolve_probe.py", "darwin") == f'python3 "{tmp_path / "resolve_probe.py"}"'
+    assert command(tmp_path / "resolve_probe.py", "linux") == f'python3 "{tmp_path / "resolve_probe.py"}"'
 
 
 def test_a_human_stage_in_the_workspace_is_refused(wsp):

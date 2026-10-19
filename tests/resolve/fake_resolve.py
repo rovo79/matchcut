@@ -5,8 +5,9 @@ items that have record and source frames, transitions between items, markers wit
 written from the model (OTIO by hand, without matchcut's metadata; FCPXML 1.10 and EDL with matchcut's own writers from the model).
 ``ImportTimelineFromFile`` reads the file with matchcut's own readers: the fake imports exactly what matchcut's readers read.
 
-The allow-list: ``DOCUMENTED`` is an independent transcription of the Resolve 21.0.4 README (community copy,
-https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8), per class.  ``GATED`` are calls reported for 21.1+ and absent from that
+The allow-list: ``DOCUMENTED`` is every method of every class in the Resolve 21.0.4 README (community copy,
+https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8), parsed from its full text into ``readme_21_0_4.json``, independently of
+the probe script's own list.  ``GATED`` are calls reported for 21.1+ and absent from that
 README; the fake answers them only when its install's catalogue documents them (``Variant.catalogue``).  Every other public attribute is
 rejected (AttributeError) and logged in ``World.rejected``, so a test can assert that the script never tried one: the script catches
 exceptions, so a rejection would otherwise only show up as a recorded failure.
@@ -30,68 +31,12 @@ from matchcut.interchange.edl import _tc, export_edl, import_edl
 from matchcut.interchange.fcpxml import export_fcpxml, import_fcpxml
 from matchcut.interchange.otio import import_otio
 
+from . import readme_calls
+
 # -- the allow-list ----------------------------------------------------------------------------------------------------------------
-# every method of each class in the Resolve 21.0.4 README (community copy), transcribed independently of the probe script's own list
-DOCUMENTED: Dict[str, set] = {
-    "DaVinciResolveScript": {"scriptapp"},
-    "Resolve": {"Fusion", "GetMediaStorage", "GetProjectManager", "OpenPage", "GetCurrentPage", "GetProductName", "GetVersion", "GetVersionString",
-                "GetLayoutPresetList", "LoadLayoutPreset", "UpdateLayoutPreset", "ExportLayoutPreset", "DeleteLayoutPreset", "SaveLayoutPreset",
-                "ImportLayoutPreset", "Quit", "ImportRenderPreset", "ExportRenderPreset", "GetBurnInPresetList", "DeleteBurnInPreset",
-                "ImportBurnInPreset", "ExportBurnInPreset", "GetUserPreferencesPresetList", "LoadUserPreferencesPreset", "SaveUserPreferencesPreset",
-                "DeleteUserPreferencesPreset", "ImportUserPreferencesPreset", "ExportUserPreferencesPreset", "GetKeyframeMode", "SetKeyframeMode",
-                "GetFairlightPresets", "DisableBackgroundTasksForCurrentResolveSession"},
-    "ProjectManager": {"ArchiveProject", "CreateProject", "DeleteProject", "LoadProject", "GetCurrentProject", "SaveProject", "CloseProject",
-                       "CreateFolder", "DeleteFolder", "GetProjectListInCurrentFolder", "GetProjectAttributesInCurrentFolder",
-                       "GetFolderListInCurrentFolder", "GotoRootFolder", "GotoParentFolder", "GetCurrentFolder", "OpenFolder", "ImportProject",
-                       "ExportProject", "RestoreProject", "GetCurrentDatabase", "GetDatabaseList", "SetCurrentDatabase", "CreateCloudProject",
-                       "LoadCloudProject", "ImportCloudProject", "RestoreCloudProject"},
-    "Project": {"GetMediaPool", "GetTimelineCount", "GetTimelineByIndex", "GetCurrentTimeline", "SetCurrentTimeline", "GetGallery", "GetName",
-                "SetName", "GetPresetList", "SetPreset", "AddRenderJob", "DeleteRenderJob", "DeleteAllRenderJobs", "GetRenderJobList",
-                "GetRenderPresetList", "StartRendering", "StopRendering", "IsRenderingInProgress", "LoadRenderPreset", "SaveAsNewRenderPreset",
-                "DeleteRenderPreset", "SetRenderSettings", "GetRenderJobStatus", "GetQuickExportRenderPresets", "RenderWithQuickExport", "GetSetting",
-                "SetSetting", "GetRenderFormats", "GetRenderCodecs", "GetCurrentRenderFormatAndCodec", "SetCurrentRenderFormatAndCodec",
-                "GetCurrentRenderMode", "SetCurrentRenderMode", "GetRenderResolutions", "RefreshLUTList", "GetUniqueId",
-                "InsertAudioToCurrentTrackAtPlayhead", "LoadBurnInPreset", "ExportCurrentFrameAsStill", "GetColorGroupsList", "AddColorGroup",
-                "DeleteColorGroup", "ApplyFairlightPresetToCurrentTimeline", "ResetIntellisearchAnalysis", "GenerateSpeech"},
-    "MediaPool": {"GetRootFolder", "AddSubFolder", "RefreshFolders", "CreateEmptyTimeline", "AppendToTimeline", "CreateTimelineFromClips",
-                  "ImportTimelineFromFile", "DeleteTimelines", "GetCurrentFolder", "SetCurrentFolder", "DeleteClips", "ImportFolderFromFile",
-                  "DeleteFolders", "MoveClips", "MoveFolders", "GetClipMatteList", "GetTimelineMatteList", "DeleteClipMattes", "RelinkClips",
-                  "UnlinkClips", "ImportMedia", "ExportMetadata", "GetUniqueId", "CreateStereoClip", "AutoSyncAudio", "GetSelectedClips",
-                  "SetSelectedClip"},
-    "Folder": {"GetClipList", "GetName", "GetSubFolderList", "GetIsFolderStale", "GetUniqueId", "Export", "TranscribeAudio", "ClearTranscription",
-               "PerformAudioClassification", "ClearAudioClassification", "RemoveMotionBlur", "AnalyzeForIntellisearch", "AnalyzeForSlate"},
-    "MediaPoolItem": {"GetName", "SetName", "GetMetadata", "SetMetadata", "GetTimeline", "GetThirdPartyMetadata", "SetThirdPartyMetadata",
-                      "GetMediaId", "AddMarker", "GetMarkers", "GetMarkerByCustomData", "UpdateMarkerCustomData", "GetMarkerCustomData",
-                      "DeleteMarkersByColor", "DeleteMarkerAtFrame", "DeleteMarkerByCustomData", "AddFlag", "GetFlagList", "ClearFlags", "GetClipColor",
-                      "SetClipColor", "ClearClipColor", "GetClipProperty", "SetClipProperty", "LinkProxyMedia", "LinkFullResolutionMedia",
-                      "UnlinkProxyMedia", "ReplaceClip", "ReplaceClipPreserveSubClip", "GetUniqueId", "TranscribeAudio", "ClearTranscription",
-                      "PerformAudioClassification", "ClearAudioClassification", "GetAudioMapping", "GetMarkInOut", "SetMarkInOut", "ClearMarkInOut",
-                      "MonitorGrowingFile", "RemoveMotionBlur", "AnalyzeForIntellisearch", "AnalyzeForSlate"},
-    "Timeline": {"GetName", "SetName", "GetStartFrame", "GetEndFrame", "SetStartTimecode", "GetStartTimecode", "GetTrackCount", "AddTrack",
-                 "DeleteTrack", "GetTrackSubType", "SetTrackEnable", "GetIsTrackEnabled", "SetTrackLock", "GetIsTrackLocked", "DeleteClips",
-                 "SetClipsLinked", "GetItemListInTrack", "GetSelectedClips", "AddMarker", "GetMarkers", "GetMarkerByCustomData",
-                 "UpdateMarkerCustomData", "GetMarkerCustomData", "DeleteMarkersByColor", "DeleteMarkerAtFrame", "DeleteMarkerByCustomData",
-                 "GetCurrentTimecode", "SetCurrentTimecode", "GetCurrentVideoItem", "GetCurrentClipThumbnailImage", "GetTrackName", "SetTrackName",
-                 "DuplicateTimeline", "CreateCompoundClip", "CreateFusionClip", "ImportIntoTimeline", "Export", "GetSetting", "SetSetting",
-                 "InsertGeneratorIntoTimeline", "InsertFusionGeneratorIntoTimeline", "InsertFusionCompositionIntoTimeline",
-                 "InsertOFXGeneratorIntoTimeline", "InsertTitleIntoTimeline", "InsertFusionTitleIntoTimeline", "GrabStill", "GrabAllStills",
-                 "GetUniqueId", "CreateSubtitlesFromAudio", "DetectSceneCuts", "ConvertTimelineToStereo", "GetNodeGraph", "AnalyzeDolbyVision",
-                 "GetMediaPoolItem", "GetMarkInOut", "SetMarkInOut", "ClearMarkInOut", "GetVoiceIsolationState", "SetVoiceIsolationState"},
-    "TimelineItem": {"GetName", "SetName", "GetDuration", "GetEnd", "GetSourceEndFrame", "GetSourceEndTime", "GetFusionCompCount",
-                     "GetFusionCompByIndex", "GetFusionCompNameList", "GetFusionCompByName", "GetLeftOffset", "GetRightOffset", "GetStart",
-                     "GetSourceStartFrame", "GetSourceStartTime", "SetProperty", "GetProperty", "AddMarker", "GetMarkers", "GetMarkerByCustomData",
-                     "UpdateMarkerCustomData", "GetMarkerCustomData", "DeleteMarkersByColor", "DeleteMarkerAtFrame", "DeleteMarkerByCustomData",
-                     "AddFlag", "GetFlagList", "ClearFlags", "GetClipColor", "SetClipColor", "ClearClipColor", "AddFusionComp", "ImportFusionComp",
-                     "ExportFusionComp", "DeleteFusionCompByName", "LoadFusionCompByName", "RenameFusionCompByName", "AddVersion", "GetCurrentVersion",
-                     "DeleteVersionByName", "LoadVersionByName", "RenameVersionByName", "GetVersionNameList", "GetMediaPoolItem",
-                     "GetStereoConvergenceValues", "GetStereoLeftFloatingWindowParams", "GetStereoRightFloatingWindowParams", "SetCDL", "AddTake",
-                     "GetSelectedTakeIndex", "GetTakesCount", "GetTakeByIndex", "DeleteTakeByIndex", "SelectTakeByIndex", "FinalizeTake", "CopyGrades",
-                     "SetClipEnabled", "GetClipEnabled", "UpdateSidecar", "GetUniqueId", "LoadBurnInPreset", "CreateMagicMask", "RegenerateMagicMask",
-                     "Stabilize", "SmartReframe", "GetNodeGraph", "GetColorGroup", "AssignToColorGroup", "RemoveFromColorGroup", "ExportLUT",
-                     "GetLinkedItems", "GetTrackTypeAndIndex", "GetSourceAudioChannelMapping", "GetIsColorOutputCacheEnabled",
-                     "GetIsFusionOutputCacheEnabled", "SetColorOutputCache", "SetFusionOutputCache", "GetVoiceIsolationState", "SetVoiceIsolationState",
-                     "ResetAllNodeColors"},
-}
+# every method of each class in the Resolve 21.0.4 README's API reference, parsed from its full text (readme_calls.py): the source of record
+DOCUMENTED: Dict[str, set] = {"DaVinciResolveScript": {"scriptapp"}}
+DOCUMENTED.update({cls: set(names) for cls, names in readme_calls.load()["classes"].items()})
 # reported for 21.1+ (third-party), not in the 21.0.4 README: answered only when the fake install's catalogue documents them
 GATED: Dict[str, set] = {"TimelineItem": {"AddTransition", "SetFades", "GetFades", "GetType"}}
 EXPORT_CONSTANTS = ("EXPORT_AAF", "EXPORT_DRT", "EXPORT_EDL", "EXPORT_FCP_7_XML", "EXPORT_FCPXML_1_8", "EXPORT_FCPXML_1_9", "EXPORT_FCPXML_1_10",
@@ -124,6 +69,16 @@ class Variant:
     import_media_dupes: bool = False  # ImportMedia of a file already in the pool imports it again (default: returns [])
     start_tc: str = "01:00:00:00"  # the start timecode of every new timeline
     raise_on: Tuple[str, ...] = ()  # "Class.Method" names that raise a RuntimeError
+    user_timelines: int = 0  # what the open project already holds (an Untitled Project with work in it)
+    user_clips: int = 0
+    user_subfolders: int = 0
+    create_does_not_switch: bool = False  # CreateProject makes the project but leaves the open one open
+    switch_away_on: str = ""  # "Class.Method": when the probe calls it, the open project becomes the user's again
+    src_end_inclusive: bool = False  # GetSourceEndFrame reads the last source frame (one less than matchcut's exclusive end)
+    end_frame_inclusive: bool = False  # AppendToTimeline takes endFrame as the last frame (the built clip is one frame longer)
+    transition_items: bool = False  # GetItemListInTrack lists transitions as items whose GetType() is "transition"
+    marker_info_plain: bool = False  # GetMarkerByCustomData returns the marker's information without its frame
+    version: Tuple[Any, ...] = (21, 1, 0, 0, "")
 
 
 VARIANTS = {
@@ -135,6 +90,16 @@ VARIANTS = {
     "AppendToTimeline returns [None]": Variant(name="AppendToTimeline returns [None]", append_none=True),
     "scripting not connected": Variant(name="scripting not connected", connected=False),
     "a user project is open": Variant(name="a user project is open", current_project="Client job v3"),
+    "untitled with a timeline": Variant(name="untitled with a timeline", user_timelines=1),
+    "untitled with a pool clip": Variant(name="untitled with a pool clip", user_clips=1),
+    "untitled with a pool folder": Variant(name="untitled with a pool folder", user_subfolders=1),
+    "CreateProject does not switch": Variant(name="CreateProject does not switch", create_does_not_switch=True),
+    "the open project changes mid-run": Variant(name="the open project changes mid-run", switch_away_on="MediaPool.CreateEmptyTimeline"),
+    "GetSourceEndFrame inclusive": Variant(name="GetSourceEndFrame inclusive", src_end_inclusive=True),
+    "endFrame inclusive": Variant(name="endFrame inclusive", end_frame_inclusive=True),
+    "transition items": Variant(name="transition items", transition_items=True),
+    "marker info without frame": Variant(name="marker info without frame", marker_info_plain=True),
+    "Resolve 18.5": Variant(name="Resolve 18.5", version=(18, 5, 0, 0, ""), raise_on=("TimelineItem.GetSourceStartFrame", "TimelineItem.GetSourceEndFrame")),
 }
 
 
@@ -180,6 +145,7 @@ class ProjectModel:
     pool: List[Media] = field(default_factory=list)
     timelines: List[TimelineModel] = field(default_factory=list)
     current_timeline: Optional[TimelineModel] = None
+    subfolders: List[str] = field(default_factory=list)  # media pool folders under the root
     touched: bool = False  # anything changed by the API
 
 
@@ -192,6 +158,11 @@ class World:
         self.projects: Dict[Tuple[str, ...], Dict[str, ProjectModel]] = {(): {}, ("Client work",): {}}
         self.cwd: Tuple[str, ...] = ()
         user = ProjectModel(variant.current_project, ())
+        user.timelines = [TimelineModel(f"Timeline {k + 1}", 86400, "01:00:00:00", Fraction(24)) for k in range(variant.user_timelines)]
+        if src is not None:
+            user.pool = [Media(src.path, Path(src.path).name, src) for _ in range(variant.user_clips)]
+        user.subfolders = [f"Bin {k + 1}" for k in range(variant.user_subfolders)]
+        self.user = user
         self.projects[()][user.name] = user
         other = ProjectModel("Client job v2", ("Client work",))
         self.projects[("Client work",)][other.name] = other
@@ -250,6 +221,8 @@ class _Api:
             except AttributeError:
                 world.rejected.append(f"{cls}.{name} (documented, not modelled by the fake)")
                 raise
+            if f"{cls}.{name}" == world.variant.switch_away_on:
+                world.current = world.user  # (someone opens another project while the probe runs)
             if f"{cls}.{name}" in world.variant.raise_on:
                 def boom(*a: Any, **k: Any) -> Any:
                     world.log.append((f"{cls}.{name}",) + a)
@@ -299,13 +272,13 @@ class FakeTimelineItem(_Api):
         return self.item.src_in + self._shift()
 
     def GetSourceEndFrame(self):
-        return self.item.src_in + self._shift() + self.item.dur
+        return self.item.src_in + self._shift() + self.item.dur - (1 if self._world.variant.src_end_inclusive else 0)
 
     def GetMediaPoolItem(self):
         return FakeMediaPoolItem(self._world, self.item.media)
 
     def GetType(self):
-        return "video" if self.item.track == "video" else "audio"
+        return {"video": "video", "audio": "audio", "transition": "transition"}[self.item.track]
 
     def AddTransition(self, options):
         self._log("AddTransition", dict(options))
@@ -357,7 +330,13 @@ class FakeTimeline(_Api):
     def GetItemListInTrack(self, trackType, index):
         assert trackType in ("audio", "video", "subtitle") and isinstance(index, int) and index >= 1
         items = {"video": self.tl.video, "audio": self.tl.audio}.get(trackType, []) if index == 1 else []
-        return [FakeTimelineItem(self._world, self.tl, i) for i in items]
+        out = []
+        for k, i in enumerate(items):
+            if trackType == "video" and self._world.variant.transition_items and k in self.tl.transitions:
+                frames, head = self.tl.transitions[k]
+                out.append(FakeTimelineItem(self._world, self.tl, Item(i.media, i.start - head, frames, 0, "transition")))
+            out.append(FakeTimelineItem(self._world, self.tl, i))
+        return out
 
     def AddMarker(self, frameId, color, name, note, duration, customData):
         assert color in MARKER_COLORS and isinstance(duration, int) and isinstance(customData, str), (color, duration, customData)
@@ -376,7 +355,7 @@ class FakeTimeline(_Api):
     def GetMarkerByCustomData(self, customData):
         for f, m in sorted(self.tl.markers.items()):
             if m["customData"] == customData:
-                return {float(f): dict(m)}
+                return dict(m) if self._world.variant.marker_info_plain else {float(f): dict(m)}
         return {}
 
     def UpdateMarkerCustomData(self, frameId, customData):
@@ -451,6 +430,18 @@ class FakeFolder(_Api):
     def GetClipList(self):
         return [FakeMediaPoolItem(self._world, m) for m in self.project.pool]
 
+    def GetSubFolderList(self):
+        return [FakeSubFolder(self._world, self.project, n) for n in self.project.subfolders]
+
+
+class FakeSubFolder(FakeFolder):
+    def __init__(self, world: World, project: ProjectModel, name: str):
+        super().__init__(world, project)
+        self.name = name
+
+    def GetName(self):
+        return self.name
+
 
 class FakeMediaPool(_Api):
     _cls = "MediaPool"
@@ -510,7 +501,7 @@ class FakeMediaPool(_Api):
                 out.append(None)
                 continue
             media = info["mediaPoolItem"].media
-            dur = int(info["endFrame"]) - int(info["startFrame"])
+            dur = int(info["endFrame"]) - int(info["startFrame"]) + (1 if self._world.variant.end_frame_inclusive else 0)
             rec = int(info.get("recordFrame", tl.end))
             item = Item(media, rec, dur, int(info["startFrame"]))
             tl.video.append(item)
@@ -647,7 +638,8 @@ class FakeProjectManager(_Api):
             return None
         p = ProjectModel(projectName, self._world.cwd)
         here[projectName] = p
-        self._world.current = p  # CreateProject switches to the new project
+        if not self._world.variant.create_does_not_switch:
+            self._world.current = p  # CreateProject switches to the new project
         return FakeProject(self._world, p)
 
     def SaveProject(self):
@@ -671,10 +663,10 @@ class FakeResolve(_Api):
         return PRODUCT
 
     def GetVersion(self):
-        return [21, 1, 0, 0, ""]
+        return list(self._world.variant.version)
 
     def GetVersionString(self):
-        return "21.1.0.0 (fake)"
+        return ".".join(str(x) for x in self._world.variant.version[:4]) + " (fake)"
 
     def OpenPage(self, pageName):
         self._log("OpenPage", pageName)

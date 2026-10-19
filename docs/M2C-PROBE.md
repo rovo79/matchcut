@@ -4,8 +4,8 @@
 against a fake of the documented scripting API (`tests/resolve/fake_resolve.py`), which is matchcut's model of the
 documentation and not evidence about Resolve. This changes only when a real `resolve_probe.json` comes back.
 
-- **M2c human gate: PENDING.** You run the probe once in Resolve Studio and send back the bundle's
-  `resolve_probe.json` and `exports/` folder (below).
+- **M2c human gate: PENDING.** You run the probe once in Resolve Studio and send back that run's folder,
+  `runs/<UTC time>/` (its `resolve_probe.json` and `exports/`; see below).
 - **M2a human gate: PENDING** ([M2A-ACCEPTANCE.md](M2A-ACCEPTANCE.md)). **M2b human gate: PENDING**
   ([M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md)). **M1 human gate: PENDING** ([M1-ACCEPTANCE.md](M1-ACCEPTANCE.md)).
 
@@ -16,8 +16,8 @@ Plan: [M2C-RESOLVE-PLAN.md](M2C-RESOLVE-PLAN.md).
 
 The research left open questions that only a real Resolve can answer: whether an imported OTIO or FCPXML keeps its
 dissolves, whether markers and their `customData` survive, what start timecode an imported timeline gets, whether
-`AppendToTimeline` places clips frame-accurately, what `AddTransition` (21.1+) needs, and what Resolve's own
-OTIO export keeps. The probe measures them in one run, in a project of its own:
+`AppendToTimeline` places clips frame-accurately (and whether its `endFrame` is inclusive), what `AddTransition`
+(21.1+) needs, and what Resolve's own OTIO export keeps. The probe measures them in one run, in a project of its own:
 
 1. **Environment:** Resolve's product name and version, Python and platform, whether external scripting connected, the
    current database and project, the installed API catalogue (path and version line) and whether a `ResolveMCP`
@@ -29,66 +29,107 @@ OTIO export keeps. The probe measures them in one run, in a project of its own:
      `recordFrame` and `trackIndex` in the cut's frames (`endFrame` written as matchcut's exclusive end; the read-back measures
      what Resolve does with it). A `[None]` result is a recorded failure.
    - `build+transitions`: the same, then `TimelineItem.AddTransition` per dissolve, **only if the installed catalogue
-     documents it**, with option keys and values taken from the catalogue's own text.
-3. **Read-back** of every timeline: start frame and timecode, frame rate setting, track counts, every item's start, end,
-   duration, offsets and source start/end frames, the markers.
+     documents it for TimelineItem**, with option keys and values taken only from AddTransition's own catalogue entry and
+     the Options type it names.
+3. **Read-back** of every timeline: start frame and timecode, the timeline's settings snapshot, track counts, every item's
+   start, end, duration, offsets, source start/end frames and (where documented) type, the markers.
 4. **Markers:** on `build` and `import-otio`, `AddMarker(frame, "Green", name, note, 1, junction id)` per junction, then
-   `GetMarkerByCustomData(junction id)`. On every import route it first looks for the markers the file brought.
+   `GetMarkerByCustomData(junction id)`, recorded as Resolve returns it. On every import route it first looks for the
+   markers the file brought.
 5. **Navigation:** for up to 5 junctions per timeline, `SetCurrentTimecode` (from the timeline's start timecode plus the
-   junction's record frame, and from the marker's frame), `GetCurrentTimecode`, `GetCurrentVideoItem`; `OpenPage("edit")` once.
-6. **Export round trip:** `Timeline.Export` of every timeline as OTIO, FCPXML 1.10 and EDL into the bundle's `exports/`.
+   junction's record frame, and from the marker's frame when Resolve gave one), `GetCurrentTimecode`, `GetCurrentVideoItem`;
+   `OpenPage("edit")` once.
+6. **Export round trip:** `Timeline.Export` of every timeline as OTIO, FCPXML 1.10 and EDL into the run's `exports/`.
 
-It writes everything to `resolve_probe.json` and interprets nothing. `python -m matchcut.resolve report` reads it
-offline: it compares every timeline with `expected.json`, re-imports each exported file with M2a's readers in a scratch
-copy of the workspace (never in the workspace), gives each route a verdict and recommends a default route for M2c-1, or
-says that none is usable.
+It writes everything to the run's `resolve_probe.json` and interprets nothing. `python -m matchcut.resolve report`
+reads it offline. For each route it:
+
+- compares every timeline with `expected.json`;
+- names a uniform one-frame end offset as the convention it is ("GetSourceEndFrame is inclusive on this install",
+  "endFrame is inclusive on this install") instead of calling it lost frames;
+- counts transition items apart from the clips;
+- judges the dissolves from the read-back when the install lists transition items, otherwise from each exported file,
+  which it re-imports with M2a's readers in a scratch copy of the workspace (never in the workspace). It says which
+  source it used;
+- gives the route a verdict.
+
+It then recommends a default route for M2c-1. It prefers a route where junction markers are found by id and navigation
+lands, and says so when no route manages that. If no route is usable, it says so.
 
 ## Safety
 
-- **It never modifies a project of yours.** Before anything else it records the name of the open project. It refuses to
-  continue unless that is Resolve's empty default, **Untitled Project**, or an earlier `matchcut-probe-*` project, and
-  tells you to save and close your project first. (Creating a project switches projects, and the API cannot tell whether
-  the open one has unsaved changes. If you have work in an Untitled Project, save it under a name first.)
-- **Its own project:** `matchcut-probe-<UTC time>`, in a Project Manager folder `matchcut-probe` (created if missing). It
-  sets that project's timeline frame rate to the cut's, and saves only that project, after checking it is the open one.
-  It never deletes, renames, saves, loads or exports any other project. Running it again makes a new project.
+- **It never switches away from work of yours.** Before anything else it records the open project's name and contents,
+  with documented reads only: `Project.GetTimelineCount()`, and the media pool root folder's `GetClipList()` and
+  `GetSubFolderList()`. It continues only from:
+  - an **Untitled Project that is empty**: no timeline, no clip, no media pool folder;
+  - an **earlier `matchcut-probe-*` project**. That project is allowed as it is: if you edited it, save it first,
+    because the probe switches away from it.
+
+  Otherwise it stops and tells you to save your work, then open a new, empty project (or quit and reopen Resolve) and
+  run it again. The README does not say what `CreateProject` does to the open project, and the API cannot tell whether
+  that project has unsaved changes. The counts are recorded in the JSON (`safety`).
+- **It asks first.** Before it switches projects it prints the open project, the new project's name and the folder,
+  and waits for you to type `yes`. Anything else, or a closed input, stops it with nothing created (exit 5). `--yes`
+  answers in advance. `--dry-run` never asks and never switches.
+- **Its own project:** `matchcut-probe-<UTC time>`, in a Project Manager folder `matchcut-probe` (created if missing).
+  - After `CreateProject` it checks that the new project is the open one; otherwise it stops (exit 4).
+  - It sets that project's `timelineFrameRate` to the cut's rate (with ` DF` for drop-frame footage, as the README's
+    notes describe).
+  - It checks again that its project is the open one before each part of the run and before `SaveProject`. If you switch
+    projects while it runs, it stops and saves nothing.
+  - It never deletes, renames, saves, loads or exports any other project. Running it again makes a new project.
+- **Shared databases:** on a shared or remote project database, the `matchcut-probe` folder and its projects are visible
+  to everyone who uses that database. Use a local database if that matters (the JSON records which database was current).
 - **Media:** it imports only the bundle's source footage, by its path, into its own project.
-- **Files:** it writes only inside the bundle directory (`resolve_probe.json`, `exports/`), or where `--out` says. A dry
-  run writes `resolve_probe_dry_run.json`, and a run that stops early never replaces a complete `resolve_probe.json`
-  (it writes `resolve_probe_last_attempt.json` instead).
+- **Files:** it writes only inside the bundle directory, or where `--out` says. Every run writes its own directory
+  `runs/<UTC time>/` (a dry run `runs/<UTC time>-dry-run/`), holding `resolve_probe.json` and `exports/`, so no run
+  replaces another's results.
 - **Errors:** every call is wrapped. A failure is recorded with the call, its arguments, the exception text or the return
   value, and the probe moves on.
 - **MCP:** never started or connected to; the probe only records whether the binary file exists.
 
 ## Documented calls only
 
-The probe calls nothing but these. Source: the Resolve 21.0.4 scripting README, community copy
-<https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8> ("Last Updated: 24 Jul 2026"). It was read through a
-web reader that returns an extracted listing, not a byte copy; the README's own signatures are in `README_CALLS` at the top
-of `resolve_probe.py`.
+The probe calls nothing but these. Source of record: the Resolve 21.0.4 scripting README ("Last Updated: 24 Jul 2026"),
+full text of the community copy <https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8> (sha256
+`eb2b4ebc578655a627baeccdc68b194afb0cd7c96f819acd331125e8d699e5b5`). The method names it documents per class are in
+`tests/resolve/readme_21_0_4.json`. The tests check the script against that list, and against the full text when a copy
+is available. No call is in the README's deprecated or unsupported lists. The README's own signatures are in
+`README_CALLS` at the top of `resolve_probe.py`.
 
 | class | README 21.0.4 calls the probe makes |
 |---|---|
 | DaVinciResolveScript | `scriptapp("Resolve")` (the README's example code) |
 | Resolve | GetProjectManager, GetProductName, GetVersion, GetVersionString, OpenPage |
 | ProjectManager | GetCurrentProject, GetCurrentDatabase, GotoRootFolder, GetFolderListInCurrentFolder, CreateFolder, OpenFolder, GetCurrentFolder, GetProjectListInCurrentFolder, CreateProject, SaveProject |
-| Project | GetName, GetMediaPool, GetSetting, SetSetting (`timelineFrameRate`), SetCurrentTimeline |
+| Project | GetName, GetTimelineCount, GetMediaPool, GetSetting, SetSetting (`timelineFrameRate`), SetCurrentTimeline |
 | MediaPool | GetRootFolder, ImportMedia, ImportTimelineFromFile, CreateEmptyTimeline, AppendToTimeline |
-| Folder | GetClipList |
+| Folder | GetClipList, GetSubFolderList |
 | MediaPoolItem | GetName, GetClipProperty |
-| Timeline | GetName, GetStartFrame, GetEndFrame, GetStartTimecode, GetSetting, GetTrackCount, GetItemListInTrack, GetMarkers, AddMarker, GetMarkerByCustomData, UpdateMarkerCustomData, SetCurrentTimecode, GetCurrentTimecode, GetCurrentVideoItem, Export |
+| Timeline | GetName, GetStartFrame, GetEndFrame, GetStartTimecode, GetSetting (without a name: the settings snapshot), GetTrackCount, GetItemListInTrack, GetMarkers, AddMarker, GetMarkerByCustomData, UpdateMarkerCustomData, SetCurrentTimecode, GetCurrentTimecode, GetCurrentVideoItem, Export |
 | TimelineItem | GetName, GetStart, GetEnd, GetDuration, GetLeftOffset, GetRightOffset, GetSourceStartFrame, GetSourceEndFrame |
 
-| gated: called only when the installed catalogue names it | source |
+| gated: called only when the installed catalogue documents it for TimelineItem | source |
 |---|---|
-| TimelineItem.AddTransition | not in the 21.0.4 README; reported for 21.1+ by third parties. Option keys and values only as the installed catalogue's text gives them |
+| TimelineItem.AddTransition | not in the 21.0.4 README; reported for 21.1+ by third parties. Option keys and values only as AddTransition's own catalogue entry and its Options type give them; `duration` only when that text says frames |
 | TimelineItem.GetType | not in the 21.0.4 README; reported for 21.1+ by third parties |
 
-`SetFades`, `GetFades`, `GetSourceStartTime` and `GetSourceEndTime` are looked up in the catalogue and recorded, never
-called. The catalogue is looked for in `RESOLVE_SCRIPT_API`, then the default Scripting folder of the platform
-(`README.md`, `DaVinciResolveScript.pyi`, `README.txt`, `CHANGELOG.md`). A gated call that the catalogue does not name is
-recorded as "not documented on this install: not called". `GetSourceStartFrame` and `GetSourceEndFrame` are in the
-21.0.4 README, so they are not gated.
+How the catalogue gates these calls:
+
+- **Where it is looked for:** in `RESOLVE_SCRIPT_API`, then the platform's default Scripting folder (`README.md`,
+  `DaVinciResolveScript.pyi`, `README.txt`, `CHANGELOG.md`).
+- **What counts as documented:**
+  - in a `.pyi`, the `def` must sit inside `class TimelineItem`. The excerpt runs to the next `def` or `class` at the
+    same or a lower indent;
+  - in a text catalogue, the name must appear in the TimelineItem section, or be written `TimelineItem.Name`.
+- **When it does not count:** a gated call the catalogue does not document is recorded as "not documented on this
+  install: not called".
+- **Looked up, never called:** `SetFades`, `GetFades`, `GetSourceStartTime` and `GetSourceEndTime` are looked up in the
+  catalogue and recorded.
+
+**Version note:** `GetStart(subframe_precision)`, `GetSourceStartFrame` and `GetSourceEndFrame` are in the 20.2 and
+21.0.4 READMEs but not in the 18.5 README. On Resolve older than 20, the JSON and the report say so next to any read
+that failed.
 
 ## Prerequisites
 
@@ -96,12 +137,13 @@ recorded as "not documented on this install: not called". `GetSourceStartFrame` 
 - **Preferences > System > General > External scripting using = Local**, then restart Resolve.
 - **Python 3.6 or later, 64-bit** (the README's minimum), on the machine running Resolve.
 - matchcut, to make the bundle and read the result (not needed to run the script itself).
+- **An empty Untitled Project open** (for example, just after starting Resolve), with your own work saved.
 - The source footage at the path the bundle names (the bundle's files and `expected.json` hold its absolute path). Make the
   bundle on the machine that runs Resolve, or put the footage at the same path there.
 
 ## Commands
 
-Make the bundle (anywhere matchcut runs):
+Make the bundle (on the machine that runs Resolve: the command it prints suits that platform):
 
 ```shell
 python -m matchcut.resolve probe WORKSPACE                 # stage final -> WORKSPACE/resolve_probe/
@@ -109,8 +151,9 @@ python -m matchcut.resolve probe WORKSPACE --stage roughcut --out DIR
 python -m matchcut.resolve probe WORKSPACE --run           # also runs it, if Resolve's scripting module can be imported here
 ```
 
-Run the probe with Resolve Studio open and Untitled Project as the open project. Try `--dry-run` first: it connects,
-records the environment and the safety check, and creates nothing.
+Run the probe with Resolve Studio open and an empty Untitled Project as the open project. Try `--dry-run` first: it
+connects, records the environment and the safety check, and creates nothing. The real run asks before it switches
+projects; type `yes` (or pass `--yes`).
 
 **macOS** (Terminal):
 
@@ -142,38 +185,83 @@ python3 WORKSPACE/resolve_probe/resolve_probe.py --dry-run
 python3 WORKSPACE/resolve_probe/resolve_probe.py
 ```
 
-(Some Linux installs use `/home/resolve` instead of `/opt/resolve`.) The script also looks in these default folders by
-itself, and prints exactly these lines when it cannot find the module. `--out FILE` writes the JSON elsewhere.
+(The README says standard ISO Linux installs use `/home/resolve` instead of `/opt/resolve`; the script also looks
+there.)
 
-Read the result (offline, anywhere matchcut runs; it writes `probe_report.md` next to the JSON):
+- **Finding the module:** the script also looks in these default folders by itself, and prints exactly these lines when
+  it cannot find the module.
+- **A module that fails to import:** when the module file is there but fails to import, the script prints `found <path>
+  but it failed to import: <error>` and records it. This usually means a Python that does not match Resolve's, or a
+  `RESOLVE_SCRIPT_LIB` that does not point at fusionscript.
+- **`--out FILE`** writes the JSON elsewhere; the exports still go to the run's directory.
+
+Read the result (offline, anywhere matchcut runs). Give it the bundle for its latest run (not a dry run), or a run's
+directory or `resolve_probe.json`. It writes `probe_report.md` in that run's directory:
 
 ```shell
-python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe/resolve_probe.json
+python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe
+python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe/runs/<UTC time>/resolve_probe.json
 ```
 
-Exit codes of the script: 0 done (failed steps are measurements and are recorded), 2 the module was not found or Resolve
-did not answer, 3 refused by the safety check, 4 it could not make its own project, 1 an error of the probe itself (also
-recorded in the JSON).
+Exit codes of the script:
+
+| code | meaning |
+|---|---|
+| 0 | done (failed steps are measurements and are recorded) |
+| 2 | the module was not found or failed to import, or Resolve did not answer |
+| 3 | refused by the safety check |
+| 4 | the probe could not make its own project, or the open project changed while it ran |
+| 5 | not confirmed |
+| 1 | an error of the probe itself (also recorded in the JSON) |
 
 ## What to send back
 
-From the bundle directory: **`resolve_probe.json`** and the **`exports/`** folder (and `probe_report.md` if you ran the
-report). They hold paths on your machine (the footage, the bundle, the Resolve install) and the project and database
-names Resolve reported; nothing else about your projects.
+From the bundle directory: the run's folder **`runs/<UTC time>/`**, which holds `resolve_probe.json`, `exports/`, and
+`probe_report.md` if you ran the report. It holds:
+
+- paths on your machine (the footage, the bundle, the Resolve install);
+- the project and database names Resolve reported;
+- the counts of timelines, clips and folders of the project that was open when you started.
+
+Nothing else about your projects is in it.
 
 ## Deleting the probe projects
 
 The probe never deletes anything. In Resolve, open the Project Manager, open the folder **matchcut-probe**, right-click
-each `matchcut-probe-<time>` project and choose Delete (open another project first: Resolve does not delete the open
-one). Once it is empty, delete the `matchcut-probe` folder the same way. Deleting a project does not delete the media files.
+each `matchcut-probe-<time>` project and choose Delete (open another project first: the README says `DeleteProject`
+deletes a project only "if not currently loaded"). Once it is empty, delete the `matchcut-probe` folder the same way.
+Deleting a project does not delete the media files.
 
 ## Verification so far (automated only)
 
 `tests/resolve/` runs the generated script end to end against the fake, through a `DaVinciResolveScript` module the
-test puts in `sys.modules`. The fake holds a model (projects, folders, media pool, timelines with record and source frames,
-transitions, markers with `customData`, a playhead, `Export` written from the model) and rejects any call outside its
-own transcription of the 21.0.4 README, plus the gated calls when its catalogue names them. Variants: keeps everything,
-loses dissolves, shifts frames by 1, drops markers, AddTransition not documented, `AppendToTimeline` returns `[None]`,
-scripting not connected, a user project open (refused). The tests check the safety guard, the project and folder names,
-that no other project is touched, the catalogue gating, recorded failures, the JSON schema, the report's verdicts and
-differences, Python 3.6 syntax, and that the script imports nothing from matchcut. None of this is evidence about Resolve.
+test puts in `sys.modules`.
+
+**The fake** holds a model:
+
+- projects, folders and a media pool with folders;
+- timelines with record and source frames, transitions, and markers with `customData`;
+- a playhead;
+- `Export` written from the model.
+
+It rejects any call outside the 21.0.4 README's methods (parsed from the full text), plus the gated calls when its
+catalogue documents them.
+
+**Variants:**
+
+- keeps everything, loses dissolves, shifts frames by 1, drops markers;
+- AddTransition not documented, `AppendToTimeline` returns `[None]`, scripting not connected;
+- a user project open, and an Untitled Project with a timeline, with a pool clip, or with a pool folder (all refused);
+- `CreateProject` does not switch, the open project changes mid-run;
+- `GetSourceEndFrame` inclusive, `endFrame` inclusive;
+- transition items in the track, `GetMarkerByCustomData` without a frame;
+- Resolve 18.5.
+
+**What the tests check:**
+
+- the safety guard, the confirmation, the project and folder names, and that no other project is touched or saved;
+- the catalogue gating per class, the AddTransition option sources, and recorded failures;
+- import errors, per-run directories, the JSON schema, and the report's verdicts, differences and recommendation;
+- Python 3.6 syntax, and that the script imports nothing from matchcut.
+
+None of this is evidence about Resolve.

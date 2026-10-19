@@ -16,7 +16,7 @@ def test_the_probe_doc_says_it_is_not_live_and_the_gates_are_pending():
     assert text.count("not run against a live Resolve") >= 1 and "**M2c human gate: PENDING.**" in text
     for gate in ("M2a human gate: PENDING", "M2b human gate: PENDING", "M1 human gate: PENDING"):
         assert gate in text, gate
-    assert "lossless" not in text.lower() and not MODEL_IDS.search(text)
+    assert "lossless" not in text.lower() and not MODEL_IDS.search(text) and "File > Close Project" not in text
     assert "compatible with Resolve" not in text and "works in Resolve" not in text
 
 
@@ -34,10 +34,12 @@ def test_the_probe_doc_lists_every_call_the_script_can_make():
 
 def test_the_probe_doc_names_the_safety_rules_the_commands_and_what_to_send():
     text = PROBE.read_text(encoding="utf-8")
-    for needle in ("Untitled Project", "matchcut-probe-<UTC time>", "folder `matchcut-probe`", "save and close your project first",
-                   "External scripting using = Local", "Python 3.6 or later", "DaVinci Resolve Studio", "`resolve_probe.json`", "`exports/`",
-                   "python -m matchcut.resolve probe WORKSPACE", "python -m matchcut.resolve report WORKSPACE", "--dry-run",
-                   "## Deleting the probe projects", "py -3 WORKSPACE\\resolve_probe\\resolve_probe.py"):
+    for needle in ("Untitled Project that is empty", "matchcut-probe-<UTC time>", "folder `matchcut-probe`", "open a new, empty project (or quit and reopen Resolve)",
+                   "earlier `matchcut-probe-*` project", "type `yes`", "`--yes`", "never asks and never switches", "shared or remote project database",
+                   "External scripting using = Local", "Python 3.6 or later", "DaVinci Resolve Studio", "`runs/<UTC time>/`", "`exports/`",
+                   "python -m matchcut.resolve probe WORKSPACE", "python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe", "--dry-run",
+                   "## Deleting the probe projects", "py -3 WORKSPACE\\resolve_probe\\resolve_probe.py", "found <path>\n  but it failed to import",
+                   "eb2b4ebc578655a627baeccdc68b194afb0cd7c96f819acd331125e8d699e5b5", "not in the 18.5 README"):
         assert needle in text, needle
     # the per-OS setup lines are the ones the script prints
     for line in script.SETUP_HELP.splitlines():

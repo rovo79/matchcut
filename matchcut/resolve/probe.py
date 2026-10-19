@@ -30,6 +30,7 @@ BUNDLE_DIR = "resolve_probe"
 SCRIPT = "resolve_probe.py"
 EXPECTED = "expected.json"
 RESULT = "resolve_probe.json"
+RUNS = "runs"  # every run of the script writes runs/<UTC time>/resolve_probe.json and runs/<UTC time>/exports/
 REPORT = "probe_report.md"
 EXPECTED_SCHEMA = "matchcut.resolve_probe_expected/1"
 START_TC = "00:00:00:00"  # the record start every M2a exporter writes
@@ -116,9 +117,11 @@ def build_bundle(ws: Path, cfg: PipelineConfig, stage: str = "final", out: Optio
     return Bundle(out, script, exp_path, files, notes)
 
 
-def command(script: Path) -> str:
-    """The one command to run, quoted for a shell."""
-    return f'python3 "{script}"'
+def command(script: Path, platform: Optional[str] = None) -> str:
+    """The one command to run, quoted for the shell of this platform (the bundle is made on the machine that runs Resolve):
+    ``py -3`` (the Python launcher) on Windows, ``python3`` elsewhere."""
+    plat = platform or sys.platform
+    return f'py -3 "{script}"' if plat.startswith("win") else f'python3 "{script}"'
 
 
 def run_script(script: Path, extra: Optional[List[str]] = None, python: str = sys.executable) -> int:

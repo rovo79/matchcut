@@ -25,7 +25,7 @@ def _args(argv: Optional[List[str]]) -> argparse.Namespace:
     p.add_argument("--run", action="store_true", help="also run the probe here, when Resolve's scripting module can be imported")
     r = sub.add_parser("report", help="read resolve_probe.json (offline) and write probe_report.md next to it")
     r.add_argument("workspace")
-    r.add_argument("json", help="the resolve_probe.json the probe wrote (inside its bundle)")
+    r.add_argument("json", help="a run's resolve_probe.json, a run directory, or the bundle directory (its latest run)")
     return parser.parse_args(argv)
 
 
@@ -48,7 +48,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         cfg = _config(ws)
         if args.command == "probe":
-            from .probe import RESULT, build_bundle, command, run_script
+            from .probe import RUNS, build_bundle, command, run_script
 
             b = build_bundle(ws, cfg, args.stage, Path(args.out) if args.out else None)
             print(f"probe bundle for stage {args.stage}: {b.dir}")
@@ -57,10 +57,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             for n in b.notes:
                 print(f"note: {n}")
             print(NOT_LIVE)
-            print("run it once with DaVinci Resolve Studio open (Preferences > System > General > External scripting using = Local):")
+            print("run it with DaVinci Resolve Studio open (Preferences > System > General > External scripting using = Local) and an empty")
+            print("Untitled Project as the open project; try --dry-run first. It asks before it switches projects (--yes skips the question):")
+            print(f"  {command(b.script)} --dry-run")
             print(f"  {command(b.script)}")
-            print(f"then send back {b.dir / RESULT} and {b.dir / 'exports'}, or read them here:")
-            print(f'  python -m matchcut.resolve report "{ws}" "{b.dir / RESULT}"')
+            print(f"each run writes {b.dir / RUNS}/<UTC time>/ (resolve_probe.json and exports/): send back that folder, or read it here:")
+            print(f'  python -m matchcut.resolve report "{ws}" "{b.dir}"     # the latest run; or give a run\'s resolve_probe.json')
             if args.run:
                 return run_script(b.script)
             return 0

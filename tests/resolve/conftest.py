@@ -2,6 +2,7 @@
 generated script against the fake Resolve (``fake_resolve``) through an injected ``DaVinciResolveScript`` module."""
 from __future__ import annotations
 
+import builtins
 import json
 import runpy
 import shutil
@@ -40,9 +41,17 @@ def tree(root: Path) -> set:
     return {str(p.relative_to(root)) for p in Path(root).rglob("*")}
 
 
+def last_run(bundle) -> Optional[Path]:
+    """The newest run's resolve_probe.json in the bundle (runs/<UTC time>[-dry-run][-n]/), or None."""
+    runs = sorted((bundle.dir / "runs").glob("*/resolve_probe.json"), key=lambda p: p.stat().st_mtime_ns)
+    return runs[-1] if runs else None
+
+
 def run_probe(bundle, monkeypatch, variant: Optional[Variant] = None, args: Sequence[str] = (), world: Optional[World] = None,
-              inject: bool = True, catalogue_dir: Optional[Path] = None):
-    """Run ``resolve_probe.py`` in this process against the fake: (exit code, the JSON it wrote or None, the fake world)."""
+              inject: bool = True, catalogue_dir: Optional[Path] = None, answer: Optional[str] = None):
+    """Run ``resolve_probe.py`` in this process against the fake: (exit code, the JSON it wrote or None, the fake world).
+
+    ``answer`` is what the person types at the confirmation (None: the run gets ``--yes``; EOFError: stdin is closed)."""
     expected = json.loads(bundle.expected.read_text())
     if world is None:
         world = World(variant or VARIANTS["keeps everything"], source_info(expected["source"]["path"]))
@@ -54,7 +63,18 @@ def run_probe(bundle, monkeypatch, variant: Optional[Variant] = None, args: Sequ
         monkeypatch.setitem(sys.modules, "DaVinciResolveScript", module(world))
     else:
         monkeypatch.delitem(sys.modules, "DaVinciResolveScript", raising=False)
-    monkeypatch.setattr(sys, "argv", [str(bundle.script)] + list(args))
+    args = list(args)
+    if answer is None:
+        args.append("--yes")
+    else:
+        def ask(prompt=""):
+            world.log.append(("input", prompt))
+            if answer is EOFError:
+                raise EOFError
+            return answer
+        monkeypatch.setattr(builtins, "input", ask)
+    monkeypatch.setattr(sys, "argv", [str(bundle.script)] + args)
+    before = last_run(bundle)
     code = 0
     try:
         runpy.run_path(str(bundle.script), run_name="__main__")
@@ -64,6 +84,8 @@ def run_probe(bundle, monkeypatch, variant: Optional[Variant] = None, args: Sequ
     for i, a in enumerate(args):
         if a == "--out":
             out = Path(args[i + 1])
-    out = out or bundle.dir / ("resolve_probe_dry_run.json" if "--dry-run" in args else "resolve_probe.json")
-    doc = json.loads(out.read_text()) if out.exists() else None
+    if out is None:
+        out = last_run(bundle)
+        out = out if out != before else None
+    doc = json.loads(out.read_text()) if out is not None and out.exists() else None
     return code, doc, world

@@ -3,20 +3,23 @@
 
 You run this once, with DaVinci Resolve Studio running and Preferences > System > General > External scripting using = Local:
 
-    python3 resolve_probe.py              # the probe: writes resolve_probe.json next to this file
     python3 resolve_probe.py --dry-run    # connect, record the environment and the safety check, create nothing
-    python3 resolve_probe.py --out FILE   # write the JSON somewhere else
+    python3 resolve_probe.py              # the probe: asks before it switches projects, then writes runs/<UTC time>/
+    python3 resolve_probe.py --yes        # the same without the question
+    python3 resolve_probe.py --out FILE   # write the JSON somewhere else (the exports still go to runs/<UTC time>/exports)
 
 What it does, in a project of its own (matchcut-probe-<UTC time>, in the Project Manager folder matchcut-probe):
 imports this bundle's OTIO, FCPXML 1.10 and EDL with ImportTimelineFromFile, builds the same cut with ImportMedia +
 CreateEmptyTimeline + AppendToTimeline, tries AddTransition only where the installed API catalogue documents it, adds junction
-markers, reads every timeline back, moves the playhead, and exports each timeline again into exports/. It records everything in
-resolve_probe.json and interprets nothing: `python -m matchcut.resolve report` does that, offline.
+markers, reads every timeline back, moves the playhead, and exports each timeline again. Every run writes into its own
+runs/<UTC time>/ directory (resolve_probe.json and exports/), so no run replaces another's. It interprets nothing:
+`python -m matchcut.resolve report` does that, offline.
 
-Safety: it refuses to start unless the open project is Resolve's empty default ("Untitled Project") or an earlier matchcut-probe-*
-project; it never deletes, renames, saves or exports any other project; it writes files only inside this bundle (and --out).
-It calls only what the Resolve 21.0.4 scripting README documents, plus calls the installed catalogue documents (CALLS below).
-It never starts or connects to Resolve's MCP server; it only looks whether the binary is there.
+Safety: it refuses to start unless the open project is an empty "Untitled Project" (no timeline, no clip, no media pool folder) or
+an earlier matchcut-probe-* project, and it asks before switching (type yes). It never deletes, renames, saves or exports any
+other project, and checks that the open project is its own before each part and before it saves. It writes files only inside
+this bundle (and --out). It calls only what the Resolve 21.0.4 scripting README documents, plus the calls the installed catalogue
+documents for their class (CALLS below). It never starts or connects to Resolve's MCP server; it only looks whether the file is there.
 Standard library plus Resolve's own DaVinciResolveScript module; Python 3.6+. It never imports matchcut.
 Status: not run against a live Resolve by matchcut's authors; matchcut tests it against a fake of the documented API only.
 """
@@ -44,8 +47,8 @@ NAVIGATE_MAX = 5
 README = "README 21.0.4"
 CATALOGUE = "installed catalogue"
 
-# Every call the probe can make, with its signature as the Resolve 21.0.4 scripting README writes it (community copy:
-# https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8). Nothing else is ever called.
+# Every call the probe can make, with its signature as the Resolve 21.0.4 scripting README writes it ("Last Updated: 24 Jul 2026"; community
+# copy https://gist.github.com/X-Raym/2f2bf453fc481b9cca624d7ca0e19de8, full text sha256 eb2b4ebc578655a6...). Nothing else is ever called.
 README_CALLS = {
     "DaVinciResolveScript.scriptapp": 'scriptapp("Resolve") (the README\'s example code)',
     "Resolve.GetProjectManager": "GetProjectManager() --> ProjectManager",
@@ -64,6 +67,7 @@ README_CALLS = {
     "ProjectManager.CreateProject": "CreateProject(projectName, mediaLocationPath) --> Project",
     "ProjectManager.SaveProject": "SaveProject() --> Bool",
     "Project.GetName": "GetName() --> string",
+    "Project.GetTimelineCount": "GetTimelineCount() --> int",
     "Project.GetMediaPool": "GetMediaPool() --> MediaPool",
     "Project.GetSetting": "GetSetting(settingName) --> string",
     "Project.SetSetting": "SetSetting(settingName, settingValue) --> Bool",
@@ -74,13 +78,14 @@ README_CALLS = {
     "MediaPool.CreateEmptyTimeline": "CreateEmptyTimeline(name) --> Timeline",
     "MediaPool.AppendToTimeline": "AppendToTimeline([{clipInfo}, ...]) --> [TimelineItem]",
     "Folder.GetClipList": "GetClipList() --> [clips...]",
+    "Folder.GetSubFolderList": "GetSubFolderList() --> [folders...]",
     "MediaPoolItem.GetName": "GetName() --> string",
     "MediaPoolItem.GetClipProperty": "GetClipProperty(propertyName=None) --> string|dict",
     "Timeline.GetName": "GetName() --> string",
     "Timeline.GetStartFrame": "GetStartFrame() --> int",
     "Timeline.GetEndFrame": "GetEndFrame() --> int",
     "Timeline.GetStartTimecode": "GetStartTimecode() --> string",
-    "Timeline.GetSetting": "GetSetting(settingName) --> string",
+    "Timeline.GetSetting": "GetSetting(settingName) --> string (without a name: a snapshot of all settings, per the README's notes)",
     "Timeline.GetTrackCount": "GetTrackCount(trackType) --> int",
     "Timeline.GetItemListInTrack": "GetItemListInTrack(trackType, index) --> [items...]",
     "Timeline.GetMarkers": "GetMarkers() --> {markers...}",
@@ -101,7 +106,8 @@ README_CALLS = {
     "TimelineItem.GetSourceEndFrame": "GetSourceEndFrame() --> int",
 }
 # Calls reported for Resolve 21.1+ by third parties and absent from the 21.0.4 README: called only when the installed catalogue
-# mentions the name. Otherwise each is recorded as "not documented on this install: not called".
+# documents them for that class (a def inside the class in a .pyi; the class's section, or Class.Method, in a text catalogue).
+# Otherwise each is recorded as "not documented on this install: not called".
 GATED_CALLS = {
     "TimelineItem.AddTransition": "AddTransition(TransitionOptions) (21.1+, third-party reports; keys from the installed catalogue only)",
     "TimelineItem.GetType": "GetType() (21.1+, third-party reports)",
@@ -120,10 +126,10 @@ SCRIPTING_DIRS = {
     "win32": [os.path.expandvars(r"%PROGRAMDATA%\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting")],
     "linux": ["/opt/resolve/Developer/Scripting", "/home/resolve/Developer/Scripting"],
 }
-LIB_DEFAULTS = {
-    "darwin": "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so",
-    "win32": r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll",
-    "linux": "/opt/resolve/libs/Fusion/fusionscript.so",
+LIB_DEFAULTS = {  # the README's paths; for "standard ISO Linux installations" it says /home/resolve instead of /opt/resolve
+    "darwin": ["/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"],
+    "win32": [r"C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"],
+    "linux": ["/opt/resolve/libs/Fusion/fusionscript.so", "/home/resolve/libs/Fusion/fusionscript.so"],
 }
 MCP_PATHS = {
     "darwin": ["/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Applications/ResolveMCP"],
@@ -155,10 +161,13 @@ Use a 64-bit Python 3.6 or later."""
 CONNECT_HELP = ("Resolve's scripting module loaded but Resolve did not answer (scriptapp(\"Resolve\") returned None). Start DaVinci Resolve Studio, "
                 "set Preferences > System > General > External scripting using = Local, restart Resolve, and run the probe again. "
                 "External scripting needs the Studio edition.")
-REFUSAL = ("The open Resolve project is %r. The probe only starts from Resolve's empty default project (%r) or an earlier matchcut-probe-* project, "
-           "because creating its own project switches projects and the API cannot tell whether yours has unsaved changes. "
-           "Save and close your project first (File > Close Project; or open the Project Manager and start a new Untitled Project), "
-           "then run the probe again.")
+REFUSAL = ("The open Resolve project is %r%s. The probe only starts from an empty %r project (no timeline, no clip, no media pool folder) or an "
+           "earlier matchcut-probe-* project, because creating its own project switches projects and the API cannot tell whether the open one "
+           "has unsaved changes. Save your work, then open a new, empty project (or quit and reopen Resolve) and run the probe again.")
+CONFIRM = ("The probe will switch Resolve from the open project %r to a new project %s in the Project Manager folder %r "
+           "(created if missing), and work only there. Type yes to continue: ")
+VERSION_NOTE = ("GetStart(subframe_precision), GetSourceStartFrame and GetSourceEndFrame are documented in the 20.2 and 21.0.4 READMEs, not in "
+                "the 18.5 README (which has GetStart() only): on Resolve %s these reads may fail")
 
 
 # -- recording ------------------------------------------------------------------------------------------------------------------
@@ -187,12 +196,12 @@ class Recorder(object):
     """Makes every call to Resolve: checks it is documented, records it, never lets an exception escape."""
 
     def __init__(self, doc, gated):
-        self.doc, self.gated = doc, gated  # gated: name -> True when the installed catalogue documents it
+        self.doc, self.gated = doc, gated  # gated: "Class.Method" -> True when the installed catalogue documents it for that class
 
     def documented_in(self, name):
         if name in README_CALLS:
             return README
-        if name in GATED_CALLS and self.gated.get(name.split(".")[-1]):
+        if name in GATED_CALLS and self.gated.get(name):
             return CATALOGUE
         return None
 
@@ -268,9 +277,11 @@ def frames_to_timecode(frames, drop):
 
 
 def rate_setting():
-    """The project frame rate setting for the cut's rate, as Resolve's project settings list them."""
+    """The project's "timelineFrameRate" value for the cut's rate, as the README's notes describe it: one of the frame rates of the project
+    settings, with " DF" appended for drop frame (the source footage's own timecode is drop-frame)."""
     n, d = rate()
-    return {(24000, 1001): "23.976", (30000, 1001): "29.97", (60000, 1001): "59.94"}.get((n, d), ("%d" % (n // d)) if n % d == 0 else "%.3f" % (n / float(d)))
+    text = {(24000, 1001): "23.976", (30000, 1001): "29.97", (60000, 1001): "59.94"}.get((n, d), ("%d" % (n // d)) if n % d == 0 else "%.3f" % (n / float(d)))
+    return text + " DF" if is_drop_rate() and EXPECTED["source"].get("start_tc_drop") else text
 
 
 # -- the environment ----------------------------------------------------------------------------------------------------------
@@ -298,41 +309,138 @@ def sha256(path):
 
 def load_module(info):
     """Resolve's DaVinciResolveScript: already imported (sys.modules), importable as is, else from <RESOLVE_SCRIPT_API>/Modules or the default
-    install folders. Records where it looked; None when it is nowhere."""
+    install folders. Records where it looked and every import error (a module file that exists but fails to import, typically a Python
+    that does not match or a fusionscript library that cannot load, is named as such); None when it is nowhere."""
     lib = os.environ.get("RESOLVE_SCRIPT_LIB")
-    default_lib = LIB_DEFAULTS[platform_key()]
-    info.update(RESOLVE_SCRIPT_API=os.environ.get("RESOLVE_SCRIPT_API"), RESOLVE_SCRIPT_LIB=lib, lib_default=default_lib,
-                lib_default_exists=os.path.isfile(default_lib), module_dirs_tried=[])
-    if not lib and os.path.isfile(default_lib):
-        os.environ["RESOLVE_SCRIPT_LIB"] = default_lib  # the module reads it to find fusionscript
-        info["RESOLVE_SCRIPT_LIB_set_by_probe"] = default_lib
+    defaults = LIB_DEFAULTS[platform_key()]
+    found_lib = next((d for d in defaults if os.path.isfile(d)), None)
+    info.update(RESOLVE_SCRIPT_API=os.environ.get("RESOLVE_SCRIPT_API"), RESOLVE_SCRIPT_LIB=lib, lib_defaults=defaults,
+                lib_default_found=found_lib, module_dirs_tried=[], module_errors=[])
+    if not lib and found_lib:
+        os.environ["RESOLVE_SCRIPT_LIB"] = found_lib  # the module reads it to find fusionscript
+        info["RESOLVE_SCRIPT_LIB_set_by_probe"] = found_lib
     mod = sys.modules.get("DaVinciResolveScript")
     candidates = [None] + [os.path.join(d, "Modules") for d in scripting_dirs()]
     for folder in candidates:
         if mod is not None:
             break
+        path = None
         if folder is not None:
             info["module_dirs_tried"].append(folder)
+            path = os.path.join(folder, "DaVinciResolveScript.py")
             if not os.path.isdir(folder):
                 continue
             if folder not in sys.path:
                 sys.path.append(folder)
         try:
             import DaVinciResolveScript as mod  # noqa: F811 (Resolve's own module)
-        except ImportError:
-            mod = None
-        except BaseException as exc:  # the module exits when it cannot load fusionscript
+        except BaseException as exc:  # ImportError, or the module exiting when it cannot load fusionscript
             if isinstance(exc, KeyboardInterrupt):
                 raise
-            info["module_error"] = "%s: %s" % (type(exc).__name__, exc)
             mod = None
+            missing = isinstance(exc, ImportError) and getattr(exc, "name", None) == "DaVinciResolveScript"
+            exists = path is not None and os.path.isfile(path)
+            if missing and not exists:
+                continue  # simply not there
+            info["module_errors"].append({"where": folder or "sys.path", "file": path if exists else None,
+                                          "error": "%s: %s" % (type(exc).__name__, exc)})
     info["module_found"] = mod is not None
     info["module_path"] = getattr(mod, "__file__", None) if mod is not None else None
     return mod
 
 
+def indent_of(line):
+    return len(line) - len(line.lstrip())
+
+
+def block(lines, k):
+    """Line ``k`` and what is nested under it: up to the next non-blank line at the same or a lower indent."""
+    out, base = [lines[k]], indent_of(lines[k])
+    for ln in lines[k + 1:]:
+        if ln.strip() and indent_of(ln) <= base and not ln.lstrip().startswith(("#", ")", "]", "}")):
+            break
+        out.append(ln)
+    return "\n".join(out).rstrip()
+
+
+def pyi_class(text, cls):
+    lines = text.splitlines()
+    k = next((i for i, ln in enumerate(lines) if re.match(r"\s*class\s+%s\b" % re.escape(cls), ln)), None)
+    return block(lines, k) if k is not None else None
+
+
+def pyi_def(text, cls, name):
+    """The def of ``name`` inside ``class cls`` of a .pyi, up to the next def/class at its indent; None when the class has no such def."""
+    body = pyi_class(text, cls)
+    if body is None:
+        return None
+    lines = body.splitlines()
+    k = next((i for i, ln in enumerate(lines) if re.match(r"\s*def\s+%s\b" % re.escape(name), ln)), None)
+    return block(lines, k) if k is not None else None
+
+
+def text_section(text, cls):
+    """The section of a text catalogue (README.txt / README.md) headed by the class name alone on a line, or ''."""
+    lines = text.splitlines()
+    k = next((i for i, ln in enumerate(lines) if re.match(r"^#*\s*%s\s*$" % re.escape(cls), ln)), None)
+    if k is None:
+        return ""
+    out = []
+    for ln in lines[k + 1:]:
+        if re.match(r"^#*\s*[A-Z][A-Za-z]+\s*$", ln):  # the next class or section heading
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
+def text_entry(text, cls, name):
+    """The entry of ``name`` in a text catalogue, in the class's section or written Class.name / Class:name, up to a blank line or the next
+    entry; None when the text does not document it for that class."""
+    for where, pat in ((text_section(text, cls), r"\b%s\b" % re.escape(name)), (text, r"\b%s[.:]%s\b" % (re.escape(cls), re.escape(name)))):
+        lines = where.splitlines()
+        k = next((i for i, ln in enumerate(lines) if re.search(pat, ln)), None)
+        if k is None:
+            continue
+        out = [lines[k]]
+        for ln in lines[k + 1:]:
+            if not ln.strip() or re.match(r"^\s*(\w+[.:])?\w+\(", ln):
+                break
+            out.append(ln)
+        return "\n".join(out)
+    return None
+
+
+def documented_for(catalogue_texts, cls, name):
+    """(documented, excerpt, the file it came from): a def inside the class in a .pyi wins over a text catalogue's entry."""
+    for path, text in catalogue_texts:
+        if path.endswith(".pyi"):
+            found = pyi_def(text, cls, name)
+            if found:
+                return True, found, path
+    for path, text in catalogue_texts:
+        if not path.endswith(".pyi"):
+            found = text_entry(text, cls, name)
+            if found:
+                return True, found, path
+    return False, None, None
+
+
+def options_types(catalogue_texts, excerpt_text):
+    """The bodies of the *Options types the signature names (the first lines of the excerpt), from a .pyi."""
+    head = "\n".join((excerpt_text or "").splitlines()[:3])
+    out = {}
+    for name in sorted(set(re.findall(r"\b([A-Z]\w*Options)\b", head))):
+        for path, text in catalogue_texts:
+            body = pyi_class(text, name) if path.endswith(".pyi") else None
+            if body:
+                out[name] = body[:3000]
+                break
+    return out
+
+
 def find_catalogue():
-    """The installed API catalogue (README.txt up to 21.0, README.md / DaVinciResolveScript.pyi since 21.1): paths, version lines, mentions."""
+    """The installed API catalogue (README.txt up to 21.0, README.md / DaVinciResolveScript.pyi since 21.1): paths, version lines, which
+    of the probe's call names it mentions, and for each gated call whether it is documented for its class, with the excerpt."""
     files, texts = [], []
     for folder in scripting_dirs():
         for name in CATALOGUE_FILES:
@@ -347,33 +455,23 @@ def find_catalogue():
                 continue
             version = next((ln.strip() for ln in text.splitlines()[:80] if re.search(r"(?i)last updated|version\s*[:\d]", ln)), None)
             files.append({"path": path, "size": len(text), "version_line": version, "sha256": sha256(path)})
-            texts.append(text)
+            texts.append((path, text))
         if files:
             break  # the first folder that has a catalogue is the install's
     names = sorted(set([n.split(".")[-1] for n in list(README_CALLS) + list(GATED_CALLS)] + list(LOOKED_UP)))
-    mentions = dict((n, any(re.search(r"\b%s\b" % re.escape(n), t) for t in texts)) for n in names)
-    excerpts = {}
-    for n in [g.split(".")[-1] for g in GATED_CALLS] + list(LOOKED_UP):
-        text = excerpt(texts, r"def\s+%s\b" % n) or excerpt(texts, r"\b%s\b" % n)  # a definition anywhere wins over a mention
+    mentions = dict((n, any(re.search(r"\b%s\b" % re.escape(n), t) for _, t in texts)) for n in names)
+    gated, excerpts, sources, types = {}, {}, {}, {}
+    for full in list(GATED_CALLS) + ["TimelineItem." + n for n in LOOKED_UP]:
+        cls, name = full.split(".")
+        ok, text, src = documented_for(texts, cls, name)
+        if full in GATED_CALLS:
+            gated[full] = ok
         if text:
-            # a type the signature names (AddTransition(self, options: TransitionOptions)) is excerpted too: its keys may be there
-            for name in sorted(set(re.findall(r"\b([A-Z]\w*Options)\b", "\n".join(text.splitlines()[:5])))):
-                more = excerpt(texts, r"class\s+%s\b" % name)
-                if more:
-                    text += "\n...\n" + more
-            excerpts[n] = text[:4000]
-    return {"found": bool(texts), "files": files, "mentions": mentions, "excerpts": excerpts,
-            "gated": dict((g, mentions.get(g.split(".")[-1], False)) for g in GATED_CALLS)}
-
-
-def excerpt(texts, pattern):
-    """The lines around the first line matching ``pattern`` in any of ``texts`` (2 before, 30 after), or None."""
-    for t in texts:
-        lines = t.splitlines()
-        hit = next((k for k, ln in enumerate(lines) if re.search(pattern, ln)), None)
-        if hit is not None:
-            return "\n".join(lines[max(0, hit - 2): hit + 30])[:3000]
-    return None
+            excerpts[name], sources[name] = text[:3000], src
+            if full == "TimelineItem.AddTransition":
+                types = options_types(texts, text)
+    return {"found": bool(texts), "files": files, "mentions": mentions, "gated": gated, "excerpts": excerpts, "excerpt_files": sources,
+            "option_types": types}
 
 
 def mcp_presence():
@@ -398,18 +496,8 @@ def new_doc(args):
         "catalogue": None, "mcp": None, "safety": None, "database": None,
         "project": {"name": None, "folder": FOLDER, "user_current_project": None, "created": False, "saved": False},
         "media": {"source": EXPECTED["source"]["path"], "source_exists": os.path.isfile(EXPECTED["source"]["path"]), "steps": [], "item": None},
-        "steps": [], "timelines": {}, "failures": [], "notes": [],
+        "run_dir": None, "version_notes": [], "steps": [], "timelines": {}, "failures": [], "notes": [],
     }
-
-
-def keep_earlier(out):
-    """Where an early stop (no module, no connection, refused) writes: ``out``, unless that file holds a complete run, which is kept."""
-    try:
-        with open(out, "r", encoding="utf-8") as fh:
-            done = json.load(fh).get("status") == "complete"
-    except (IOError, OSError, ValueError, AttributeError):
-        done = False
-    return out[: -len(".json")] + "_last_attempt.json" if done and out.endswith(".json") else out
 
 
 def write(doc, out):
@@ -449,8 +537,12 @@ def markers_of(value):
 def readback(rec, where, tl):
     rb = {}
     for key, name, args in (("name", "Timeline.GetName", ()), ("start_frame", "Timeline.GetStartFrame", ()), ("end_frame", "Timeline.GetEndFrame", ()),
-                            ("start_timecode", "Timeline.GetStartTimecode", ()), ("frame_rate_setting", "Timeline.GetSetting", ("timelineFrameRate",))):
+                            ("start_timecode", "Timeline.GetStartTimecode", ()), ("settings", "Timeline.GetSetting", ())):
         rb[key] = summary(rec.call(None, where, tl, name, *args))
+    # the README documents "timelineFrameRate" as a Project setting; the timeline's own snapshot (GetSetting without a name) is recorded as is
+    snap = rb["settings"] if isinstance(rb["settings"], dict) else {}
+    rb["frame_rate_setting"] = snap.get("timelineFrameRate")
+    rb["frame_rate_setting_from"] = "Timeline.GetSetting() snapshot" if "timelineFrameRate" in snap else None
     s, e = rb["start_frame"], rb["end_frame"]
     rb["duration"] = e - s if isinstance(s, (int, float)) and isinstance(e, (int, float)) and not isinstance(s, bool) else None
     rb["track_counts"] = {}
@@ -470,12 +562,25 @@ def readback(rec, where, tl):
     return rb
 
 
+def numeric(key):
+    if isinstance(key, bool):
+        return False
+    if isinstance(key, (int, float)):
+        return True
+    try:
+        float(str(key))
+        return True
+    except ValueError:
+        return False
+
+
 def find_marker(rec, steps, where, tl, jid):
+    """GetMarkerByCustomData's answer, raw (the README says "marker {information}", not its shape); a frame only when a key is a number."""
     found = rec.call(steps, where, tl, "Timeline.GetMarkerByCustomData", jid)
-    if isinstance(found, dict) and found:
-        frame = sorted(found)[0]
-        return {"frame": summary(frame), "marker": summary(found[frame])}
-    return None
+    if not found:
+        return None
+    frames = sorted((k for k in found if numeric(k)), key=lambda k: float(k)) if isinstance(found, dict) else []
+    return {"raw": summary(found), "frame": summary(frames[0]) if frames else None}
 
 
 def marker_experiment(rec, route, tl, add):
@@ -507,7 +612,7 @@ def navigation(rec, route, project, tl, rb, markers):
         if start is not None:
             tries.append(("start timecode + record frame", start[0] + j["record_frame"], start[1]))
         found = (markers or {}).get("found_after", {}).get(j["id"]) or (markers or {}).get("found_before", {}).get(j["id"])
-        if found is not None and start is not None:
+        if found is not None and found.get("frame") is not None and start is not None:
             try:
                 tries.append(("start timecode + marker frame", start[0] + int(float(found["frame"])), start[1]))
             except (TypeError, ValueError):
@@ -525,30 +630,37 @@ def navigation(rec, route, project, tl, rb, markers):
 
 
 def transition_options(text, frames):
-    """AddTransition options built only from what the catalogue text names: keys that appear in it, values that appear in it (the
-    length is the dissolve's, in frames). Returns (options, why) - options None when the catalogue names no key the probe knows."""
-    words = set(re.findall(r"[\"'](\w[\w ]*)[\"']", text or ""))
-    fields = set(re.findall(r"(?m)^\s*(\w+)\s*:", text or ""))  # a TypedDict's keys (key: type)
+    """AddTransition options built only from AddTransition's own catalogue entry and the body of the Options type it names: keys that
+    appear there, values that appear there. ``duration`` (the dissolve's length in frames) is passed only when that text says frames.
+    Returns (options, why); options None when nothing usable is named, and then AddTransition is not called."""
+    text = text or ""
+    words = set(re.findall(r"[\"'](\w[\w ]*)[\"']", text))
+    fields = set(re.findall(r"(?m)^\s*(\w+)\s*:", text))  # a TypedDict's keys (key: type)
     keys = [k for k in TRANSITION_KEYS if k in words or k in fields]
     if not keys:
         return None, "the catalogue documents AddTransition but names none of the option keys %s: not called" % (TRANSITION_KEYS,)
-    opts = {}
+    opts, why = {}, ["keys and values taken from AddTransition's catalogue entry"]
     for k in keys:
         if k == "duration":
-            opts[k] = frames
+            if re.search(r"(?i)\bframes?\b", text):
+                opts[k] = frames
+            else:
+                why.append("the catalogue does not say the unit of duration: duration not passed")
         elif k in ("type", "transitionType"):
-            v = next((t for t in TRANSITION_TYPES if t in words), None)
+            v = next((x for x in TRANSITION_TYPES if x in words), None)
             if v:
                 opts[k] = v
         elif k == "alignment":
-            v = next((t for t in TRANSITION_ALIGN if t in words), None)
+            v = next((x for x in TRANSITION_ALIGN if x in words), None)
             if v:
                 opts[k] = v
         elif k == "position":
-            v = next((t for t in TRANSITION_POSITION if t in words), None)
+            v = next((x for x in TRANSITION_POSITION if x in words), None)
             if v:
                 opts[k] = v
-    return opts, "keys and values taken from the catalogue text"
+    if not opts:
+        return None, "; ".join(why + ["no option with a value the catalogue names: not called"])
+    return opts, "; ".join(why)
 
 
 def build(rec, route, project, pool, clip, steps):
@@ -573,7 +685,8 @@ def add_transitions(rec, route, items, catalogue, steps):
     if not dissolves:
         return [{"note": "the cut has no dissolves: AddTransition not tried"}]
     documented = rec.documented_in("TimelineItem.AddTransition") is not None
-    doc_text = (catalogue or {}).get("excerpts", {}).get("AddTransition")
+    doc_text = (catalogue or {}).get("excerpts", {}).get("AddTransition") or ""
+    doc_text = "\n".join([doc_text] + list(((catalogue or {}).get("option_types") or {}).values()))
     for j in dissolves:
         att = {"junction": j["id"], "kind": j["kind"], "frames": j["frames"], "documented_in_catalogue": documented, "target": "outgoing item %d" % (j["index"] + 1)}
         if not documented:
@@ -618,9 +731,9 @@ def media_item(rec, doc, pool):
     return item
 
 
-def exports(rec, route, resolve, tl):
+def exports(rec, route, resolve, tl, run_dir):
     out = {}
-    folder = os.path.join(BUNDLE, "exports")
+    folder = os.path.join(run_dir, "exports")
     if not os.path.isdir(folder):
         os.makedirs(folder)
     stem = route.replace("+", "-")
@@ -628,7 +741,7 @@ def exports(rec, route, resolve, tl):
         path = os.path.join(folder, stem + ext)
         entry = {"file": os.path.relpath(path, BUNDLE), "steps": []}
         if os.path.exists(path):
-            os.remove(path)  # a file from an earlier run never stands in for this one
+            os.remove(path)  # (a run directory is new: nothing should be there)
         kind, subtype = getattr(resolve, const, None), getattr(resolve, sub, None)
         if kind is None or subtype is None:
             entry.update(ok=False, error="resolve.%s or resolve.%s is missing" % (const, sub))
@@ -642,20 +755,73 @@ def exports(rec, route, resolve, tl):
     return out
 
 
+def count_of(value):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return len(value) if isinstance(value, (list, tuple, dict)) else None
+
+
 def guard(rec, doc, pm):
-    """The safety check: the current project's name, and whether the probe may switch away from it."""
-    current = rec.call(doc["steps"], "safety", pm, "ProjectManager.GetCurrentProject")
-    name = rec.call(doc["steps"], "safety", current, "Project.GetName") if current else None
+    """The safety check: the open project's name and contents (documented reads only), and whether the probe may switch away from it.
+    An "Untitled Project" must be empty: no timeline, no clip and no folder in its media pool's root folder. An earlier matchcut-probe-*
+    project is allowed as it is (its contents are recorded)."""
+    steps = doc["steps"]
+    current = rec.call(steps, "safety", pm, "ProjectManager.GetCurrentProject")
+    name = rec.call(steps, "safety", current, "Project.GetName") if current else None
     doc["project"]["user_current_project"] = name
-    allowed = name == DEFAULT_PROJECT or (isinstance(name, str) and name.startswith(PROJECT_PREFIX))
-    doc["safety"] = {"current_project": name, "allowed": bool(allowed),
-                     "rule": "start only from %r or an earlier %s* project" % (DEFAULT_PROJECT, PROJECT_PREFIX)}
+    counts = {"timelines": None, "clips": None, "subfolders": None}
+    if current:
+        counts["timelines"] = count_of(rec.call(steps, "safety", current, "Project.GetTimelineCount"))
+        pool = rec.call(steps, "safety", current, "Project.GetMediaPool")
+        root = rec.call(steps, "safety", pool, "MediaPool.GetRootFolder") if pool else None
+        if root:
+            counts["clips"] = count_of(rec.call(steps, "safety", root, "Folder.GetClipList"))
+            counts["subfolders"] = count_of(rec.call(steps, "safety", root, "Folder.GetSubFolderList"))
+    empty = all(v == 0 for v in counts.values())
+    earlier = isinstance(name, str) and name.startswith(PROJECT_PREFIX)
+    allowed = (name == DEFAULT_PROJECT and empty) or earlier
+    doc["safety"] = {"current_project": name, "counts": counts, "empty": empty, "earlier_probe_project": earlier, "allowed": bool(allowed),
+                     "rule": "start only from an empty %r project or an earlier %s* project" % (DEFAULT_PROJECT, PROJECT_PREFIX)}
     if not allowed:
-        doc["safety"]["message"] = REFUSAL % (name, DEFAULT_PROJECT) if name else "Resolve reports no open project: open the Untitled Project and run again."
+        if not name:
+            why = ""
+        elif name == DEFAULT_PROJECT and None in counts.values():
+            why = " (the probe could not confirm that it is empty)"
+        elif name == DEFAULT_PROJECT:
+            why = " (it has %d timelines, %d clips and %d folders in its media pool)" % (counts["timelines"], counts["clips"], counts["subfolders"])
+        else:
+            why = ""
+        doc["safety"]["message"] = REFUSAL % (name, why, DEFAULT_PROJECT) if name else (
+            "Resolve reports no open project. Open a new, empty project (or quit and reopen Resolve) and run the probe again.")
     return bool(allowed)
 
 
-def make_project(rec, doc, pm):
+def confirm(args, doc, planned):
+    """The person running the probe says yes before it switches projects (--yes says it in advance; a dry run never gets here)."""
+    if args.yes:
+        doc["safety"]["confirmed"] = "--yes"
+        return True
+    try:
+        answer = input(CONFIRM % (doc["safety"]["current_project"], planned, FOLDER))
+    except EOFError:
+        answer = ""
+    doc["safety"]["confirmed"] = answer.strip().lower() == "yes"
+    return doc["safety"]["confirmed"]
+
+
+def still_ours(rec, doc, pm, where):
+    """True while the open project is the probe's own (checked before each part that acts on it)."""
+    current = rec.call(doc["steps"], where, pm, "ProjectManager.GetCurrentProject")
+    name = rec.call(doc["steps"], where, current, "Project.GetName") if current else None
+    if name != doc["project"]["name"]:
+        doc["notes"].append("%s: the open project is %r, not the probe's %r: stopped here" % (where, name, doc["project"]["name"]))
+        return False
+    return True
+
+
+def make_project(rec, doc, pm, stamp):
     steps = doc["steps"]
     rec.call(steps, "project", pm, "ProjectManager.GotoRootFolder")
     folders = rec.call(steps, "project", pm, "ProjectManager.GetFolderListInCurrentFolder")
@@ -667,7 +833,6 @@ def make_project(rec, doc, pm):
         doc["notes"].append("the Project Manager folder %s could not be opened (current folder %r): no project created" % (FOLDER, here))
         return None
     taken = rec.call(steps, "project", pm, "ProjectManager.GetProjectListInCurrentFolder") or []
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     name, k = PROJECT_PREFIX + stamp, 1
     while name in taken:
         k += 1
@@ -688,7 +853,8 @@ def make_project(rec, doc, pm):
     return project
 
 
-def run_routes(rec, doc, resolve, pm, project, out):
+def run_routes(rec, doc, resolve, pm, project, out, run_dir):
+    """Every route, then read-back and markers, navigation and exports; stops when the open project is no longer the probe's."""
     pool = rec.call(doc["steps"], "project", project, "Project.GetMediaPool")
     if not pool:
         doc["notes"].append("no media pool: no route tried")
@@ -696,6 +862,9 @@ def run_routes(rec, doc, resolve, pm, project, out):
     timelines = []
     built_items = {}
     for route in ROUTES:
+        if not still_ours(rec, doc, pm, route):
+            doc["stopped"] = True
+            break
         entry = {"name": TIMELINE_PREFIX + route, "route": route, "created": False, "steps": [], "readback": None, "markers": None,
                  "navigation": None, "exports": None}
         doc["timelines"][route] = entry
@@ -725,6 +894,9 @@ def run_routes(rec, doc, resolve, pm, project, out):
             timelines.append((route, tl))
         write(doc_for_disk(doc), out)
     for route, tl in timelines:
+        if doc.get("stopped") or not still_ours(rec, doc, pm, route + ": readback"):
+            doc["stopped"] = True
+            break
         entry = doc["timelines"][route]
         for part in ("readback", "markers"):
             try:
@@ -734,16 +906,19 @@ def run_routes(rec, doc, resolve, pm, project, out):
                     entry["markers"] = marker_experiment(rec, route, tl, route in MARKER_ROUTES)
             except Exception as exc:
                 rec.fail(route + ": " + part, {"call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc)})
-    if timelines:
+    if timelines and not doc.get("stopped"):
         doc["edit_page"] = summary(rec.call(doc["steps"], "navigation", resolve, "Resolve.OpenPage", "edit"))
     for route, tl in timelines:
+        if doc.get("stopped") or not still_ours(rec, doc, pm, route + ": navigation"):
+            doc["stopped"] = True
+            break
         entry = doc["timelines"][route]
         try:
             entry["navigation"] = navigation(rec, route, project, tl, entry["readback"] or {}, entry["markers"])
         except Exception as exc:
             rec.fail(route + ": navigation", {"call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc)})
         try:
-            entry["exports"] = exports(rec, route, resolve, tl)
+            entry["exports"] = exports(rec, route, resolve, tl, run_dir)
         except Exception as exc:
             rec.fail(route + ": export", {"call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc)})
         write(doc_for_disk(doc), out)
@@ -756,17 +931,30 @@ def doc_for_disk(doc):
     return copy
 
 
+def run_directory(stamp, dry_run):
+    """runs/<UTC time>[-dry-run][-<n>]: every run writes into its own directory, so no run replaces another's results."""
+    base = os.path.join(BUNDLE, "runs", stamp + ("-dry-run" if dry_run else ""))
+    path, k = base, 1
+    while os.path.exists(path):
+        k += 1
+        path = "%s-%d" % (base, k)
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="matchcut's DaVinci Resolve Studio capability probe (see the top of this file)")
     parser.add_argument("--dry-run", action="store_true", help="connect, record the environment and the safety check, create nothing")
-    parser.add_argument("--out", default=None, help="where to write the JSON (default: resolve_probe.json next to this script)")
+    parser.add_argument("--yes", action="store_true", help="do not ask before switching to the probe's own project")
+    parser.add_argument("--out", default=None, help="where to write the JSON (default: runs/<UTC time>/resolve_probe.json in the bundle)")
     parser.add_argument("--check-module", action="store_true", help="only say whether Resolve's scripting module can be imported")
     args = parser.parse_args(argv)
-    default = "resolve_probe_dry_run.json" if args.dry_run else "resolve_probe.json"  # a dry run never replaces a real result
-    out = os.path.abspath(args.out) if args.out else os.path.join(BUNDLE, default)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_dir = run_directory(stamp, args.dry_run)
+    out = os.path.abspath(args.out) if args.out else os.path.join(run_dir, "resolve_probe.json")
     doc = new_doc(args)
+    doc["run_dir"] = os.path.relpath(run_dir, BUNDLE)
     try:
-        return probe(args, doc, out)
+        return probe(args, doc, out, run_dir, stamp)
     except Exception as exc:  # the probe's own failure: the JSON still gets written
         doc["status"] = "crashed"
         doc["failures"].append({"where": "probe", "call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc),
@@ -776,75 +964,72 @@ def main(argv=None):
         return 1
 
 
-def probe(args, doc, out):
-    early = keep_earlier(out)  # where a run that stops before measuring anything writes
+def finish(doc, out, status, lines, code):
+    doc["status"] = status
+    write(doc_for_disk(doc), out)
+    for ln in lines:
+        print(ln)
+    print("(recorded in %s)" % out)
+    return code
+
+
+def probe(args, doc, out, run_dir, stamp):
     doc["catalogue"] = find_catalogue()
     doc["mcp"] = mcp_presence()
-    rec = Recorder(doc, dict((g.split(".")[-1], v) for g, v in doc["catalogue"]["gated"].items()))
+    rec = Recorder(doc, dict(doc["catalogue"]["gated"]))
     dvr = load_module(doc["scripting"])
+    errors = doc["scripting"]["module_errors"]
     if args.check_module:
         print("DaVinciResolveScript: %s" % (doc["scripting"]["module_path"] or "not found"))
+        for e in errors:
+            print("found %s but it failed to import: %s" % (e["file"] or e["where"], e["error"]))
         return 0 if dvr is not None else 2
     if dvr is None:
-        doc["status"] = "module not found"
+        failed = ["found %s but it failed to import: %s" % (e["file"] or e["where"], e["error"]) for e in errors]
         doc["notes"].append("DaVinciResolveScript could not be imported; nothing was asked of Resolve")
-        write(doc_for_disk(doc), early)
-        print(SETUP_HELP)
-        print("\n(recorded in %s)" % early)
-        return 2
+        hint = ["(a module that is found but fails to import usually means a Python that does not match Resolve's (64-bit, 3.6 or later) "
+                "or a RESOLVE_SCRIPT_LIB that does not point at fusionscript)"] if failed else []
+        return finish(doc, out, "module failed to import" if failed else "module not found", failed + hint + ([""] if failed else []) + [SETUP_HELP], 2)
     resolve = rec.call(doc["steps"], "connect", dvr, "DaVinciResolveScript.scriptapp", "Resolve")
     doc["scripting"]["connected"] = bool(resolve)
     if not resolve:
-        doc["status"] = "not connected"
-        write(doc_for_disk(doc), early)
-        print(CONNECT_HELP)
-        print("(recorded in %s)" % early)
-        return 2
+        return finish(doc, out, "not connected", [CONNECT_HELP], 2)
     doc["resolve"] = {"product": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetProductName")),
                       "version": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetVersion")),
                       "version_string": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetVersionString"))}
+    version = doc["resolve"]["version"]
+    if isinstance(version, list) and version and isinstance(version[0], int) and not isinstance(version[0], bool) and version[0] < 20:
+        doc["version_notes"].append(VERSION_NOTE % (doc["resolve"]["version_string"] or version))
     pm = rec.call(doc["steps"], "environment", resolve, "Resolve.GetProjectManager")
     if not pm:
-        doc["status"] = "no project manager"
-        write(doc_for_disk(doc), early)
-        print("Resolve answered but GetProjectManager() returned nothing (recorded in %s)" % early)
-        return 2
+        return finish(doc, out, "no project manager", ["Resolve answered but GetProjectManager() returned nothing"], 2)
     doc["database"] = summary(rec.call(doc["steps"], "environment", pm, "ProjectManager.GetCurrentDatabase"))
     allowed = guard(rec, doc, pm)
     print("connected to %s %s; open project: %r" % (doc["resolve"]["product"], doc["resolve"]["version_string"], doc["safety"]["current_project"]))
     if not allowed:
-        doc["status"] = "refused"
-        write(doc_for_disk(doc), early)
-        print(doc["safety"]["message"])
-        print("(nothing was created; recorded in %s)" % early)
-        return 3
+        return finish(doc, out, "refused", [doc["safety"]["message"], "Nothing was created."], 3)
     if args.dry_run:
-        doc["status"] = "dry-run"
         doc["notes"].append("dry run: connected and checked; no project, folder, timeline or file was created in Resolve")
-        write(doc_for_disk(doc), out)
-        print("dry run: the safety check passes; nothing was created. Recorded in %s" % out)
-        return 0
-    project = make_project(rec, doc, pm)
+        return finish(doc, out, "dry-run", ["dry run: the safety check passes; nothing was created."], 0)
+    planned = PROJECT_PREFIX + stamp
+    if not confirm(args, doc, planned):
+        return finish(doc, out, "not confirmed", ["Not confirmed: nothing was created and the open project was not switched."], 5)
+    project = make_project(rec, doc, pm, stamp)
     if project is None:
-        doc["status"] = "aborted"
-        write(doc_for_disk(doc), out)
-        print("the probe could not make its own project; nothing else was done (recorded in %s)" % out)
-        return 4
+        return finish(doc, out, "aborted", ["the probe could not make its own project, or Resolve did not switch to it; nothing else was done"], 4)
     print("created project %s in the Project Manager folder %s" % (doc["project"]["name"], FOLDER))
-    run_routes(rec, doc, resolve, pm, project, out)
-    current = rec.call(doc["steps"], "save", pm, "ProjectManager.GetCurrentProject")
-    if current and rec.call(doc["steps"], "save", current, "Project.GetName") == doc["project"]["name"]:  # only ever our own project
+    run_routes(rec, doc, resolve, pm, project, out, run_dir)
+    if still_ours(rec, doc, pm, "save"):  # only ever the probe's own project
         doc["project"]["saved"] = bool(rec.call(doc["steps"], "save", pm, "ProjectManager.SaveProject"))
     else:
-        doc["notes"].append("the current project is no longer the probe's: not saved")
-    doc["status"] = "complete"
-    write(doc_for_disk(doc), out)
+        doc["notes"].append("not saved: the open project is no longer the probe's")
     made = [r for r in ROUTES if doc["timelines"].get(r, {}).get("created")]
-    print("timelines made: %s" % (", ".join(made) or "none"))
-    print("%d failed steps recorded (they are measurements, not errors of the probe)" % len(doc["failures"]))
-    print("wrote %s and %s" % (out, os.path.join(BUNDLE, "exports")))
-    print("send back resolve_probe.json and the exports folder; the project %s stays in Resolve for you to look at" % doc["project"]["name"])
-    return 0
+    status = "aborted" if doc.get("stopped") else "complete"
+    return finish(doc, out, status, [
+        "timelines made: %s" % (", ".join(made) or "none"),
+        "%d failed steps recorded (they are measurements, not errors of the probe)" % len(doc["failures"]),
+        "this run's files: %s (resolve_probe.json and exports/)" % run_dir,
+        "send back that folder; the project %s stays in Resolve for you to look at" % doc["project"]["name"]], 0 if status == "complete" else 4)
 
 
 if __name__ == "__main__":
