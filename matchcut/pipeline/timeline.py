@@ -42,6 +42,7 @@ class Clip:
     locked_out: bool = False
     tags: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    origin: str = ""  # the clip instance this one descends from (see clip_origin); stamped when the pins are applied
 
     @property
     def duration(self) -> float:
@@ -66,7 +67,13 @@ class Clip:
             locked_out=bool(d.get("locked_out", False)),
             tags=list(d.get("tags", [])),
             notes=list(d.get("notes", [])),
+            origin=str(d.get("origin", "")),
         )
+
+
+def clip_origin(c: Clip) -> str:
+    """The identity of a clip instance: its stamped ``origin``, else the rough-cut key built from its current range."""
+    return c.origin or f"{c.shot_index}@{c.source_in:.3f}-{c.source_out:.3f}"
 
 
 @dataclass

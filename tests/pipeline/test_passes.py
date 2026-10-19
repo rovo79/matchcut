@@ -89,6 +89,40 @@ def test_continuity_inserts_a_separator_between_same_shot_clips(ctx):
     assert any(d.action == "insert" for d in result.decisions)
 
 
+def _pinned_jump_cut_timeline(ctx, a_tag=None, b_tag=None) -> Timeline:
+    """One beat: A and B are the same shot with a gap (a jump cut) and both ends pinned; C is a candidate separator."""
+    tl = Timeline(source=ctx.media.path, fps=ctx.media.fps)
+    a, b = Clip("c001", 3, 6.0, 6.9, "b2"), Clip("c002", 3, 7.1, 8.0, "b2")
+    a.locked_out, b.locked_in = True, True
+    a.tags = ["pinned"] + ([a_tag] if a_tag else [])
+    b.tags = ["pinned"] + ([b_tag] if b_tag else [])
+    tl.clips = [a, b, Clip("c003", 4, 8.0, 9.0, "b2")]
+    return tl
+
+
+def test_continuity_softens_a_pinned_jump_cut_without_moving_a_separator_in(ctx):
+    result = ContinuityPass().apply(_pinned_jump_cut_timeline(ctx), ctx)
+    clips = result.timeline.clips
+    assert [c.shot_index for c in clips] == [3, 3, 4]
+    a, b = clips[0], clips[1]
+    assert a.shot_index == 3 and b.shot_index == 3 and b.source_in == 7.1  # still adjacent, no separator between them
+    assert not any(d.action == "insert" for d in result.decisions)
+    expected = round(min(ctx.cfg.transitions.dissolve_seconds, a.duration * 0.4, b.duration * 0.4), 3)
+    assert b.transition_in.kind == "dissolve" and b.transition_in.duration == expected
+    assert any(d.action == "dissolve" and d.clip_ids == [a.id, b.id] for d in result.decisions)
+
+
+def test_continuity_leaves_a_match_cut_jump_risk_alone(ctx):
+    result = ContinuityPass().apply(_pinned_jump_cut_timeline(ctx, "match_out:graphic", "match_in:graphic"), ctx)
+    clips = result.timeline.clips
+    assert [c.shot_index for c in clips] == [3, 3, 4]
+    assert clips[1].transition_in.is_cut
+    assert not any(d.action in ("dissolve", "insert") for d in result.decisions)
+
+
+# An unpinned jump cut still gets a separator moved in: test_continuity_inserts_a_separator_between_same_shot_clips
+
+
 def test_pacing_hits_the_target_and_respects_locks(ctx):
     tl = base_timeline(ctx)
     tl.clips[0].locked_out = True
@@ -112,6 +146,8 @@ def test_transitions_follow_beats_but_keep_match_cuts_hard(ctx):
     tl2 = base_timeline(ctx)
     tl2.clips[1].locked_out = True
     tl2.clips[2].locked_in = True
+    tl2.clips[1].tags.append("match_out:motion")  # the match-cut pass tags both ends; a bare lock (an editor's pin) keeps the beat transition
+    tl2.clips[2].tags.append("match_in:motion")
     result2 = TransitionsPass().apply(tl2, ctx)
     assert result2.timeline.clips[2].transition_in.is_cut
 

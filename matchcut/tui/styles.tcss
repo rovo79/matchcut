@@ -1,0 +1,29 @@
+Screen { layout: vertical; }
+#status { height: 1; background: $primary-background; color: $text; padding: 0 1; }
+TabbedContent { height: 1fr; }
+#run-top { height: 1fr; }
+#ladder { width: 42; }
+#log { width: 1fr; border-left: solid $primary; }
+#checkpoint { height: auto; max-height: 12; border: round $secondary; padding: 0 1; }
+#checkpoint-summary { height: auto; max-height: 8; overflow: hidden; }
+#checkpoint-foot { height: auto; }
+#checkpoint-hint { height: 1; color: $text-muted; }
+#note { height: 1; border: none; padding: 0 1; }
+#help { padding: 1 2; }
+#shots-table { width: 1fr; }
+#shot-detail { width: 60%; border-left: solid $primary; padding: 0 1; }
+#shot-frames { height: 12; }
+#shot-frames > Frame { width: 1fr; margin-right: 1; }
+#shot-desc { height: auto; }
+.beat-card { border: round $secondary; padding: 0 1; margin: 0 0 1 0; height: auto; }
+#story-head { height: auto; padding: 0 1; }
+#edit-header { height: 1; }
+#beat-strip { height: 1; color: $text-muted; }
+#junction-frames { height: 16; }
+#review-status { height: 1; }
+.junction-frame { width: 1fr; height: 100%; }
+.junction-frame > .frame-image { width: 100%; height: 1fr; }
+#junction-scroll { height: 1fr; }
+#config-hint { height: 1; padding: 0 1; color: $text-muted; }
+#config-tree { height: 1fr; }
+#config-edit { dock: bottom; height: 3; }

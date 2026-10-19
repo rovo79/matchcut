@@ -10,6 +10,7 @@ from matchcut.pipeline.media import MediaInfo, probe
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.render import build_filter_graph
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
+from tests.pipeline.conftest import RecordingMock
 
 
 def test_full_run_with_mock_backend(demo_video, tmp_path):
@@ -34,6 +35,21 @@ def test_full_run_with_mock_backend(demo_video, tmp_path):
     pipe2 = Pipeline(PipelineConfig.load(ws / "config.json"))
     pipe2.run()
     assert pipe2.llm.calls == 1  # only the polish pass (not cached) hits the backend
+
+
+def test_a_shorter_pass_list_leaves_no_snapshots_of_the_old_passes(demo_video, tmp_path):
+    from matchcut.pipeline.junctions import stage_timeline_paths
+    cfg = PipelineConfig(source=str(demo_video), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    Pipeline(cfg).run()
+    ws = tmp_path / "ws"
+    assert len(list((ws / "passes").glob("*.json"))) == 6
+    cfg2 = PipelineConfig.load(ws / "config.json")
+    cfg2.passes = (cfg2.passes[0],)
+    Pipeline(cfg2).refine()
+    assert [p.name for p in (ws / "passes").glob("*.json")] == [f"01_{cfg2.passes[0]}.json"]
+    assert [s for s, _ in stage_timeline_paths(ws)] == ["roughcut", cfg2.passes[0], "final"]
 
 
 def test_cli_subcommands(demo_video, tmp_path):
@@ -61,21 +77,6 @@ def test_filter_graph_shapes():
     assert "acrossfade=d=0.500" in graph
     assert graph.endswith("[aout]") and "[vout]" in graph
     assert "fade=t=out:st=4.600:d=0.500" in graph
-
-
-from matchcut.pipeline.llm import MockBackend
-
-
-class RecordingMock(MockBackend):
-    """Mock backend that keeps the prompt text of every call."""
-
-    def __init__(self, cfg, log=None):
-        super().__init__(cfg, log)
-        self.texts = {}
-
-    def structured(self, request):
-        self.texts.setdefault(request.name, []).append(request.text)
-        return super().structured(request)
 
 
 def test_music_is_analysed_once_and_reaches_the_prompts(demo_video, click_track, tmp_path):

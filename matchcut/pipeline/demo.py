@@ -6,6 +6,7 @@ feature extraction and rendering can be exercised end to end.
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -34,9 +35,19 @@ def make_demo_footage(
     ffmpeg = _require("ffmpeg")
     shots = list(shots or DEFAULT_SHOTS)
     cmd: List[str] = [ffmpeg, "-v", "error", "-nostdin", "-y"]
-    for src, dur in shots:
-        cmd += ["-f", "lavfi", "-t", f"{dur:.3f}", "-i", src.format(w=width, h=height, fps=fps)]
-    total = sum(d for _, d in shots)
+    # Whole frames per shot, rounded on the running total so no error accumulates: lavfi ``-t 1.5`` at 25 fps
+    # yields 38 frames and concat starts the next shot after the last whole frame, so independently rounded
+    # half frames would push every later shot one frame late.  ``-t`` sits half a frame below the last frame.
+    counts: List[int] = []
+    elapsed, done = 0.0, 0
+    for _, dur in shots:
+        elapsed += dur
+        target = int(math.floor(elapsed * fps + 0.5))
+        counts.append(max(1, target - done))
+        done += counts[-1]
+    for (src, _), n in zip(shots, counts):
+        cmd += ["-f", "lavfi", "-t", f"{(n - 0.5) / fps:.4f}", "-i", src.format(w=width, h=height, fps=fps)]
+    total = sum(d for _, d in shots)  # the audio sets the file length, as before
     if audio:
         cmd += ["-f", "lavfi", "-t", f"{total:.3f}", "-i", "sine=frequency=440:sample_rate=44100"]
     inputs = "".join(f"[{i}:v]" for i in range(len(shots)))

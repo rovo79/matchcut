@@ -30,6 +30,8 @@ class Context:
     descriptions: Dict[int, Dict[str, Any]] = field(default_factory=dict)
     narrative: Dict[str, Any] = field(default_factory=dict)
     music: Optional[MusicAnalysis] = None
+    notes: Dict[str, List[str]] = field(default_factory=dict)  # director's notes per stage, from checkpoints
+    constraints: List[str] = field(default_factory=list)  # editor constraints for the rough cut (from pins)
 
     @property
     def scorer(self) -> MatchScorer:
@@ -108,6 +110,14 @@ class Context:
             "energy, the climax beat on the biggest rise, and beat durations that land beat changes "
             "near rises or drops. Cuts will be snapped to the beat grid afterwards."
         )
+
+    def notes_text(self, stage: str) -> str:
+        """Prompt paragraph with the director's notes recorded for ``stage`` (plus editor constraints for the rough cut)."""
+        notes = self.notes.get(stage, [])
+        text = "Director's notes: (none)" if not notes else "Director's notes:\n" + "\n".join(f"- {n}" for n in notes)
+        if stage == "roughcut" and self.constraints:
+            text += "\nEditor constraints (must hold):\n" + "\n".join(f"- {c}" for c in self.constraints)
+        return text
 
 
 def direction_label(v: np.ndarray) -> str:

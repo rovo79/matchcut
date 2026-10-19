@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+import threading
+import time
+from pathlib import Path
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from . import prompts, schemas
+from . import events, prompts, schemas
 from .context import Context
 from .llm import LLMRequest
 from .matching import MatchScore
@@ -35,6 +38,11 @@ class Pass:
 
     def decision(self, action: str, clips: Sequence[str], detail: str, score: Optional[float] = None, **data) -> Decision:
         return Decision(self.name, action, list(clips), detail, score, dict(data))
+
+
+def is_match_cut(a: Clip, b: Clip) -> bool:
+    """The junction a -> b was locked by the match-cut pass (an editor's pin locks the same ends but is not a match cut)."""
+    return a.locked_out and b.locked_in and any(t.startswith("match_out:") for t in a.tags) and any(t.startswith("match_in:") for t in b.tags)
 
 
 def _beat_groups(tl: Timeline) -> List[List[int]]:
@@ -261,6 +269,7 @@ class ContinuityPass(Pass):
             prev = merged[-1] if merged else None
             if prev is not None and prev.shot_index == c.shot_index and abs(prev.source_out - c.source_in) < 0.05 and not prev.locked_out:
                 decisions.append(self.decision("merge", [prev.id, c.id], "contiguous pieces of the same shot merged"))
+                # the merged clip keeps the earlier piece's origin (``prev`` stays; its range just grows)
                 prev.source_out = c.source_out
                 prev.locked_out = c.locked_out
                 prev.tags = [t for t in prev.tags if not t.startswith("match_out")] + [t for t in c.tags if t.startswith("match_out")]
@@ -282,10 +291,11 @@ class ContinuityPass(Pass):
         while i < len(tl.clips):
             a, b = tl.clips[i - 1], tl.clips[i]
             risky = a.shot_index == b.shot_index or "jump_cut_risk" in b.tags
-            if not risky or b.locked_in:
+            if not risky or is_match_cut(a, b):
                 i += 1
                 continue
-            sep = self._find_separator(tl, i)
+            held = a.locked_out or b.locked_in  # an editor's pin holds these cut points: never split the pair
+            sep = None if held else self._find_separator(tl, i)
             if sep is not None:
                 clip = tl.clips.pop(sep)
                 tl.clips.insert(i, clip)
@@ -417,6 +427,7 @@ class PacingPass(Pass):
         if total > target * (1 + tol):
             excess = total - target
             # proportional trim of unlocked clips first
+            trimmed: Dict[str, float] = {}
             for _ in range(3):
                 flexible = [c for c in live if not (c.locked_in and c.locked_out) and c.duration > ctx.cfg.pacing.min_clip_seconds]
                 if not flexible or excess <= 0.05:
@@ -425,9 +436,16 @@ class PacingPass(Pass):
                 for c in flexible:
                     removed = self._shorten(c, excess * c.duration / weight, ctx)
                     excess -= removed
+                    trimmed[c.id] = trimmed.get(c.id, 0.0) + removed
+            for c in live:  # the beat-wide fit below is not attributed to a junction, so say what happened to each clip
+                if trimmed.get(c.id, 0.0) > 0.005:
+                    decisions.append(self.decision("trim", [c.id], f"{label}: fitted to target, -{trimmed[c.id]:.2f}s"))
             # still too long: drop the least valuable clips
             while excess > target * tol and len(live) > 1:
-                victim = min(live, key=lambda c: self._value(c, ctx))
+                droppable = [c for c in live if "pinned" not in c.tags]  # an editor's pin is never dropped
+                if not droppable:
+                    break
+                victim = min(droppable, key=lambda c: self._value(c, ctx))
                 victim.tags.append("dropped")
                 live.remove(victim)
                 excess -= victim.duration
@@ -472,7 +490,7 @@ class TransitionsPass(Pass):
             beat_change = a.beat_id != b.beat_id
             if not beat_change:
                 continue
-            if a.locked_out and b.locked_in:
+            if is_match_cut(a, b):  # a pin holds the cut points, not the transition
                 decisions.append(self.decision("keep_cut", [a.id, b.id], "beat change lands on a match cut: hard cut kept"))
                 continue
             kind = beats.get(b.beat_id, {}).get("transition_in", "cut")
@@ -535,6 +553,7 @@ class PolishPass(Pass):
         text = prompts.POLISH.format(
             brief=ctx.cfg.brief or "(none)",
             target=ctx.target_text(),
+            notes=ctx.notes_text("pass:polish"),
             narrative=ctx.narrative_text(),
             cut_list=json.dumps(cut_list, indent=0),
             max_edits=cfg.max_edits,
@@ -623,7 +642,7 @@ class PolishPass(Pass):
             if i == 0:
                 return False, "first clip has no incoming transition"
             prev = tl.clips[i - 1]
-            if (prev.locked_out and c.locked_in) and edit.transition != "cut":
+            if is_match_cut(prev, c) and edit.transition != "cut":
                 return False, "match cuts stay hard cuts"
             tcfg = ctx.cfg.transitions
             d = {"dissolve": tcfg.dissolve_seconds, "dip_to_black": tcfg.dip_to_black_seconds, "cut": 0.0}[edit.transition]
@@ -729,19 +748,66 @@ PASSES: Dict[str, type] = {
 }
 
 
-def run_passes(timeline: Timeline, ctx: Context, names: Sequence[str], save_dir: Optional = None) -> Timeline:
+def run_passes(
+    timeline: Timeline,
+    ctx: Context,
+    names: Sequence[str],
+    save_dir: Optional[Path] = None,
+    on_event: Optional[events.EventHandler] = None,
+    after_pass: Optional[Callable[[str, PassResult], events.CheckpointAnswer]] = None,
+    cancel: Optional[threading.Event] = None,
+) -> Timeline:
+    """Run the named passes in order.
+
+    ``on_event`` receives StageStarted/StageFinished/Decision events; ``after_pass``
+    is asked after every pass whether to Continue, Redo (re-run the same pass on the
+    same input, with an optional director's note) or Abort; ``cancel`` is checked
+    before each pass. Without callbacks the behaviour is unchanged.
+    """
+
+    def emit(e: events.Event) -> None:
+        if on_event is not None:
+            on_event(e)
+
+    unknown = [n for n in names if n not in PASSES]
+    if unknown:
+        raise ValueError(f"unknown pass {unknown[0]!r}; available: {', '.join(PASSES)}")
+
     tl = timeline
     for n, name in enumerate(names, start=1):
-        if name not in PASSES:
-            raise ValueError(f"unknown pass {name!r}; available: {', '.join(PASSES)}")
-        log.info("pass %d/%d: %s", n, len(names), name)
-        result = PASSES[name]().apply(tl, ctx)
-        tl = result.timeline
-        problems = tl.validate(ctx.shot_bounds, min_clip=0.1)
-        if problems:
-            raise RuntimeError(f"pass {name} produced an invalid timeline: {problems[:5]}")
-        if save_dir is not None:
-            tl.name = f"after {name}"
-            tl.save(save_dir / f"{n:02d}_{name}.json")
-        log.info("  %d decisions, %d clips, %.1fs", len(result.decisions), len(tl.clips), tl.duration)
+        stage = f"pass:{name}"
+        if cancel is not None and cancel.is_set():
+            raise events.RunAborted(stage)
+        while True:
+            log.info("pass %d/%d: %s", n, len(names), name)
+            emit(events.StageStarted(stage=stage))
+            started = time.time()
+            result = PASSES[name]().apply(tl, ctx)
+            candidate = result.timeline
+            problems = candidate.validate(ctx.shot_bounds, min_clip=0.1)
+            if problems:
+                raise RuntimeError(f"pass {name} produced an invalid timeline: {problems[:5]}")
+            for d in result.decisions:
+                emit(events.Decision(pass_name=d.pass_name, action=d.action, clip_ids=list(d.clip_ids), detail=d.detail, score=d.score, data=dict(d.data)))
+            path = ""
+            if save_dir is not None:
+                candidate.name = f"after {name}"
+                out = save_dir / f"{n:02d}_{name}.json"
+                candidate.save(out)
+                path = str(out)
+            log.info("  %d decisions, %d clips, %.1fs", len(result.decisions), len(candidate.clips), candidate.duration)
+            emit(events.StageFinished(stage=stage, seconds=round(time.time() - started, 3), path=path))
+            answer = after_pass(name, result) if after_pass is not None else events.Continue()
+            if isinstance(answer, events.Abort):
+                raise events.RunAborted(stage)
+            if isinstance(answer, events.Redo):
+                if answer.note:
+                    ctx.notes.setdefault(stage, []).append(answer.note)
+                    note = Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note)
+                    tl = tl.copy()
+                    tl.history.append(note)
+                    emit(events.Decision(pass_name=name, action="note", clip_ids=[], detail=answer.note, score=None, data={}))
+                continue
+            tl = candidate
+            break
     return tl

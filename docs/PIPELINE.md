@@ -145,6 +145,228 @@ A dissolve starts on the beat: the cut point the pass aligns is where the
 incoming clip begins fading in (the render starts a dissolve `duration`
 seconds before the junction). Tempo is assumed constant across the track.
 
+## Events and checkpoints
+
+`Pipeline(cfg, on_event=None, on_checkpoint=None, cancel=None)` lets a UI
+drive a run. Every callback runs on the pipeline's thread.
+
+* **Events** (`matchcut.pipeline.events`): `RunStarted`, `StageStarted`,
+  `StageCached`, `StageFinished`, `Decision` (one per pass decision),
+  `ModelCall` (one per Claude API attempt, with tokens), `Log` (the pipeline's log
+  lines), `Checkpoint`, `RunFinished`, `RunFailed`. Each has `to_dict()`.
+  Stage names: `ingest`, `describe`, `narrative`, `roughcut`, `pass:<name>`,
+  `render`, `report`.
+* **Checkpoints**: after `describe`, `narrative`, `roughcut` and every pass,
+  `on_checkpoint(stage, summary)` is called and the run waits for its answer:
+  `Continue()`, `Redo(note)` or `Abort()`. `Redo` at describe, narrative or
+  roughcut deletes that stage's cached output and everything downstream
+  (`Pipeline.invalidate_from(stage)`), appends the note to the stage's
+  director's notes and re-runs it; `Redo` at a pass re-runs that pass on the
+  same input and overwrites its file. Notes are
+  rendered into the describe, narrative, rough-cut and polish prompts; the
+  deterministic passes record the note in the timeline history and simply
+  re-run. `Abort` raises `RunAborted` after emitting `RunFailed(error="aborted")`.
+* **Cancel**: a `threading.Event`; the run stops at the next stage or pass
+  boundary with `RunAborted`.
+* Callbacks must not raise: an exception from `on_event` or `on_checkpoint`
+  aborts the run as a `RunFailed`. `Log` events are produced through the
+  `matchcut.pipeline` logger only while a listener is attached.
+
+Without handlers (the CLI) every checkpoint continues and nothing changes.
+
+## Editorial pins
+
+An editor can pin a junction (a cut between two clips) from the TUI's Edit
+tab so that later runs keep it. Pins live in `workspace/editorial.json`,
+written atomically:
+
+```json
+{"pins": [{"out_shot": 0, "in_shot": 1, "out_time": 4.0, "in_time": 11.88, "origin": "locked", "note": "", "out_origin": "0@0.000-4.500", "in_origin": "1@11.500-14.000"}]}
+```
+
+A pin names a junction by its two **shots**, not by clip ids: passes renumber
+clips, shots do not. `out_time` and `in_time` are source seconds. `origin` is
+`locked` (keep the points the editor was looking at) or `reverted` (go back to
+the points of the first cut). `out_origin` / `in_origin` name the two clip
+instances the pin was taken on (see below; `""` in older files). A malformed entry is skipped and logged; a
+missing or corrupt file means no pins.
+
+How a pin takes effect:
+
+- **Rough cut.** When the rough cut is assembled, every pin is added to the
+  model's constraints as "keep shot A immediately followed by shot B", so a
+  regenerated rough cut still contains the junction.
+- **Before the passes.** `Pipeline.refine` calls `editorial.apply_pins` on the
+  rough cut before the first pass. For each pin whose two shots are adjacent,
+  both clips get the pinned points (snapped to frames, clamped to the shot and
+  to `pacing.min_clip_seconds`), the facing ends are locked (`locked_out` /
+  `locked_in`) and both clips are tagged `pinned`. The passes already leave
+  locked ends alone, and `pacing` never drops a clip tagged `pinned`. A beat
+  that holds a pinned clip is not reordered by the match-cut pass.
+- **Shots that are not adjacent.** A pin on a junction a later pass would have
+  made (a pacing drop, a continuity insert, a match-cut reorder) names two
+  shots that are not neighbours in the rough cut. `apply_pins` first chooses
+  the two clips (see **How a pin finds its clips** below), never the same clip
+  twice (a pinned jump cut takes two pieces of one shot). If the
+  pinned points fit those clips (the room check comes first, so a pin that
+  fails it leaves the order alone), `apply_pins` moves one clip next to the
+  other: first the incoming clip to just after the outgoing one, otherwise the
+  outgoing clip to just before the incoming one. A move never splits or
+  reorders the beats and never moves a clip, or the end of an anchor clip, that
+  another pin already holds. Pins are placed in two phases, each in store
+  order: those whose chosen clips are already adjacent first, then those that
+  need a move, so a move never breaks a pin that is already in place. The move
+  is recorded as `editor:pin_moved` (detail `moved shot 3 next to shot 0 to
+  hold the editor's pin`) before the pin's `editor:pinned` decision; both name
+  rough-cut clip ids, and the junction inspector attributes them to the
+  junction by the clips' lineage, so its why line is the editor's.
+- **Decisions.** Each pin leaves a decision with pass name `editor`:
+  `editor:pinned` (detail `locked by the editor: out 4.00s, in 11.88s`; the
+  data holds the pin plus the points actually placed) or `editor:pin_unplaced`.
+  The unplaced detail is exactly one of `shot N is not in this cut`, `shot N
+  has only one clip in this cut` (a pinned jump cut of a shot the cut keeps
+  once), `shot N is ambiguous: more than one piece fits the pinned point`,
+  `shot N is held by another pin`, `moving shot N would split or
+  reorder the beats`, or `not enough room in these clips for the pinned
+  points`. These show in the event stream, in `report.md`, in the TUI log, and
+  in the junction inspector's badge.
+
+- **How a pin finds its clips.** A shot can appear as several pieces, and a
+  later stage's points (the Edit tab pins the inspected stage) may have moved
+  past the rough-cut range of the piece they belong to, for instance when
+  pacing extends a clip's out-point into a sibling piece's range. So a clip
+  carries an `origin`: `Pipeline.refine` stamps each rough-cut clip with
+  `clip_origin(c)` (`"<shot>@<in>-<out>"` of its rough-cut range), every pass
+  copies it forward (continuity's merge keeps the earlier piece's), and the
+  Edit tab writes the origins of the junction's two clips into the pin. Per
+  side, a pin first takes the one clip of that shot with its remembered origin;
+  without a unique match it takes the piece whose boundary is nearest (the
+  outgoing side compares `out_time` with each `source_out`, the incoming side
+  `in_time` with each `source_in`), but only if the runner-up is at least
+  0.5 s farther; otherwise the pin is left unplaced with the ambiguity reason
+  and nothing moves. Lineage identifies the piece exactly; the nearest
+  boundary is only a fallback (old pins, stage files that predate origins, a
+  timeline passed in without them), so a placement chosen that way among two or
+  more pieces is marked: the `editor:pinned` detail ends with ` (piece chosen
+  by nearest boundary: check it, or lock it again)`, its data has
+  `"by_boundary": true`, and the inspector badge says so. The Edit tab writes
+  a clip's origin only when the clip carries one (or the inspected stage is the
+  rough cut); otherwise the field stays empty. Selection uses the rough-cut
+  ranges as they were before any pin was applied.
+
+A pin holds the cut points, not the transition: a pinned junction on a beat
+boundary still gets the beat's dissolve, and only a match cut (tagged
+`match_out:*` / `match_in:*` by the match-cut pass) is forced to a hard cut.
+Because the pin is applied to the rough cut before the first pass, a junction's
+history credits the move to `editor (before matchcut)`, not to the first pass.
+
+A pin written during a run is read when the passes next start, so it applies
+on the next run. The TUI shows `pin pending: run again (R) to apply` until
+then.
+
+## Explaining the cuts as text
+
+`junctions` lists every junction of the final cut with its evidence, so a cut
+can be understood without opening the TUI or the JSON files:
+
+```shell
+python -m matchcut.pipeline junctions WORKSPACE            # one line per junction
+python -m matchcut.pipeline junctions WORKSPACE --index 1  # one junction in full
+```
+
+Each line gives the junction number, the two clips and shots, the cut points
+in source seconds, the transition, the combined score and badges
+(`match:<type>`, `locked`, `pinned`, `beat`). Junctions are followed across stages by
+lineage (same shot, overlapping source range), so the scores before and after
+the passes describe the same cut even when clips were renumbered. A junction a pass
+created is credited with that pass's decisions about its clips by the same
+lineage: a continuity insert reads `continuity: moved c003 between c001 and
+c002 to break a jump cut`, and a match-cut reorder's verdicts about the new
+neighbours belong to the junctions they made. The scores
+are rebuilt from `analysis.npz` with the deterministic scorer, the same one the
+match-cut pass uses. Output from a mock run on the 20 s Big Buck Bunny clip
+(`-t 12`):
+
+```text
+$ python -m matchcut.pipeline junctions ws_bbb
+2 junctions in final (8 stages)
+  1  c001->c002  s0->s1  out    4.00  in   11.88  dissolve     score 0.23  beat
+  2  c002->c003  s1->s2  out   15.75  in   15.88  dissolve     score 0.36  beat
+
+$ python -m matchcut.pipeline junctions ws_bbb --index 1
+  1  c001->c002  s0->s1  out    4.00  in   11.88  dissolve     score 0.23  beat
+why: transitions: beat b1 -> b2: dissolve 0.75s
+history:
+  roughcut: cut at out 4.00s / in 11.88s
+  transitions: dissolve 0.75s
+scores (roughcut -> final):
+  structure    0.000 -> 0.000
+  composition  0.595 -> 0.595
+  luminance    0.370 -> 0.370
+  color        0.199 -> 0.199
+  frame        0.245 -> 0.245
+  motion       0.200 -> 0.200
+  combined     0.232 -> 0.232
+decisions:
+  transitions:dissolve  beat b1 -> b2: dissolve 0.75s
+```
+
+## Reviewing a junction in motion
+
+`matchcut.review` prepares and plays the window around one junction, so a cut
+can be watched rather than inferred from stills. The Edit tab drives it with `p`,
+`a` and `s` ([TUI.md](TUI.md#watching-a-junction-mpv)); from a terminal:
+
+```shell
+python -m matchcut.review WORKSPACE --index 1 --ab           # prepare A (first cut) and B (final)
+python -m matchcut.review WORKSPACE --index 1 --ab --play    # play in mpv; Enter flips A/B, s pauses, q quits (Enter after closing the window plays it again)
+python -m matchcut.review WORKSPACE --index 2 --stage polish --render   # always render the window
+```
+
+`--index` is the junction number from `junctions` (1-based), `--stage` defaults
+to the last stage, `--ab` adds the same junction at its baseline stage, `--play`
+plays it (mpv, or the system player without mpv) and `--render` renders the
+window instead of playing hard cuts from an EDL. Sample output on the 20 s Big
+Buck Bunny clip (a mock run):
+
+```text
+$ python -m matchcut.review ws_bbb --index 1 --ab
+A edl ws_bbb/review/roughcut_s0-s1_08e09c8369a9bb2d.edl cut=2.00 duration=4.00 cut
+B render ws_bbb/review/final_s0-s1_0c92e9e04eb8aa1c.mp4 cut=2.00 duration=4.75 dissolve 0.75s
+```
+
+Each line is the item (`A` the baseline stage, `B` the inspected one), its kind
+(`edl`: hard cuts played straight from the source; `render`: an ffmpeg render),
+its file under `workspace/review/`, `cut=` the seconds from the start of the
+window to the incoming clip, the window's duration and the transition, with
+`cached` appended when the file already existed. A window is rendered when it
+holds a transition, overlaps the timeline's fade-in or fade-out, or music is
+configured; the render is the clips around the junction, as a short timeline through
+the normal renderer, trimmed to the window. Errors are one line on
+stderr and exit code 1 (`no stage X in WS`, `junction 3 is out of range 1..2`,
+`source footage not found: ...`, `ffmpeg not found on PATH`); an unexpected
+problem with the workspace data prints `review failed: <type>: <message>` and
+exits 1. Rendered windows are cut on the frame-snapped timeline, so `cut=` is on
+the frame grid. A render killed half way leaves a file in `workspace/review/.tmp/`;
+files there older than an hour are removed the next time a window is prepared.
+
+The `review` section of the workspace's `config.json` (the command reads it from
+there; a pipeline command's `--set review.pre_seconds=3` writes it):
+
+| key | default | meaning |
+|---|---|---|
+| `pre_seconds` | 2.0 | shown before the cut |
+| `post_seconds` | 2.0 | shown after the transition |
+| `width` | 0 | width of rendered windows; 0 is the source resolution, so for square-pixel sources a rendered window has the same size and aspect as an EDL window (anamorphic sources render squashed, as `final.mp4` does; pipeline follow-up: scale by `iw*sar` before `setsar=1`); a non-zero value scales it, and then the two differ in size, and mpv may resize its window on a toggle on a video output where `auto-window-resize` has no effect; a `config.json` saved by an earlier version holds `640` and keeps it until set to 0) |
+| `crf` | 23 | quality of rendered windows |
+| `mpv` | `mpv` | the mpv binary |
+| `always_render` | false | render every window instead of playing hard cuts from an EDL |
+
+mpv is driven over its JSON IPC socket (Unix only; on Windows the system opener
+is used). `matchcut.review` reads the stage timelines and never writes them, and
+the pipeline does not import it. [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md) lists what
+is verified headless and what still needs a human at a desktop.
+
 ## Working iteratively
 
 Every stage is cached in the workspace, so you can change something and re-run
@@ -176,6 +398,7 @@ request. Every call is logged to `workspace/llm_calls.jsonl` with usage.
 
 * Shot detection handles hard cuts and ignores fades to/from black; long
   dissolves between two bright shots are not split.
+* Shot starts are detected on the 8 fps analysis grid: a detected start lies on a 1/8 s step, from about one frame early to about 1.4 frames late at 25 fps, so a clip can open with one frame of the previous shot (visible in review windows and `final.mp4`). Full-rate refinement of the boundary is a follow-up.
 * The match-cut scorer is intentionally cheap. It finds compositional and
   motion rhymes; semantic matches (e.g. a bone cut to a spaceship) rely on the
   model's verdict on the side-by-side sheets, so keep `matchcut.verify_with_llm`
