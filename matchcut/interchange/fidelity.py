@@ -141,7 +141,7 @@ def differences(a: Timeline, b: Timeline, rate: Fraction, tol: float = 0, rec_to
 # storage), then pull an edge that left its shot back inside (at most one frame in total for a clip that was inside its shot).  A clip
 # shorter than two frames gets its out edge pushed to two frames.  A larger move is not snapping: it is an error.
 MAX_SNAP_FRAMES = 1.0
-_SNAP_SLACK = 0.01
+_SNAP_SLACK = 0.01  # frames; plus 1 ms of time (see _snap_errors)
 
 
 def _snap_errors(canonical: Timeline, exported: Timeline, rate: Fraction) -> List[str]:
@@ -149,6 +149,10 @@ def _snap_errors(canonical: Timeline, exported: Timeline, rate: Fraction) -> Lis
     if len(canonical.clips) != len(exported.clips):
         return [f"export drops or adds clips: {len(exported.clips)} written for {len(canonical.clips)} in the stage"]
     fps = float(rate)
+    # Timeline.validate lets a clip sit up to 1 ms outside its shot and passes store ranges to 3 decimals, so a valid stage can be
+    # pulled back by the snap a little more than a frame.  The slack is therefore 0.01 frame + 1 ms (chosen over re-snapping with the
+    # shot bounds, which the gate does not have).
+    slack = _SNAP_SLACK + 0.001 * fps
     errs: List[str] = []
     for i, (a, b) in enumerate(zip(canonical.clips, exported.clips)):
         who = f"clip {i + 1} ({a.id}, shot {a.shot_index})"
@@ -164,7 +168,7 @@ def _snap_errors(canonical: Timeline, exported: Timeline, rate: Fraction) -> Lis
         for label, x, y, limit in (("in", a.source_in, b.source_in, MAX_SNAP_FRAMES),
                                    ("out", a.source_out, b.source_out, 2.0 if short else MAX_SNAP_FRAMES)):
             d = (y - x) * fps
-            if abs(d) > limit + _SNAP_SLACK:
+            if abs(d) > limit + slack:
                 errs.append(f"{who}: source {label} moved {d:+.2f} frames by the snap; snapping moves an edge by at most {limit:g} frame{'s' if limit > 1 else ''}")
     return errs
 

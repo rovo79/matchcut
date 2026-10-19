@@ -432,3 +432,43 @@ def test_invalid_drop_frame_numbers_and_overlapping_events():
 """
     back, notes = import_edl(overlap, RATE24, "/x/media.mp4")
     assert len(back.clips) == 2 and notes == ["event 002 starts 24 frames before the previous video event ends (overlapping record times): read in file order"]
+
+
+# -- review round 2 ---------------------------------------------------------------------------------
+def _reel_edl(reel: str, name: str, second_name: str) -> str:
+    return (f"TITLE: t\nFCM: NON-DROP FRAME\n\n"
+            f"001  {reel:<8} V     C        00:00:01:00 00:00:03:00 00:00:00:00 00:00:02:00\n* FROM CLIP NAME: {name}\n"
+            f"002  {reel:<8} V     C        00:00:05:00 00:00:07:00 00:00:02:00 00:00:04:00\n* FROM CLIP NAME: {second_name}\n")
+
+
+def test_a_reel_names_the_roll_so_it_never_outvotes_a_file_name():
+    cam = "/x/A001C003_230101.mov"
+    # another clip on the same roll is another file, whatever the reel
+    back, notes = import_edl(_reel_edl("A001", "A001C001_230101.mov", "A001C003_230101.mov"), RATE24, cam)
+    assert len(back.clips) == 1 and back.clips[0].source_in == 5.0 and notes == ["event 001: other media A001C001_230101.mov ignored"]
+    back, notes = import_edl(_reel_edl("media", "broll.mov", "media.mp4"), RATE24, "/x/media.mp4")
+    assert len(back.clips) == 1 and notes == ["event 001: other media broll.mov ignored"]
+    # the reel is the fallback only without a name, or with a name that is no file name
+    assert len(import_edl(_reel_edl("A001", "Interview take 3", "Interview take 3"), RATE24, cam)[0].clips) == 2
+    assert len(import_edl(_reel_edl("media", "", ""), RATE24, "/x/media.mp4")[0].clips) == 2
+    with pytest.raises(InterchangeError, match="no event of the EDL references"):
+        import_edl(_reel_edl("B001", "Interview take 3", "Interview take 3"), RATE24, cam)
+    # OpenTimelineIO's cmx_3600 writer (reel "media", names "c001 shot0") is still the source
+    assert len(import_edl(OTIO_STYLE.replace("* FROM CLIP: file:///x/media.mp4\n", "").replace("* TO CLIP: file:///x/media.mp4\n", ""),
+                          RATE24, "/x/media.mp4")[0].clips) == 3
+
+
+def test_a_comment_of_the_audio_line_does_not_overwrite_the_video_lines_name():
+    text = """TITLE: x
+FCM: NON-DROP FRAME
+
+001  AX V     C        00:00:01:00 00:00:03:00 01:00:00:00 01:00:02:00
+* FROM CLIP NAME: media.mp4
+001  AX A     C        00:00:01:00 00:00:03:00 01:00:00:00 01:00:02:00
+* FROM CLIP NAME: vo.wav
+002  AX V     C        00:00:05:00 00:00:07:00 01:00:02:00 01:00:04:00
+* FROM CLIP NAME: media.mp4
+"""
+    back, notes = import_edl(text, RATE24, "/x/media.mp4")
+    assert [(c.source_in, c.source_out) for c in back.clips] == [(1.0, 3.0), (5.0, 7.0)]
+    assert notes == ["event 001: audio event (track A) ignored"]

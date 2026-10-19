@@ -153,10 +153,14 @@ def _same_path(a: str, b: str) -> bool:
 _SHOT_NAME = re.compile(r"shot_?\d+\s*$", re.I)
 
 
+_FILE_LIKE = re.compile(r"\.[A-Za-z0-9]{1,5}\s*$")
+
+
 def _is_source(g: Dict[str, Any], reel: str, src_path: str) -> bool:
-    """Whether the event of ``g`` is the source footage.  A different file needs positive evidence: a path comment naming another
-    file, or a clip name that is not matchcut's own (``... shot<N>``) and names another file.  matchcut's names, a reel that is
-    (the start of) the source's name and no evidence at all all count as the source."""
+    """Whether the event of ``g`` is the source footage.  A different file needs positive evidence.  In order:
+    a path comment (``FROM CLIP`` / ``SOURCE FILE``) decides; else the clip name: matchcut's own (``... shot<N>``) is the source and a
+    file name (it has an extension) must be the source's; else, with no name or one that is no file name, a reel that is (the start of)
+    the source's name (reels name the roll, not the clip, so this is never allowed to outvote a file name); else the name, if any."""
     pick = lambda d: d.get("TO") or d.get("FROM") or d.get("SOURCE")  # noqa: E731
     path = pick(g["paths"])
     if path:
@@ -164,6 +168,8 @@ def _is_source(g: Dict[str, Any], reel: str, src_path: str) -> bool:
     name = g["names"].get("TO") or g["names"].get("FROM")
     if name and _SHOT_NAME.search(name):
         return True
+    if name and _FILE_LIKE.search(name):
+        return _same_name(name, src_path)
     if len(reel) >= 3 and Path(src_path).stem.lower().startswith(reel.lower()):  # the reel may be truncated to 8 characters
         return True
     return _same_name(name, src_path)
@@ -182,6 +188,16 @@ def import_edl(text: str, rate: Fraction, src_path: str, bounds: Optional[Dict[i
         raise
     except (KeyError, TypeError, ValueError, AttributeError, IndexError, ZeroDivisionError, OverflowError) as exc:
         raise InterchangeError(f"invalid EDL: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
+
+
+def _put(cur: List[Dict[str, Any]], table: str, key: str, value: str) -> None:
+    """A comment belongs to the latest event of its number; earlier events of that number (the video line before an audio line)
+    take it only where they have no value of their own yet."""
+    for k, g in enumerate(cur):
+        if k == len(cur) - 1:
+            g[table][key] = value
+        else:
+            g[table].setdefault(key, value)
 
 
 def _parse(text: str, rate: Fraction, notes: List[str]) -> Tuple[str, Dict[str, str], List[Dict[str, Any]]]:
@@ -212,14 +228,11 @@ def _parse(text: str, rate: Fraction, notes: List[str]) -> Tuple[str, Dict[str, 
             if mc and mc.group(1) in _DOC_KEYS:
                 doc[mc.group(1)] = mc.group(2).strip()
             elif mc:
-                for g in cur:
-                    g["mc"][mc.group(1)] = mc.group(2).strip()
+                _put(cur, "mc", mc.group(1), mc.group(2).strip())
             elif nm:
-                for g in cur:
-                    g["names"][nm.group(1).upper()] = nm.group(2).strip()
+                _put(cur, "names", nm.group(1).upper(), nm.group(2).strip())
             elif pt:
-                for g in cur:
-                    g["paths"][(pt.group(1) or pt.group(2)).upper()] = pt.group(3).strip()
+                _put(cur, "paths", (pt.group(1) or pt.group(2)).upper(), pt.group(3).strip())
         elif toks[0].isdigit() and len(toks) in (8, 9) and all(":" in t or ";" in t for t in toks[-4:]):
             drop = drop_fcm or any(";" in t for t in toks[-4:])
             if drop and not is_drop_rate(rate):

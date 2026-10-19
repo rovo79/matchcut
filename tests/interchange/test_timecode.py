@@ -106,6 +106,11 @@ def test_drop_frame_media_gets_a_drop_frame_edl_that_round_trips(df_footage):
     check_equivalent(tl, back, NTSC)
     assert not notes
     assert layout(back, NTSC)[0].in_f == 5
+    # FCPXML: drop-frame media is written as DF (sequence and clips); non-drop media stays NDF
+    xml = export_fcpxml([("final", tl, [])], src)
+    assert 'tcFormat="NDF"' not in xml and xml.count('tcFormat="DF"') == 1 + len(tl.clips)
+    assert 'tcFormat="DF"' not in export_fcpxml([("final", tl, [])], replace(src, start_tc_drop=False))
+    assert import_fcpxml(xml, "final", None, src)[0].clips[0].source_in == round(5 / float(NTSC), 4)
 
 
 def test_a_file_without_timecode_writes_from_frame_zero(footage):

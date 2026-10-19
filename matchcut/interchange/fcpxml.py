@@ -69,6 +69,7 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                   music_src: Optional[SourceInfo] = None, name: str = "matchcut") -> str:
     """One FCPXML 1.10 document: an event ``name`` with a project ``"<name> - <stage>"`` per stage (timelines normally frame-snapped)."""
     rate = src.rate
+    tcf = "DF" if src.start_tc_drop and rate in (Fraction(30000, 1001), Fraction(60000, 1001)) else "NDF"  # drop-frame media keeps its timecode format
     tc0 = src.start_tc_frames  # source times are in the media's own timecode: the asset starts there
     has_music = music is not None and bool(music.path)
     muted = bool(has_music and music.only and src.has_audio)  # the render drops the source audio entirely
@@ -96,7 +97,7 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
         ids = junction_ids(tl)
         by_in = {j.index + 1: (j, ids[j.index]) for j in junctions if 0 <= j.index < len(ids)}  # incoming-clip index -> junction
         seq = ET.SubElement(ET.SubElement(event, "project", name=_x(f"{name} - {stage}")), "sequence", format="r1",
-                            duration=rt(record_frames(rows), rate), tcStart="0s", tcFormat="NDF")
+                            duration=rt(record_frames(rows), rate), tcStart="0s", tcFormat=tcf)
         spine = ET.SubElement(seq, "spine")
         for i, (c, row) in enumerate(zip(tl.clips, rows)):
             if row.tr:
@@ -109,7 +110,7 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                     ET.SubElement(fv, "param", name="color", key="3", value="0 0 0 1")
                 _md(tr, kind=kind, **({"junction_id": by_in[i][1]} if i in by_in else {}), **({"unverified": UNVERIFIED_DIP} if dip else {}))
             ac = ET.SubElement(spine, "asset-clip", name=_x(f"{c.id} shot{c.shot_index}"), ref="r2", offset=rt(row.cut, rate), start=rt(tc0 + row.vis_in, rate),
-                               duration=rt(row.dur, rate), tcFormat="NDF")
+                               duration=rt(row.dur, rate), tcFormat=tcf)
             if muted:
                 ac.set("srcEnable", "video")
             if i == 0 and has_music:  # connected to the first clip: its offset is in that clip's own time (where the cut starts)

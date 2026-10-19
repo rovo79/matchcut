@@ -255,3 +255,21 @@ def test_dips_to_black_are_counted_and_the_record_messages_print_the_field_that_
 def test_the_timecode_conformance_caveat_is_in_every_format():
     for fmt in KNOWN:
         assert any("embedded start timecode" in a and "UNVERIFIED" in a for a in KNOWN[fmt]["approximated"]), fmt
+
+
+def test_a_stage_that_passes_validate_does_not_fail_the_snap_gate():
+    """59.94 fps, an out point 1 ms past its shot (what Timeline.validate allows, stored to 3 decimals): the snap pulls it back 1.02 frames."""
+    rate = Fraction(60000, 1001)
+    fps = float(rate)
+    hi = next((k + 0.995) / fps for k in range(200, 400) if (round((k + 0.995) / fps, 3) - (k + 0.995) / fps) * fps > 0.02)
+    tl = Timeline(source="/x/m.mp4", fps=fps, stage="roughcut", clips=[Clip("c001", 0, 1.0, round(hi, 3)), Clip("c002", 1, 6.0, 8.0)])
+    bounds = {0: (0.0, hi), 1: (5.5, 9.0)}
+    assert tl.validate(bounds) == []
+    snapped, notes = export_timeline(tl, bounds, rate)
+    assert "out moved -1.02 frames" in notes[0]
+    back, _ = import_edl(export_edl(snapped, "roughcut", fake_src(rate), "t"), rate, "/x/media.mp4")
+    assert check(tl, back, "edl", rate, snapped).errors == []
+    # a real fault is still caught
+    bad = copy.deepcopy(snapped)
+    bad.clips[0].source_out = round(bad.clips[0].source_out - 3 / fps, 4)
+    assert check(tl, import_edl(export_edl(bad, "roughcut", fake_src(rate), "t"), rate, "/x/media.mp4")[0], "edl", rate, bad).errors
