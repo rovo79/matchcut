@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 from .config import PipelineConfig
 from .features import Analysis
 from .matching import MatchScore, MatchScorer
-from .editorial import Pin, pin_change, pin_site
+from .editorial import Pin, pin_change, pin_site, pin_states
 from .timeline import HUMAN_STAGE, Clip, Decision, Timeline, clip_origin
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
@@ -169,6 +169,7 @@ class Junction:
     decision_stage: List[str] = field(default_factory=list)  # parallel to decisions: the stage whose timeline recorded it
     pin_lost: str = ""  # human stage only: why a pin that sits at this junction no longer holds in the editor's cut (one line)
     pin_key: Optional[Tuple[int, int]] = None  # (out shot, in shot) of that pin: the key its stored pin has
+    pin_undone: bool = False  # human stage only: the pin the history applied here is not held by the editor's cut (whatever the store holds now)
     first_stage: str = ""  # the first stage this junction was built from; a later baseline means a pass made the two clips adjacent
     adjacent_detail: str = ""  # the drop/insert that made them adjacent, when the baseline stage is not the first
 
@@ -202,7 +203,7 @@ class Junction:
     def pinned(self) -> bool:
         """The editor's pin holds this junction in this stage.  On the human stage the inherited decision is not enough: ``pin_lost`` says the
         editor's cut no longer holds it."""
-        return not self.pin_lost and any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
+        return not self.pin_lost and not self.pin_undone and any(d.pass_name == "editor" and d.action == "pinned" for d in self.decisions)
 
     @property
     def pin_origin(self) -> Optional[str]:
@@ -295,18 +296,20 @@ def _locate(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
     return best
 
 
-def _locate_instance(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
-    """Index i where clip i and clip i+1 are the same clip instances (``clip_origin``) as ``a_ref`` and ``b_ref``, in that order.  Only when one of
-    the two instances is not in ``timeline`` at all (a merge dropped it) does lineage decide; two instances that are there but not adjacent in that
-    order are not a junction of that stage."""
+def _locate_instance(timeline: Timeline, a_ref: Clip, b_ref: Clip, present: Set[str]) -> Optional[int]:
+    """Index i where clip i and clip i+1 are the same clip instances (``clip_origin``) as ``a_ref`` and ``b_ref``, in that order.  When no such pair is
+    adjacent, lineage looks (a merge keeps only the earlier piece's origin and the absorbed piece sits between the two instances), and its answer is
+    taken only if each clip it found is the wanted instance or an instance the cut being judged (``present``) no longer has: an absorbed piece.  A
+    clip that is another instance the cut still has is never the junction (a swapped pair stays a new pairing)."""
     oa, ob = clip_origin(a_ref), clip_origin(b_ref)
     origins = [clip_origin(c) for c in timeline.clips]
     for i in range(len(origins) - 1):
         if origins[i] == oa and origins[i + 1] == ob:
             return i
-    if oa in origins and ob in origins:
+    i = _locate(timeline, a_ref, b_ref)
+    if i is None:
         return None
-    return _locate(timeline, a_ref, b_ref)
+    return i if all(o == want or o not in present for o, want in ((origins[i], oa), (origins[i + 1], ob))) else None
 
 
 def locate_junction(timeline: Timeline, a_ref: Clip, b_ref: Clip) -> Optional[int]:
@@ -390,8 +393,13 @@ def _attribute(
     return found
 
 
-def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[MatchScorer] = None, upto: Optional[str] = None) -> List[Junction]:
-    """Junctions of stage ``upto`` (default: the last stage), each followed through the stages up to it."""
+def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[MatchScorer] = None, upto: Optional[str] = None,
+                    pins: Optional[Sequence[Pin]] = None) -> List[Junction]:
+    """Junctions of stage ``upto`` (default: the last stage), each followed through the stages up to it.
+
+    ``pins`` (the workspace's stored pins) decide, on the human stage, which junctions carry a changed pin (``Junction.pin_lost``): the same pins and the same
+    ``pin_states`` answer the Edit view's header and the ``junctions`` footer give.  Without them the pins the history applied are read.
+    """
     if not stages:
         return []
     names = [s for s, _ in stages]
@@ -402,21 +410,29 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
     # (same shot, overlapping source range) would give such a clip the history and the pass verdicts of the clip it overlaps, so a junction of
     # the human stage follows the earlier stages only when both its clips are instances the canonical stages have (``clip_origin``).
     known = {clip_origin(c) for _, t in considered[:-1] for c in t.clips} if considered[-1][0] == HUMAN_STAGE else None
-    lost: Dict[int, Tuple[str, Tuple[int, int]]] = {}  # human stage: junction index -> (why a pin that sits there no longer holds, its key)
+    present = {clip_origin(c) for c in ref.clips}
+    lost: Dict[int, Tuple[str, Tuple[int, int]]] = {}  # human stage: junction index -> (why a stored pin that sits there no longer holds, its key)
+    undone: Set[int] = set()  # human stage: junctions where a pin the history holds is no longer held by the editor's cut
     if known is not None:
+        # The pins shown are the stored ones (``pins``: the answer ``pin_states`` gives the footer and the header); a caller with no store reads the
+        # pins the history applied.  The history's pins also decide that a junction is no longer "pinned" whatever the store says now.
         pinned_last: Dict[Tuple[int, int], Decision] = {}
         for d in ref.history:
             if d.pass_name == "editor" and d.action == "pinned":
                 pinned_last[(d.data.get("out_shot"), d.data.get("in_shot"))] = d
-        for key, d in pinned_last.items():
+        history_pins: List[Pin] = []
+        for d in pinned_last.values():
             try:
                 pin = Pin.from_dict(d.data)
-                reason = pin_change(ref, pin, float(d.data["out"]), float(d.data["in_"]))
-                site = pin_site(ref, pin) if reason else None
+                if pin_change(ref, pin, float(d.data["out"]), float(d.data["in_"])) and (site := pin_site(ref, pin)) is not None:
+                    undone.add(site)
+                history_pins.append(pin)
             except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
                 continue
-            if reason and site is not None:
-                lost.setdefault(site, (reason, pin.key))
+        for st in pin_states(ref, history_pins if pins is None else pins, HUMAN_STAGE):
+            site = pin_site(ref, st.pin) if st.state == "changed" else None
+            if site is not None:
+                lost.setdefault(site, (st.reason, st.pin.key))
     out: List[Junction] = []
     for i in range(len(ref.clips) - 1):
         a, b = ref.clips[i], ref.clips[i + 1]
@@ -424,7 +440,7 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
         inherited = known is None or (clip_origin(a) in known and clip_origin(b) in known)
         at: List[Optional[int]] = []  # index of the junction's first clip in each considered stage
         for k, (stage, timeline) in enumerate(considered):
-            idx = i if k == len(considered) - 1 else ((_locate_instance(timeline, a, b) if known is not None else _locate(timeline, a, b)) if inherited else None)
+            idx = i if k == len(considered) - 1 else ((_locate_instance(timeline, a, b, present) if known is not None else _locate(timeline, a, b)) if inherited else None)
             at.append(idx)
             if idx is not None:
                 j.states.append(_state(stage, timeline, idx, scorer))
@@ -453,6 +469,7 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
             j.adjacent_detail = _adjacency_detail(considered, first, a, b, (tl_first.clips[at[first]].id, tl_first.clips[at[first] + 1].id))
         if i in lost:  # the human stage: a pin counts only if the editor's cut still holds it
             j.pin_lost, j.pin_key = lost[i]
+        j.pin_undone = i in undone
         out.append(j)
     return out
 

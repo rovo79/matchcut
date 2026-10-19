@@ -23,7 +23,7 @@ from matchcut.pipeline.junctions import (
 )
 from matchcut.pipeline.passes import run_passes
 from matchcut.pipeline.pipeline import Pipeline
-from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition
+from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 
 
 def clip(cid, shot, a, b, beat="b1", **attrs):
@@ -688,3 +688,49 @@ def test_a_human_reorder_is_named_only_when_nothing_more_specific_made_the_clips
                                        Decision("human", "removed", ["c003"], "human removed c003 (shot 3, 12.00-14.00s)")])
     j = next(j for j in build_junctions(stages + [("human", human)]) if (j.out_clip, j.in_clip) == ("c002", "c004"))
     assert j.why() == "made adjacent by human: removed c003 (shot 3, 12.00-14.00s)"
+
+
+# -- a clip continuity merged: the junction after it keeps its history on the human stage -------------------------------------
+def merged_stages():
+    """roughcut [c001, c002, c003, c004] (c002 and c003 contiguous pieces of shot 1) -> continuity merges them: final [c001, c002 (2-4 s), c003]."""
+    r = [clip("c001", 0, 0, 2), clip("c002", 1, 2, 3), clip("c003", 1, 3, 4), clip("c004", 2, 5, 7)]
+    for c in r:
+        c.origin = clip_origin(c)
+    verdict = Decision("matchcut", "match_cut", ["c003", "c004"], "match cut c003->c004", 0.9, {"match_type": "action"})
+    matched = tl("matchcut", [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in r], [verdict])
+    merge = Decision("continuity", "merge", ["c002", "c003"], "contiguous pieces of the same shot merged")
+    # (the merged clip keeps the earlier piece's origin)
+    merged = [clip("c001", 0, 0, 2, origin=r[0].origin), clip("c002", 1, 2, 4, origin=r[1].origin), clip("c003", 2, 5, 7, origin=r[3].origin)]
+    history = [verdict, merge]
+    return [("roughcut", tl("roughcut", r, [])), ("matchcut", matched), ("continuity", tl("continuity", merged, history)),
+            ("final", tl("final", [Clip.from_dict(c.to_dict()) for c in merged], history))]
+
+
+def test_the_junction_after_a_merged_clip_keeps_its_history_and_verdict_on_the_human_stage():
+    """The re-review's R1: both instances exist in the earlier stages but the absorbed piece sits between them; lineage must still find the junction."""
+    stages = merged_stages()
+    final = stages[-1][1]
+    canonical = build_junctions(stages)[1]
+    human = tl("human", [Clip.from_dict(c.to_dict()) for c in final.clips], final.history)
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c002", "c003") and j.match_type == "action"
+    assert [s.stage for s in j.states] == [s.stage for s in canonical.states] + ["human"] and j.why() == canonical.why() == "matchcut: match cut c003->c004"
+    assert [d.action for d in j.decisions] == [d.action for d in canonical.decisions]
+    # with a human trim of the merged clip the history and the verdict are still there, and the trim is listed
+    trimmed = tl("human", [Clip.from_dict(c.to_dict()) for c in final.clips], list(final.history) + [Decision("human", "trim", ["c002"], "human trimmed c002: out -5f")])
+    trimmed.clips[1].source_out = 3.8
+    j = build_junctions(stages + [("human", trimmed)])[1]
+    assert j.match_type == "action" and [s.stage for s in j.states][:-1] == [s.stage for s in canonical.states]
+    assert j.why() == "matchcut: match cut c003->c004" and any(d.pass_name == "human" and d.action == "trim" for d in j.decisions)
+    assert any("human: out" in h for h in j.history())
+
+
+def test_a_lineage_hit_on_the_wrong_instance_is_not_taken_for_a_merged_clips_junction():
+    """A located clip whose origin is another instance the human cut still has is not the junction (the swap case stays a new pairing)."""
+    stages = merged_stages()
+    final = stages[-1][1]
+    clips = [Clip.from_dict(c.to_dict()) for c in final.clips]
+    clips[1], clips[2] = clips[2], clips[1]  # c003, c002 swapped
+    human = tl("human", clips, list(final.history) + [Decision("human", "reorder", ["c001", "c003", "c002"], "human reordered clips: c001 c003 c002")])
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c003", "c002") and [s.stage for s in j.states] == ["human"] and j.match_type == ""

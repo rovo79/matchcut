@@ -122,7 +122,7 @@ class EditView(Vertical):
         upto = self.stages[: self.stages.index(stage) + 1]
         pairs = [(s, state.timeline(s)) for s in upto]
         pairs = [(s, t) for s, t in pairs if t is not None]
-        self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config)) if pairs else []
+        self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config), pins=PinStore(state.workspace).load()) if pairs else []
         pair, self._keep_pair = self._keep_pair, None
         kept = next((i for i, j in enumerate(self.junctions) if (j.out_shot, j.in_shot) == pair), None) if pair is not None else None
         self.selected = kept if kept is not None else min(self.selected, max(0, len(self.junctions) - 1))

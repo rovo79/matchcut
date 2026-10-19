@@ -195,7 +195,8 @@ Interchange files carry ids; the decisions live in `provenance.json`.
   - a **clip with no key to decide that overlaps two canonical clips equally** (the same number of frames, one shot):
     `clip 2 of the file (shot 4, 9.40-10.20s) overlaps c002 and c003 equally: read as a new clip (h001), not matched to any of them`. A clip that overlaps one
     canonical clip more than the others still goes to it;
-  - a **canonical clip whose best candidates tie** (a clip razored into two unkeyed halves of equal length): neither half is taken for it, both are new clips
+  - a **canonical clip whose best candidates tie** (a clip razored into two unkeyed halves of equal length; a candidate that fits another canonical clip better is
+    left out of the tie, so a roll edit between two pieces is two trims): neither half is taken for it, both are new clips
     (`c003's range is shared equally by clips 3 and 4 of the file: read as new clips (h001, h002), not matched to c003`) and the canonical clip reads as removed.
     The new clips' `origin` is `human:<id>`;
   - a **known key on the footage of another shot**: a key is trusted only while the edited range still overlaps the shot of the canonical clip (`shots.json`). If
@@ -296,8 +297,8 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   A missing or unreadable `human_import.json` counts as stale.
 - **Inherited decisions belong to the same clips, in the same order.** A junction of the human stage is followed through the earlier stages (history, pass
   decisions, the pass's "why") only when both its clips are instances the canonical stages have (the same `clip_origin` as the canonical clip: the
-  clip key) **and** a canonical stage has those two instances adjacent in that order: the earlier stages are located by clip instance first (lineage only when
-  an instance is gone from a stage, as after a merge), so a clip slipped off its old range inside its shot keeps its junction's history. A junction with a clip the
+  clip key) **and** a canonical stage has those two instances adjacent in that order: the earlier stages are located by clip instance first (lineage only when no such pair is adjacent, as after a merge, and then only if each clip it finds is
+  the wanted instance or one the human cut no longer has: the absorbed piece), so a clip slipped off its old range inside its shot keeps its junction's history. A junction with a clip the
   editor added, replaced or copied, with a new pairing, or with a pair in the reverse order shows only the `human` decisions and
   `made adjacent by human: ...` (`reordered c003, c002` for a reorder), never a pass's verdict about another pairing. An untouched junction keeps its inherited "why". When a removal made two clips
   adjacent, the human trim of either clip is listed under that junction's decisions (the "why" stays the removal).
@@ -307,7 +308,7 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   next to each other, with both pinned cut points unchanged to within half a frame. Otherwise the human stage reports the pin as **changed by the editor**
   with a one-line reason: `clip removed (shot 5)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, or `other footage (shot 2 is a different clip now)`.
   If the pair was razored or copied (a `human:` clip covers the pinned clip's range) the reason is `clip split or copied (shot N)`.
-  **Every stored pin is reported once** on the human stage, by one engine answer (`editorial.pin_states`, which calls `pin_outcome`): the `junctions` command ends with a
+  **Every stored pin is reported once** on the human stage (the tag, the why and the badge are derived from the stored pins too, so a cleared pin leaves no `pin-changed` tag and a pin set again at new points reads pending), by one engine answer (`editorial.pin_states`, which calls `pin_outcome`): the `junctions` command ends with a
   line per pin (`pin s0->s1: applied`, `pin s0->s1: changed by the editor: clip removed (shot 1)`, `... not placed: <reason>`, `... pending (run again to apply)`), the Edit view's header
   lists the changed ones with their reasons (`pin s0->s1 changed by the editor: clip removed (shot 1)`), and the junction where the pin now sits (its pair, else the junction after its
   outgoing clip, else the one before its incoming clip) carries the tag `pin-changed` and a `pin: changed by the editor: <reason>` detail line in `junctions` and the badge

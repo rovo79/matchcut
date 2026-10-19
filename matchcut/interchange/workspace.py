@@ -524,7 +524,8 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
                           f"{_list([canon.clips[i].id for i in tied])} equally: read as a new clip ({{new}}), not matched to any of them", [j]))
     for i in pending:  # a canonical clip whose best candidates tie (a clip razored into equal halves): none of them is taken for it
         c = canon.clips[i]
-        found = [(_overlap(crows[i], erows[j]), j) for j, e in enumerate(edited.clips) if j not in used and j not in blocked and e.shot_index == c.shot_index]
+        found = [(_overlap(crows[i], erows[j]), j) for j, e in enumerate(edited.clips) if j not in used and j not in blocked and e.shot_index == c.shot_index
+                 and all(_overlap(crows[i], erows[j]) >= _overlap(crows[o], erows[j]) for o in pending)]  # (a candidate that fits another canonical clip better is that clip's)
         best = max((ov for ov, _ in found), default=0)
         tied = [j for ov, j in found if ov == best] if best > 0 else []
         if len(tied) > 1:

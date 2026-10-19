@@ -490,6 +490,28 @@ def test_a_clip_over_two_canonical_clips_equally_is_a_new_clip_with_a_note_namin
     assert [c.id for c in human.clips][:3] == ["c001", "h001", "c004"] and (human.clips[1].source_in, human.clips[1].source_out) == (9.4, 10.2)
 
 
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_roll_edit_between_a_jump_cut_pair_is_two_trims_not_a_tie(wsx, fmt):
+    """The re-review's R2: Y (9.40-10.60) is 10 frames of c002 and 20 of c003: c003's tie with X must not unseat that clear winner."""
+    tl = two_pieces_of_one_shot(wsx)  # c002 9.00-9.80, c003 9.80-10.60 (shot 4), cuts only
+    w = wsx.world
+    snapped, _ = export_timeline(tl, w.bounds, w.src)
+    ed = snapped.copy()
+    x, y = Clip("x1", 4, 9.0, 9.4, tl.clips[1].beat_id), Clip("x2", 4, 9.4, 10.6, tl.clips[1].beat_id)
+    x.origin, y.origin = "unknown-x", "unknown-y"
+    ed.clips[1:3] = [x, y]
+    fp = sha(wsx.ws / "final.json")
+    path = wsx.tmp / f"roll.{fmt}"
+    if fmt == "otio":
+        path.write_text(json.dumps(export_otio(ed, "final", w.src, [], stage_sha256=fp)))
+    else:
+        path.write_text(export_edl(ed, "final", w.src, "demo - final", stage_sha256=fp))
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert [(d.action, d.clip_ids) for d in res.decisions] == [("trim", ["c002"]), ("trim", ["c003"])], [d.detail for d in res.decisions]
+    assert "2 clips matched by source range because the clip key was missing or unknown" in res.notes and not any("shared equally" in n for n in res.notes)
+    assert [c.id for c in Timeline.load(res.stage_path).clips][:3] == ["c001", "c002", "c003"]
+
+
 def one_clip_razored(wsx, cut: float, fmt: str) -> Path:
     """final.json rewritten so that c002 is one clip of shot 4 (9.00-10.60 s); the editor's file has it razored at ``cut`` into two clips without keys."""
     w = wsx.world
@@ -991,6 +1013,37 @@ def test_swapping_two_clips_gives_the_reversed_pair_no_pass_verdict_of_the_old_o
     assert reversed_pair.why() == "made adjacent by human: reordered c003, c002", reversed_pair.why()
     assert [s.stage for s in reversed_pair.states] == ["human"] and not any(d.pass_name != "human" for d in reversed_pair.decisions)
     assert js[("c001", "c003")].why() == "made adjacent by human: reordered c001, c003"
+
+
+def test_the_tag_the_why_and_the_badge_follow_the_stored_pins_not_the_history(wsx, capsys):
+    """The re-review's M7: after an import the pin is cleared or pinned again; the junction must say what the footer and the header say."""
+    from matchcut.pipeline import cli
+
+    pin = origin_pinned_workspace(wsx, True)
+    edit_around_the_pin(wsx, pin, "trim")
+    # cleared (`x`): no stored pin, so no changed pin anywhere, and the junction is not called pinned either (the editor's cut undid it)
+    assert PinStore(wsx.ws).remove(pin.out_shot, pin.in_shot)
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    out = capsys.readouterr().out
+    assert "pin-changed" not in out and not [l for l in out.splitlines() if l.startswith("pin s")]
+    assert not any(" pinned" in l for l in out.splitlines() if l.lstrip()[:1].isdigit() and f"s{pin.out_shot}->s{pin.in_shot}" in l), out
+    jc = [j for j in build_junctions(load_stage_timelines(wsx.ws), pins=[])]
+    assert not any(j.pin_lost for j in jc) and not any(j.why().startswith("pin changed") for j in jc)
+    # pinned again at new points: not applied yet, so pending in the footer and no changed pin in the tag, the why, the header
+    PinStore(wsx.ws).put(Pin(pin.out_shot, pin.in_shot, pin.out_time + 0.2, pin.in_time, out_origin=pin.out_origin, in_origin=pin.in_origin))
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    out = capsys.readouterr().out
+    assert f"pin s{pin.out_shot}->s{pin.in_shot}: pending (run again to apply)" in out.splitlines() and "pin-changed" not in out
+
+    async def body(app, view, pilot):
+        assert "changed by the editor" not in str(app.query_one("#edit-header").content)
+        assert not any(j.pin_lost for j in view.junctions)
+
+    run_tui_on(wsx.ws, body)
+    # the stored pin that matches the history's applied pin is the one that is judged: restored, it reads changed again
+    PinStore(wsx.ws).put(pin)
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    assert "pin-changed" in capsys.readouterr().out
 
 
 def test_every_stored_pin_is_reported_once_on_the_human_stage_applied_or_not(wsx, capsys):

@@ -171,7 +171,7 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
     if not stages:
         print(f"no timelines in {ws}: run the pipeline first", file=sys.stderr)
         return 1
-    junctions = build_junctions(stages, scorer_for_workspace(ws, cfg))
+    junctions = build_junctions(stages, scorer_for_workspace(ws, cfg), pins=PinStore(ws).load())
     stale = stale_human(ws)  # a stale human.json is left out of the stages above; say so
     footer = _pin_footer(ws, stages)
     if index is None:
