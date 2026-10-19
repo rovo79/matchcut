@@ -224,7 +224,8 @@ class Junction:
         """
         if self.pin_lost:
             return f"pin changed by the editor: {self.pin_lost}"
-        ranked = list(enumerate(self.decisions))[::-1]
+        # (a pin the store no longer holds, or holds at other points, says nothing about a cut the editor moved: the editor's decisions are history only)
+        ranked = [(i, d) for i, d in enumerate(self.decisions) if not (self.pin_undone and d.pass_name == "editor")][::-1]
         joined = bool(self.first_stage) and self.baseline.stage != self.first_stage  # a stage made the two clips adjacent
         tiers = (
             lambda i, d: d.pass_name == "editor",
@@ -410,7 +411,8 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
     # (same shot, overlapping source range) would give such a clip the history and the pass verdicts of the clip it overlaps, so a junction of
     # the human stage follows the earlier stages only when both its clips are instances the canonical stages have (``clip_origin``).
     known = {clip_origin(c) for _, t in considered[:-1] for c in t.clips} if considered[-1][0] == HUMAN_STAGE else None
-    present = {clip_origin(c) for c in ref.clips}
+    # instances a pipeline merge absorbed: in neither the human cut nor the latest canonical stage (an instance the editor deleted is in the latter)
+    present = {clip_origin(c) for c in ref.clips} | ({clip_origin(c) for c in considered[-2][1].clips} if known is not None and len(considered) > 1 else set())
     lost: Dict[int, Tuple[str, Tuple[int, int]]] = {}  # human stage: junction index -> (why a stored pin that sits there no longer holds, its key)
     undone: Set[int] = set()  # human stage: junctions where a pin the history holds is no longer held by the editor's cut
     if known is not None:

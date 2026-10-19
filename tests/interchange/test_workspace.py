@@ -1029,11 +1029,15 @@ def test_the_tag_the_why_and_the_badge_follow_the_stored_pins_not_the_history(ws
     assert not any(" pinned" in l for l in out.splitlines() if l.lstrip()[:1].isdigit() and f"s{pin.out_shot}->s{pin.in_shot}" in l), out
     jc = [j for j in build_junctions(load_stage_timelines(wsx.ws), pins=[])]
     assert not any(j.pin_lost for j in jc) and not any(j.why().startswith("pin changed") for j in jc)
+    undone = next(j for j in jc if j.pin_undone)  # the cut was moved: the editor lock is history, not this junction's why (re-review N2)
+    assert "locked by the editor" not in undone.why() and not undone.why().startswith("editor:"), undone.why()
     # pinned again at new points: not applied yet, so pending in the footer and no changed pin in the tag, the why, the header
     PinStore(wsx.ws).put(Pin(pin.out_shot, pin.in_shot, pin.out_time + 0.2, pin.in_time, out_origin=pin.out_origin, in_origin=pin.in_origin))
     assert cli.main(["junctions", str(wsx.ws)]) == 0
     out = capsys.readouterr().out
     assert f"pin s{pin.out_shot}->s{pin.in_shot}: pending (run again to apply)" in out.splitlines() and "pin-changed" not in out
+    again = next(j for j in build_junctions(load_stage_timelines(wsx.ws), pins=PinStore(wsx.ws).load()) if j.pin_undone)
+    assert "locked by the editor" not in again.why() and not again.why().startswith("editor:") and not again.pinned, again.why()
 
     async def body(app, view, pilot):
         assert "changed by the editor" not in str(app.query_one("#edit-header").content)

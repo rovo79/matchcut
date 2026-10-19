@@ -298,7 +298,7 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
 - **Inherited decisions belong to the same clips, in the same order.** A junction of the human stage is followed through the earlier stages (history, pass
   decisions, the pass's "why") only when both its clips are instances the canonical stages have (the same `clip_origin` as the canonical clip: the
   clip key) **and** a canonical stage has those two instances adjacent in that order: the earlier stages are located by clip instance first (lineage only when no such pair is adjacent, as after a merge, and then only if each clip it finds is
-  the wanted instance or one the human cut no longer has: the absorbed piece), so a clip slipped off its old range inside its shot keeps its junction's history. A junction with a clip the
+  the wanted instance or one that neither the human cut nor the latest canonical stage has: a piece the pipeline absorbed, not one the editor deleted), so a clip slipped off its old range inside its shot keeps its junction's history. A junction with a clip the
   editor added, replaced or copied, with a new pairing, or with a pair in the reverse order shows only the `human` decisions and
   `made adjacent by human: ...` (`reordered c003, c002` for a reorder), never a pass's verdict about another pairing. An untouched junction keeps its inherited "why". When a removal made two clips
   adjacent, the human trim of either clip is listed under that junction's decisions (the "why" stays the removal).

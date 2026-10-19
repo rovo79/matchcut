@@ -734,3 +734,22 @@ def test_a_lineage_hit_on_the_wrong_instance_is_not_taken_for_a_merged_clips_jun
     human = tl("human", clips, list(final.history) + [Decision("human", "reorder", ["c001", "c003", "c002"], "human reordered clips: c001 c003 c002")])
     j = build_junctions(stages + [("human", human)])[1]
     assert (j.out_clip, j.in_clip) == ("c003", "c002") and [s.stage for s in j.states] == ["human"] and j.match_type == ""
+
+
+def test_an_instance_the_editor_deleted_is_not_an_absorbed_piece_so_the_junction_borrows_no_verdict():
+    """The re-review's N1: the editor deletes c003 and extends c002 over it; the pass verdict about c003->c004 is not the new c002->c004's."""
+    r = [clip("c001", 0, 0, 2), clip("c002", 1, 2, 3), clip("c003", 1, 3, 4), clip("c004", 2, 5, 7)]
+    for c in r:
+        c.origin = clip_origin(c)
+    verdict = Decision("matchcut", "match_cut", ["c003", "c004"], "match cut c003->c004", 0.9, {"match_type": "action"})
+    final = tl("final", [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in r], [verdict])
+    stages = [("roughcut", tl("roughcut", r, [])), ("final", final)]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in (r[0], r[1], r[3])]
+    clips[1].source_out = 4.0  # c002 extended over the deleted c003 (trim out +25f)
+    human = tl("human", clips, [verdict, Decision("human", "removed", ["c003"], "human removed c003 (shot 1, 3.00-4.00s)"),
+                                Decision("human", "trim", ["c002"], "human trimmed c002: out +25f")])
+    j = build_junctions(stages + [("human", human)])[1]
+    assert (j.out_clip, j.in_clip) == ("c002", "c004")
+    assert j.why() == "made adjacent by human: removed c003 (shot 1, 3.00-4.00s)", j.why()
+    assert [s.stage for s in j.states] == ["human"] and j.match_type == ""
+    assert [(d.pass_name, d.action) for d in j.decisions] == [("human", "trim")]
