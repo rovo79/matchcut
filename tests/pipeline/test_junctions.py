@@ -672,8 +672,9 @@ def test_a_keyed_slip_inside_the_shot_keeps_the_junction_its_history_and_why():
     human = human_from(final, clips, [Decision("human", "trim", ["c002"], "human trimmed c002: in +60f, out +25f")])
     js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", human)])}
     j = js[("c001", "c002")]
-    assert [s.stage for s in j.states] == ["roughcut", "transitions", "final", "human"] and j.why().startswith("editor:"), (j.states, j.why())
+    assert [s.stage for s in j.states] == ["roughcut", "transitions", "final", "human"] , (j.states, j.why())
     assert j.pin_lost.startswith("cut trimmed by") and not j.pinned
+    assert j.why() == f"pin changed by the editor: {j.pin_lost}" and any(d.pass_name == "editor" for d in j.decisions)  # the pin's decision stays in the history
     other = js[("c002", "c003")]
     assert other.why() == "transitions: beat b1 -> b2: dissolve 0.30s" and other.pin_lost == ""
 

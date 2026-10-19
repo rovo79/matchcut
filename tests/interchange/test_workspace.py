@@ -859,6 +859,7 @@ def test_a_pin_the_editor_changed_does_not_read_applied_on_the_human_stage(wsx, 
         assert outcome.action == "pinned"
         j = next(j for j in jh if (j.out_shot, j.in_shot) == (pin.out_shot, pin.in_shot))
         assert j.pinned and not j.pin_lost and "pinned (locked)" in badge(j) and "pin changed" not in badge(j)
+        assert j.why().startswith("editor: ")  # an applied pin: the why is the editor's, as before
         return
     want = reason.format(in_shot=pin.in_shot)
     assert (outcome.action, outcome.detail) == ("pin_changed", want), outcome
@@ -900,6 +901,7 @@ def run_tui_on(ws: Path, body):
     ("delete", "clip removed (shot {in_shot})"),
     ("separate", "clips are no longer adjacent"),
     ("swap", "clips are no longer adjacent"),
+    ("trim", "cut trimmed by 3 frames (out)"),
     ("replace_other", None),
 ])
 def test_the_cli_footer_and_tag_and_the_tui_header_and_badge_say_the_same_about_a_changed_pin(wsx, capsys, how, reason, with_origins):
@@ -930,6 +932,9 @@ def test_the_cli_footer_and_tag_and_the_tui_header_and_badge_say_the_same_about_
     assert cli.main(["junctions", str(wsx.ws), "--index", str(site.index + 1)]) == 0
     detail = capsys.readouterr().out
     assert f"pin: changed by the editor: {why}" in detail and f"pin s{pin.out_shot}->s{pin.in_shot}: changed by the editor: {why}" in detail
+    # the why leads with the change, not with the editor decision the editor undid (which stays in the history)
+    assert f"why: pin changed by the editor: {why}" in detail and "why: editor:" not in detail and site.why() == f"pin changed by the editor: {why}"
+    assert any(d.pass_name == "editor" and d.action == "pinned" for d in human.history)
 
     async def body(app, view, pilot):
         header = str(app.query_one("#edit-header").content)
@@ -941,6 +946,7 @@ def test_the_cli_footer_and_tag_and_the_tui_header_and_badge_say_the_same_about_
         badges = panel.splitlines()[1]
         assert f"pin changed by the editor: {why}" in badges and "pinned (" not in badges and "pending" not in badges, badges
         assert "locked by matchcut" not in badges and "locked by the editor" not in badges
+        assert f"why: pin changed by the editor: {why}" in panel and "why: editor:" not in panel
 
     run_tui_on(wsx.ws, body)
 
@@ -965,6 +971,7 @@ def test_a_keyed_slip_inside_the_shot_keeps_the_pinned_junction_history_and_repo
         badges = panel.splitlines()[1]
         assert f"pin changed by the editor: {outcome.detail}" in badges and "locked by" not in badges and "pinned (" not in badges, badges
         assert "made adjacent by human" not in panel
+        assert f"why: pin changed by the editor: {outcome.detail}" in panel and "why: editor:" not in panel
 
     run_tui_on(wsx.ws, body)
 

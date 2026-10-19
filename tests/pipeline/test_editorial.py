@@ -733,6 +733,8 @@ def test_junctions_of_the_human_stage_say_a_changed_pin_is_not_pinned():
     trimmed.clips[0].source_out -= 3 / 25
     j = build_junctions([("final", final), ("human", trimmed)])[0]
     assert not j.pinned and j.pin_lost == "cut trimmed by 3 frames (out)"
+    assert j.why() == "pin changed by the editor: cut trimmed by 3 frames (out)"  # not the editor decision the cut undid
+    assert build_junctions(stages)[0].why().startswith("editor: ")  # untouched: the editor's own why
     assert build_junctions([("final", final)])[0].pinned  # unchanged for the canonical stages
 
 

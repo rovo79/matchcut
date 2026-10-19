@@ -217,7 +217,12 @@ class Junction:
         return i < len(self.clip_level) and self.clip_level[i]
 
     def why(self) -> str:
-        """The decision that best explains this junction: editor, then the match-cut verdicts, then pass decisions about the junction, then about one of its clips."""
+        """The decision that best explains this junction: editor, then the match-cut verdicts, then pass decisions about the junction, then about one of its clips.
+
+        On the human stage a pin the editor's cut no longer holds comes first: the inherited editor decision describes a state the editor undid (it stays in the history).
+        """
+        if self.pin_lost:
+            return f"pin changed by the editor: {self.pin_lost}"
         ranked = list(enumerate(self.decisions))[::-1]
         joined = bool(self.first_stage) and self.baseline.stage != self.first_stage  # a stage made the two clips adjacent
         tiers = (

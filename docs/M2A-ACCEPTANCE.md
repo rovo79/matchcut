@@ -323,7 +323,7 @@ Human-stage integrity (the rulings of this wave):
   reason (`clip removed (shot N)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, `clip split or copied (shot N)`, `other footage (shot N is a different clip now)`).
   **Every stored pin is reported once** through one engine helper (`editorial.pin_states`): the `junctions` CLI ends with a line per pin (`applied`, `changed by the editor: <reason>`, `not placed`, `pending`),
   the Edit view header lists the changed pins with their reasons, and the junction where the pin now sits (its pair, else after its outgoing clip, else before its incoming clip) carries the CLI tag
-  `pin-changed` and the Edit badge `pin changed by the editor: <reason>`. The locks the pin put on the human clips are cleared in `human.json`, and a lock that was a pin's is never badged "locked by matchcut".
+  `pin-changed` and the Edit badge `pin changed by the editor: <reason>`. The junction's why leads with `pin changed by the editor: <reason>`, not the inherited editor decision; the locks the pin put on the human clips are cleared in `human.json`, and a lock that was a pin's is never badged "locked by matchcut".
   Tests: engine units (`test_editorial.py`: untouched, nudged under half a frame, trim, delete, separate, swap, split or copied, other footage, with and without clip instances, the site of a pin,
   `pin_states`); real imports (`test_workspace.py`: delete, separate, swap, replace-other and keyed slip, each with and without clip instances, where the CLI footer, the CLI tag, the Edit header and the
   Edit badge are compared, and the released locks); the inspector (`test_widgets.py`).
@@ -342,8 +342,8 @@ Human-stage integrity (the rulings of this wave):
   (the existing tests, and the hash comparison in the 84-edit proof).
 
 Verification at the stabilization commit: `python -m pytest tests/interchange tests/pipeline tests/tui tests/review -q`, run per directory:
-interchange 420 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
-`test_timecode` 9, `test_workspace` 117), pipeline 192, tui 148, review 87: 847 passed, 0 failed (one of the two known load-flaky TUI tests, `test_run_with_checkpoints_advances_the_ladder`, failed once under load and passed on the rerun; the optional OpenTimelineIO and
+interchange 422 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
+`test_timecode` 9, `test_workspace` 119), pipeline 192, tui 148, review 87: 849 passed, 0 failed (the two known load-flaky TUI tests passed; the optional OpenTimelineIO and
 `xmllint` checks ran). The new pin, inherited-decision and ambiguity tests are in `tests/pipeline/test_editorial.py`, `tests/pipeline/test_junctions.py`, `tests/interchange/test_workspace.py` and `tests/tui/test_edit.py`.
 
 The tester's 84-edit proof was re-run against this commit with the tester's own `scripts/editor.py`: fresh workspaces made with the report's commands (a25 at 25 fps, b2398 at 23.976 fps

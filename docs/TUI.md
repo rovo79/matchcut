@@ -160,7 +160,7 @@ canonical stage's editor decision whatever the editor did), so the badge is judg
 clips the pin names, next to each other, with both pinned cut points unchanged to within half a frame; otherwise it reads `pin changed by the editor: <reason>` (`clip
 removed (shot 5)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, `clip split or copied (shot 2)`, `other footage (shot 2 is a different clip now)`), the junction's
 `locked by the editor` badge is dropped (a lock that was the pin's is never called matchcut's), and the header lists each changed pin with its reason (`pin s0->s1 changed by the editor: clip removed (shot 1)`).
-The badge is on the junction where the pin now sits (its pair; else the junction after its outgoing clip, or before its incoming clip), and `python -m matchcut.pipeline.cli junctions WS` ends with the same line per pin. A pin the editor did not touch still reads `pinned (locked)`. A
+The badge is on the junction where the pin now sits (its pair; else the junction after its outgoing clip, or before its incoming clip), and `python -m matchcut.pipeline.cli junctions WS` ends with the same line per pin. The junction's `why:` line leads with `pin changed by the editor: <reason>` (the inherited `editor: locked by the editor` decision stays in the history only). Two pins at one junction share its tag and badge; the header and the CLI footer list both. A pin the editor did not touch still reads `pinned (locked)`. A
 junction a later pass created (its baseline is not the rough cut) is placed by
 moving one of its clips next to the other in the rough cut before the passes
 run, unless that would split or reorder the beats or another pin holds a clip;
