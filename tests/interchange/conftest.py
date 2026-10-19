@@ -15,7 +15,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from matchcut.interchange.common import export_timeline, layout, source_info
+from matchcut.interchange.common import RECORD_TOLERANCE_S, export_timeline, record_tolerance_frames, source_info  # noqa: F401 (re-exported to the tests)
+from matchcut.interchange.fidelity import differences
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.demo import make_demo_footage
 from matchcut.pipeline.junctions import build_junctions, load_stage_timelines, scorer_for_workspace
@@ -38,24 +39,10 @@ def _tool(env: str, relative: str) -> Path:
 OTIO_VENV_PYTHON = _tool("OTIO_VENV_PYTHON", "venv/bin/python")
 FCPXML_DTD = _tool("FCPXML_DTD", "dtd/FCPXMLv1_10.dtd")
 
-# record times are stored to 4 decimals: a record position or length is within half a frame plus a millisecond of the exact one
-RECORD_TOLERANCE_S = 0.001
-
-
-def record_tolerance_frames(rate: Fraction) -> float:
-    return 0.5 + RECORD_TOLERANCE_S * float(rate)
-
-
 def check_equivalent(a: Timeline, b: Timeline, rate: Fraction, tol: int = 0) -> None:
-    """Same clips (shot, source frames), transitions (kind, frames) and record length, to ``tol`` frames."""
-    la, lb = layout(a, rate), layout(b, rate)
-    assert [c.shot_index for c in a.clips] == [c.shot_index for c in b.clips]
-    for i, (x, y) in enumerate(zip(la, lb)):
-        assert abs(x.in_f - y.in_f) <= tol and abs(x.out_f - y.out_f) <= tol, i
-        assert x.transition[0] == y.transition[0] and abs(x.tr - y.tr) <= tol, i
-        assert abs(x.rec - y.rec) <= tol, i
-        assert abs(x.cut - y.cut) <= tol, i
-    assert abs(la[-1].rec_out - lb[-1].rec_out) <= tol
+    """Same clips (shot, source frames), transitions (kind, frames) and record length, to ``tol`` frames (``fidelity.differences``)."""
+    diffs = differences(a, b, rate, tol)
+    assert not diffs, diffs[:3]
 
 
 def make_cover_art_mp3(path: Path, seconds: float = 10.0) -> Path:

@@ -77,6 +77,15 @@ def rt(frames: int, rate: Fraction) -> str:
     return f"{sec.numerator}s" if sec.denominator == 1 else f"{sec.numerator}/{sec.denominator}s"
 
 
+# record times are stored to 4 decimals: a record position or length is within half a frame plus a millisecond of the exact one
+RECORD_TOLERANCE_S = 0.001
+
+
+def record_tolerance_frames(rate: Fraction) -> float:
+    """How far (in frames) a record time or duration may be from the exact one: half a frame plus a millisecond."""
+    return 0.5 + RECORD_TOLERANCE_S * float(rate)
+
+
 # -- the source ----------------------------------------------------------------------------------
 @dataclass(frozen=True)
 class SourceInfo:
