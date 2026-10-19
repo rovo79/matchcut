@@ -452,25 +452,36 @@ class _Diff:
     erows: List[LaidClip]
     by_range: int  # matches made by source range because no clip key told
     notes: List[str] = field(default_factory=list)  # ambiguous clips read as new (see _match), the new clips' ids filled in
+    reshot: Dict[int, int] = field(default_factory=dict)  # edited clip index -> the shot its range lies in, for a key that went to other footage
 
 
 def _list(names: Sequence[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
 
 
-def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: Sequence[LaidClip]) -> Tuple[Dict[int, int], int, List[Tuple[str, List[int]]]]:
+def _shot_at(bounds: Dict[int, Sequence[float]], start: float, end: float) -> int:
+    """The shot a source range overlaps most (-1 when it lies in none)."""
+    best = max(((max(0.0, min(hi, end) - max(lo, start)), s) for s, (lo, hi) in bounds.items()), default=(0.0, -1))
+    return best[1] if best[0] > 0 else -1
+
+
+def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: Sequence[LaidClip],
+           bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Dict[int, int], int, List[Tuple[str, List[int]]], Dict[int, int]]:
     """canonical clip index -> edited clip index, one to one: by clip key (the lineage id the exports carry) first, then by lineage
     (same shot, overlapping source range, best overlap first) for what the key did not settle.
 
     Also how many matches the range made and the notes (text with a ``{new}`` placeholder for the ids the new clips get, and the edited clips
     they are about).  An ambiguous clip is read as new on purpose, never guessed: a key that several edited clips carry (a copied clip) does
     not say which one is the original, so none is taken for it; an edited clip with no key to decide that overlaps two canonical clips
-    equally (the same number of frames) is not taken for either.
+    equally (the same number of frames) is not taken for either.  A known key is trusted only while the edited range still overlaps the
+    canonical clip's shot (``bounds``): a key carried onto the footage of another shot is a new clip (a slip inside the shot is a trim).
+    The last result maps such a clip to the shot its range lies in.
     """
     out: Dict[int, int] = {}
     used: set = set()
     blocked: set = set()
     notes: List[Tuple[str, List[int]]] = []
+    reshot: Dict[int, int] = {}
     keyed: Dict[str, List[int]] = {}
     for j, e in enumerate(edited.clips):
         if e.origin:
@@ -478,8 +489,18 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
     for i, c in enumerate(canon.clips):
         carriers = keyed.get(clip_key(c), [])
         if len(carriers) == 1 and carriers[0] not in used:
-            out[i] = carriers[0]
-            used.add(carriers[0])
+            j = carriers[0]
+            e = edited.clips[j]
+            lo_hi = bounds.get(c.shot_index) if bounds else None
+            if lo_hi is not None and min(e.source_out, lo_hi[1]) - max(e.source_in, lo_hi[0]) <= 0:
+                where = _shot_at(bounds, e.source_in, e.source_out)
+                reshot[j] = where
+                blocked.add(j)
+                notes.append((f"clip key {clip_key(c)} of {c.id} now covers " + (f"shot {where}" if where >= 0 else "no shot")
+                              + f" ({e.source_in:.2f}-{e.source_out:.2f}s), not shot {c.shot_index}: read as a new clip ({{new}}), not matched to {c.id}", [j]))
+                continue
+            out[i] = j
+            used.add(j)
         elif len(carriers) > 1:
             blocked.update(carriers)
             notes.append((f"clip key {clip_key(c)} of {c.id} is used by clips {_list([str(j + 1) for j in carriers])} of the file: "
@@ -508,7 +529,7 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
             out[i] = j
             used.add(j)
             by_range += 1
-    return out, by_range, notes
+    return out, by_range, notes, reshot
 
 
 def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List[str]:
@@ -527,9 +548,9 @@ def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List
     return [str(x) for x in ids]
 
 
-def _compare(canonical: Timeline, edited: Timeline, rate: Fraction) -> _Diff:
+def _compare(canonical: Timeline, edited: Timeline, rate: Fraction, bounds: Optional[Dict[int, Sequence[float]]] = None) -> _Diff:
     crows, erows = layout(canonical, rate), layout(edited, rate)
-    match, by_range, found = _match(canonical, edited, crows, erows)
+    match, by_range, found, reshot = _match(canonical, edited, crows, erows, bounds)
     ids = _fresh_ids(canonical, edited, match)
     notes = [text.replace("{new}", ", ".join(ids[j] for j in js)) for text, js in found]
     inv = {j: i for i, j in match.items()}
@@ -544,8 +565,9 @@ def _compare(canonical: Timeline, edited: Timeline, rate: Fraction) -> _Diff:
                    shot_index=c.shot_index, source_in=c.source_in, source_out=c.source_out)
     for j, e in enumerate(edited.clips):
         if j not in inv:
-            decide("added", [ids[j]], f"human added {ids[j]} (shot {e.shot_index}, {e.source_in:.2f}-{e.source_out:.2f}s)",
-                   shot_index=e.shot_index, source_in=e.source_in, source_out=e.source_out)
+            shot = reshot.get(j, e.shot_index)
+            decide("added", [ids[j]], f"human added {ids[j]} (shot {shot}, {e.source_in:.2f}-{e.source_out:.2f}s)",
+                   shot_index=shot, source_in=e.source_in, source_out=e.source_out)
     order = [inv[j] for j in range(len(edited.clips)) if j in inv]
     if order != sorted(order):
         decide("reorder", [canonical.clips[i].id for i in order], "human reordered clips: " + " ".join(canonical.clips[i].id for i in order))
@@ -564,20 +586,22 @@ def _compare(canonical: Timeline, edited: Timeline, rate: Fraction) -> _Diff:
                 label = lambda t: "cut" if not t[1] else f"{t[0]} {t[1]}f"  # noqa: E731
                 decide("transition", [ids[j - 1], cid], f"human changed transition {label(before)} -> {label(after)}",
                        before={"kind": before[0], "frames": before[1]}, after={"kind": after[0], "frames": after[1]})
-    return _Diff(match, ids, out, crows, erows, by_range, notes)
+    return _Diff(match, ids, out, crows, erows, by_range, notes, reshot)
 
 
-def diff_human_edits(canonical: Timeline, edited: Timeline, rate: Fraction) -> List[Decision]:
+def diff_human_edits(canonical: Timeline, edited: Timeline, rate: Fraction, bounds: Optional[Dict[int, Sequence[float]]] = None) -> List[Decision]:
     """The human decisions that turn ``canonical`` into ``edited`` (trim, transition, removed, added, reorder).
 
     Both are on the frame grid of ``rate`` (``canonical`` is normally the frame-snapped copy that was exported).  Clip ids in the
-    decisions are the canonical ids (an added clip: ``h<n>``).  Neither timeline is modified.
+    decisions are the canonical ids (an added clip: ``h<n>``).  Neither timeline is modified.  ``bounds`` (shot -> (start, end), as in
+    ``shots.json``) lets a clip key that went to the footage of another shot be told from a trim.
     """
-    return _compare(canonical, edited, rate).decisions
+    return _compare(canonical, edited, rate, bounds).decisions
 
 
-def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fraction, history_from: Timeline) -> Tuple[Timeline, _Diff]:
-    diff = _compare(snapped, edited, rate)
+def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fraction, history_from: Timeline,
+           bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Timeline, _Diff]:
+    diff = _compare(snapped, edited, rate, bounds)
     inv = {j: i for i, j in diff.match.items()}
     clips: List[Clip] = []
     taken = {clip_key(c) for c in canonical.clips}
@@ -585,6 +609,8 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
         if j not in inv:
             c = Clip.from_dict(e.to_dict())
             c.id = diff.ids[j]
+            if j in diff.reshot:  # the key went to other footage: the shot is where the range is, not the key's
+                c.shot_index = diff.reshot[j]
             if c.origin and c.origin in taken:  # a copy carries the original's key: it is a new instance, not the canonical clip
                 c.origin = f"human:{c.id}"
             clips.append(c)
@@ -610,12 +636,13 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
     return out, diff
 
 
-def human_stage(canonical: Timeline, edited: Timeline, rate: Fraction, snapped: Optional[Timeline] = None) -> Timeline:
+def human_stage(canonical: Timeline, edited: Timeline, rate: Fraction, snapped: Optional[Timeline] = None,
+                bounds: Optional[Dict[int, Sequence[float]]] = None) -> Timeline:
     """The edited cut as a new stage ``human``: the canonical clip ids, canonical history + the human decisions.  Nothing is modified.
 
     ``snapped`` (default ``canonical``) is the frame-snapped copy that was exported, which the edit is compared with.
     """
-    return _build(canonical, snapped if snapped is not None else canonical, edited, rate, canonical)[0]
+    return _build(canonical, snapped if snapped is not None else canonical, edited, rate, canonical, bounds)[0]
 
 
 def _format_of(path: Path, fmt: Optional[str]) -> str:
@@ -722,7 +749,7 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     elif not fingerprint:
         notes.append(f"{path.name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions")
     snapped, _ = export_timeline(canon, bounds, src)
-    human, diff = _build(canon, snapped, edited, src.rate, latest)
+    human, diff = _build(canon, snapped, edited, src.rate, latest, bounds)
     notes.extend(diff.notes)
     if diff.by_range:
         notes.append(f"{diff.by_range} clip{'s' if diff.by_range != 1 else ''} matched by source range because the clip key was missing or unknown")

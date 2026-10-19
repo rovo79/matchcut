@@ -187,7 +187,7 @@ Interchange files carry ids; the decisions live in `provenance.json`.
   A stale entry never fails an export and does not count in `fidelity.json`'s `ok`.
 - If an editor drops every id, import falls back to the clip's name (`... shot<N>`, which gives the shot only), then to its
   source range against the shot bounds (`shots.json`), and says how many clips needed that.
-- **Ambiguous clips are never guessed.** A clip that cannot be matched to exactly one canonical clip is read as a **new clip** (`h001`, ...) with a one-line
+- **Ambiguous clips are never guessed.** A clip that cannot be matched to exactly one canonical clip, or whose key points at other footage, is read as a **new clip** (`h001`, ...) with a one-line
   note naming the candidates, so the stage shows `removed` and `added` decisions instead of a trim that might be wrong:
   - a **clip key used by more than one clip of the file** (a copied clip keeps its key): none of them is taken for the original
     (`clip key 2@4.000-6.000 of c003 is used by clips 3 and 4 of the file: read as new clips (h001, h002), not matched to c003`). Their `origin` in
@@ -195,7 +195,11 @@ Interchange files carry ids; the decisions live in `provenance.json`.
   - a **clip with no key to decide that overlaps two canonical clips equally** (the same number of frames, one shot):
     `clip 2 of the file (shot 4, 9.40-10.20s) overlaps c002 and c003 equally: read as a new clip (h001), not matched to any of them`. A clip that overlaps one
     canonical clip more than the others still goes to it.
-  A clip whose key is unique and known, or whose overlap has a clear winner, keeps its canonical id, key and history.
+  - a **known key on the footage of another shot**: a key is trusted only while the edited range still overlaps the shot of the canonical clip (`shots.json`). If
+    the clip now lies in another shot, matchcut reads it as a new clip (its shot is the one its range is in) and the canonical clip as removed, unless another clip maps to it
+    unambiguously: `clip key 3@6.520-9.000 of c003 now covers shot 7 (12.20-13.00s), not shot 3: read as a new clip (h001), not matched to c003`. An extreme slip that stays
+    inside the same shot is still a trim of that clip. (Without `shots.json` the key is trusted.)
+  A clip whose key is unique and known (and still in its shot), or whose overlap has a clear winner, keeps its canonical id, key and history.
 
 ## The fidelity report
 

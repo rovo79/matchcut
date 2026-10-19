@@ -379,6 +379,74 @@ def test_a_clip_key_used_twice_reads_both_clips_as_new_with_a_note_naming_the_ca
     assert canonical_bytes(wsx.ws) == before
 
 
+def keyed_clip_moved(wsx, to_other_shot: bool):
+    """(edited timeline, index of the moved clip, the shot it was in, its new range): a clip that keeps its clip key (and its shot index
+    metadata) but whose range is now in another shot, or in another part of its own shot."""
+    final, snapped = final_of(wsx)
+    bounds = wsx.world.bounds
+    ed = snapped.copy()
+    used = {c.shot_index for c in ed.clips}
+    fps = float(wsx.world.src.rate)
+    for k, c in enumerate(ed.clips):
+        if to_other_shot:
+            shot = next(t for t in sorted(bounds) if t not in used)
+            lo = bounds[shot][0]
+            rng = (lo + 0.2, lo + 1.0)
+        else:
+            lo, hi = bounds[c.shot_index]
+            rng = next(((a, a + 0.6) for a in (lo + 0.04 * n for n in range(0, 100)) if a + 0.6 <= hi and (a + 0.6 <= c.source_in - 0.2 or a >= c.source_out + 0.2)), None)
+            if rng is None:
+                continue
+            shot = c.shot_index
+        for e in ed.clips:
+            e.origin = clip_origin(e)  # every clip keeps its key
+        was = c.shot_index
+        c.source_in, c.source_out = round(round(rng[0] * fps) / fps, 4), round(round(rng[1] * fps) / fps, 4)
+        c.transition_in = Transition()
+        if k + 1 < len(ed.clips):
+            ed.clips[k + 1].transition_in = Transition()
+        return ed, k, was, shot, (c.source_in, c.source_out)
+    raise AssertionError("no clip with room to slip")
+
+
+@pytest.mark.parametrize("fmt", ["otio", "fcpxml", "edl"])
+def test_a_clip_key_on_footage_of_another_shot_is_not_trusted(wsx, fmt):
+    """A key (and the shot metadata) carried onto other footage: the clip is new and the canonical clip is removed."""
+    ed, k, was, shot, rng = keyed_clip_moved(wsx, to_other_shot=True)
+    moved_id = f"c{k + 1:03d}"
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    before = canonical_bytes(wsx.ws)
+    res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+    assert [(d.action, d.clip_ids) for d in res.decisions] == [("removed", [moved_id]), ("added", ["h001"])], [d.detail for d in res.decisions]
+    note = (f"clip key {clip_origin(wsx.world.by_stage['final'].clips[k])} of {moved_id} now covers shot {shot} ({rng[0]:.2f}-{rng[1]:.2f}s), "
+            f"not shot {was}: read as a new clip (h001), not matched to {moved_id}")
+    assert note in res.notes, res.notes
+    assert all("\n" not in n for n in res.notes) and not any("matched by source range" in n for n in res.notes)
+    human = Timeline.load(res.stage_path)
+    new = next(c for c in human.clips if c.id == "h001")
+    assert new.shot_index == shot and new.origin == "human:h001" and moved_id not in [c.id for c in human.clips]
+    assert next(d for d in res.decisions if d.action == "added").data["shot_index"] == shot
+    assert canonical_bytes(wsx.ws) == before
+    # the pass verdicts about the removed clip's junctions are not the new clip's
+    for j in build_junctions(load_stage_timelines(wsx.ws)):
+        if "h001" in (j.out_clip, j.in_clip):
+            assert [s.stage for s in j.states] == ["human"], (j.out_clip, j.in_clip)
+
+
+@pytest.mark.parametrize("fmt", ["otio", "fcpxml", "edl"])
+def test_a_clip_key_on_other_footage_of_its_own_shot_is_still_a_trim(wsx, fmt):
+    """An extreme slip that stays within the clip's shot is the clip trimmed: the key is trusted."""
+    ed, k, was, shot, rng = keyed_clip_moved(wsx, to_other_shot=False)
+    moved_id = f"c{k + 1:03d}"
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+    assert [d.clip_ids for d in res.decisions if d.action in ("removed", "added")] == [], [d.detail for d in res.decisions]
+    assert any(d.action == "trim" and d.clip_ids == [moved_id] for d in res.decisions)
+    assert not any("now covers" in n for n in res.notes) and not any("matched by source range" in n for n in res.notes)
+    human = Timeline.load(res.stage_path)
+    assert human.clips[k].id == moved_id and human.clips[k].shot_index == shot
+
+
 def two_pieces_of_one_shot(wsx) -> Timeline:
     """final.json rewritten so that c002 and c003 are adjacent pieces of shot 4 (frames 225-245 and 245-265 at 25 fps), cuts only."""
     w = wsx.world
