@@ -270,6 +270,11 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
         raise InterchangeError("FCPXML spine has no clips")
     want = _source_path(_md_of(seq).get("source"), [assets[k.get("ref")] for k in kids if k.tag == "asset-clip" and k.get("ref") in assets],
                         [k for k in kids if k.tag == "asset-clip"])
+    if src is not None:  # the workspace's own footage decides, not whatever the file's assets say
+        used_paths = [_path_of(assets[k.get("ref")]) for k in kids if k.tag == "asset-clip" and k.get("ref") in assets]
+        if not any(_same_media(p, src.path) for p in used_paths):
+            raise InterchangeError(f"no clip of the FCPXML spine references the source footage {src.path}")
+        want = src.path
     items: List[Tuple[str, Dict[str, Any]]] = []
     mapped = 0
     skipped_media = 0

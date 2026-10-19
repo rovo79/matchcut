@@ -9,6 +9,8 @@ workspace's cached analysis, so the numbers shown are the numbers the pass compa
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Set, Tuple
@@ -20,18 +22,58 @@ from .timeline import Clip, Decision, Timeline
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
 WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades", "notes")
+STALE_HINT = "(re-import the editor's file to see it)"
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
+
+
+def _canonical_paths(ws: Path) -> List[Tuple[str, Path]]:
+    entries = [("roughcut", ws / "roughcut.json")]
+    entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
+    entries.append(("final", ws / "final.json"))
+    return entries
+
+
+def _sha256(path: Optional[Path]) -> Optional[str]:
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest() if path is not None else None
+    except OSError:
+        return None
+
+
+def stale_human(ws: Path) -> Optional[str]:
+    """The one-line reason ``human.json`` (the stage an editor's re-export was imported as) no longer fits the workspace, or None.
+
+    ``matchcut.interchange`` records, in ``human_import.json``, the sha256 of the canonical stage it compared with and of the latest
+    canonical stage whose history it continues; the human stage is stale when either file has changed since (or is gone).  A
+    ``human.json`` without a readable record is stale too.  No human.json: None.  The engine only reads these files.
+    """
+    ws = Path(ws)
+    if not (ws / "human.json").exists():
+        return None
+    try:
+        record = json.loads((ws / "human_import.json").read_text())
+        checks = [(str(record["stage"]), record["stage_sha256"])]
+        if "latest_stage" in record:
+            checks.append((str(record["latest_stage"]), record["latest_stage_sha256"]))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return f"human.json is stale: human_import.json is missing or unreadable {STALE_HINT}"
+    paths = dict(_canonical_paths(ws))
+    for stage, want in checks:
+        path = paths.get(stage)
+        if path is None or _sha256(path) != want:
+            return f"human.json is stale: {path.name if path is not None else stage + '.json'} changed since the import {STALE_HINT}"
+    return None
 
 
 def stage_timeline_paths(ws: Path) -> List[Tuple[str, Path]]:
     """(stage, path) for every place a stage timeline can live, in stage order, present or not.
 
     ``human`` is last: the cut an editor's re-export came back as (``matchcut.interchange`` writes ``human.json``; the engine never does).
+    A stale ``human.json`` (``stale_human``) is left out, so it is never the latest stage; it is not deleted.
     """
-    entries = [("roughcut", ws / "roughcut.json")]
-    entries += [(p.stem.split("_", 1)[-1], p) for p in sorted((ws / "passes").glob("*.json"))]
-    entries.append(("final", ws / "final.json"))
-    entries.append(("human", ws / "human.json"))
+    entries = _canonical_paths(ws)
+    if stale_human(ws) is None:
+        entries.append(("human", ws / "human.json"))
     return entries
 
 
@@ -260,8 +302,10 @@ def _adjacency_detail(considered: Sequence[Tuple[str, Timeline]], k: int, a_ref:
     if pa is not None and pb is not None and pa < pb:
         named |= {c.id for c in prev.clips[pa + 1 : pb]}
     new = timeline.history[len(prev.history):]
-    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved") and named & set(d.clip_ids)), None)
-    return d.detail if d is not None else ""
+    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved", "removed", "added") and named & set(d.clip_ids)), None)
+    if d is None:
+        return ""
+    return d.detail[len("human "):] if d.pass_name == "human" and d.detail.startswith("human ") else d.detail  # "made adjacent by human: removed c002 ..."
 
 
 def _state(stage: str, timeline: Timeline, i: int, scorer: Optional[MatchScorer]) -> JunctionState:

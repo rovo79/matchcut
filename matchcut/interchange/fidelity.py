@@ -79,14 +79,23 @@ class FidelityResult:
     approximated: List[str] = field(default_factory=list)
     lost: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    canonical_sha256: str = ""  # sha256 of the stage file the export was made from (lets a later, narrower export keep this entry only while it holds)
 
     @property
     def ok(self) -> bool:
         return not self.errors
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"fmt": self.fmt, "stage": self.stage, "ok": self.ok, "preserved": list(self.preserved),
-                "approximated": list(self.approximated), "lost": list(self.lost), "errors": list(self.errors)}
+        d = {"fmt": self.fmt, "stage": self.stage, "ok": self.ok, "preserved": list(self.preserved),
+             "approximated": list(self.approximated), "lost": list(self.lost), "errors": list(self.errors)}
+        if self.canonical_sha256:
+            d["canonical_sha256"] = self.canonical_sha256
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "FidelityResult":
+        return cls(str(d["fmt"]), str(d["stage"]), list(d.get("preserved", [])), list(d.get("approximated", [])), list(d.get("lost", [])),
+                   list(d.get("errors", [])), str(d.get("canonical_sha256", "")))
 
 
 # -- comparison ------------------------------------------------------------------------------------

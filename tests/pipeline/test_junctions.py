@@ -1,6 +1,8 @@
 """Junctions followed across stages, rescored with the match-cut scorer, and the CLI listing."""
 from __future__ import annotations
 
+import hashlib
+import json
 import shutil
 from pathlib import Path
 
@@ -98,9 +100,67 @@ def test_stage_layout_and_loading_skip_missing_and_corrupt_files(tmp_path):
     assert dict(stage_timeline_paths(tmp_path))["human"] == tmp_path / "human.json"
     assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut"]
     tl("final", [clip("c001", 0, 0, 2)]).save(tmp_path / "final.json")
-    tl("human", [clip("c001", 0, 0, 2)]).save(tmp_path / "human.json")  # an editor's import: the last stage, after final
-    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut", "final", "human"]
+    tl("human", [clip("c001", 0, 0, 2)]).save(tmp_path / "human.json")
+    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "matchcut", "final"]  # a human.json with no import record is stale: left out
     assert scorer_for_workspace(tmp_path, PipelineConfig()) is None
+
+
+def human_workspace(tmp_path):
+    """roughcut, a pass, final and an imported human stage with a matching import record (what matchcut.interchange writes)."""
+    (tmp_path / "passes").mkdir(exist_ok=True)
+    tl("roughcut", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "roughcut.json")
+    tl("pacing", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "passes" / "01_pacing.json")
+    tl("final", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6)]).save(tmp_path / "final.json")
+    tl("human", [clip("c001", 0, 0, 2), clip("c002", 1, 4.2, 6)]).save(tmp_path / "human.json")
+    sha = lambda f: hashlib.sha256((tmp_path / f).read_bytes()).hexdigest()  # noqa: E731
+    record = {"stage": "roughcut", "stage_sha256": sha("roughcut.json"), "latest_stage": "final", "latest_stage_sha256": sha("final.json")}
+    (tmp_path / "human_import.json").write_text(json.dumps(record))
+    return record
+
+
+def test_a_human_stage_is_listed_last_until_either_stage_file_it_was_built_from_changes(tmp_path):
+    from matchcut.pipeline.junctions import stale_human
+
+    assert stale_human(tmp_path) is None  # no human.json
+    human_workspace(tmp_path)
+    assert stale_human(tmp_path) is None
+    assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final", "human"]
+    kept = (tmp_path / "human.json").read_bytes()
+    # the latest stage (the one whose history it copies) changes, the compared one does not
+    tl("final", [clip("c001", 0, 0, 2.5), clip("c002", 1, 4, 6)]).save(tmp_path / "final.json")
+    assert stale_human(tmp_path) == "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    assert [s for s, _ in stage_timeline_paths(tmp_path)][-1] == "final" and [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
+    assert (tmp_path / "human.json").read_bytes() == kept  # left out, never deleted
+    # the compared stage changes
+    human_workspace(tmp_path)
+    tl("roughcut", [clip("c001", 0, 0, 2.5), clip("c002", 1, 4, 6)]).save(tmp_path / "roughcut.json")
+    assert stale_human(tmp_path).startswith("human.json is stale: roughcut.json changed since the import")
+    # a stage file that is gone
+    human_workspace(tmp_path)
+    (tmp_path / "final.json").unlink()
+    assert "final.json changed since the import" in stale_human(tmp_path)
+
+
+def test_a_human_json_without_a_readable_import_record_is_stale(tmp_path):
+    from matchcut.pipeline.junctions import stale_human
+
+    human_workspace(tmp_path)
+    for text in (None, "{not json", "[]", json.dumps({"stage": "final"})):
+        if text is None:
+            (tmp_path / "human_import.json").unlink()
+        else:
+            (tmp_path / "human_import.json").write_text(text)
+        assert stale_human(tmp_path) == "human.json is stale: human_import.json is missing or unreadable (re-import the editor's file to see it)", text
+        assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
+
+
+def test_a_junction_made_adjacent_by_a_removal_names_it():
+    from matchcut.pipeline.timeline import Decision as D
+
+    three = tl("final", [clip("c001", 0, 0, 2), clip("c002", 1, 4, 6), clip("c003", 2, 8, 10)])
+    human = tl("human", [clip("c001", 0, 0, 2), clip("c003", 2, 8, 10)], history=[D("human", "removed", ["c002"], "human removed c002 (shot 1, 4.00-6.00s)")])
+    j = build_junctions([("final", three), ("human", human)])[0]
+    assert j.why() == "made adjacent by human: removed c002 (shot 1, 4.00-6.00s)"
 
 
 # -- real footage: the scores shown are the scores the pass compared ---------------------------

@@ -6,9 +6,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from matchcut.interchange import workspace
+from matchcut.interchange.common import export_timeline
+from matchcut.interchange.otio import export_otio
 from matchcut.pipeline import cli
 
 from .test_workspace import patched_otio, write_edited_files, final_of
@@ -75,10 +75,12 @@ def test_export_errors_go_to_stderr_with_exit_1(wsx, capsys, monkeypatch):
     assert code == 1 and err.startswith(f"cannot read {wsx.ws / 'config.json'}") and err.count("\n") == 1
 
 
-def test_unknown_format_is_rejected_by_the_parser(wsx):
-    with pytest.raises(SystemExit) as exc:
-        cli.parse_args(["export", str(wsx.ws), "--format", "aaf"])
-    assert exc.value.code == 2
+def test_an_unknown_format_is_a_one_line_error_with_exit_1(wsx, capsys):
+    code, out, err = run(["export", wsx.ws, "--format", "aaf"], capsys)
+    assert (code, out, err) == (1, "", "unknown format aaf: use otio, fcpxml or edl\n")
+    code, out, err = run(["import", wsx.ws, wsx.tmp / "x.otio", "--format", "aaf"], capsys)
+    assert (code, out, err) == (1, "", "unknown format aaf: use otio, fcpxml or edl\n")
+    assert not (wsx.ws / "exports").exists()
 
 
 # -- import ------------------------------------------------------------------------------------------
@@ -116,7 +118,7 @@ def test_import_stage_option_and_stale_warning(wsx, capsys):
     stale["name"] = "changed after the import"
     (wsx.ws / "roughcut.json").write_text(json.dumps(stale))
     code, out, err = run(["export", wsx.ws, "--stage", "roughcut", "--format", "edl"], capsys)
-    assert code == 0 and "note: human.json is stale: roughcut.json changed since the import" in out.splitlines()
+    assert code == 0 and "note: human.json is stale: roughcut.json changed since the import (re-import the editor's file to see it)" in out.splitlines()
 
 
 def test_import_errors_go_to_stderr_with_exit_1(wsx, capsys):
@@ -129,6 +131,35 @@ def test_import_errors_go_to_stderr_with_exit_1(wsx, capsys):
     code, out, err = run(["import", wsx.tmp / "nowhere", bad], capsys)
     assert (code, out) == (1, "") and err.startswith("no workspace at ")
     assert not (wsx.ws / "human.json").exists()
+
+
+def test_junctions_says_when_the_human_stage_is_stale_and_leaves_it_out(wsx, capsys):
+    code, out, _ = run(["import", wsx.ws, patched_otio(wsx)], capsys)
+    code, out, err = run(["junctions", wsx.ws], capsys)
+    assert code == 0 and out.splitlines()[0].startswith("4 junctions in human (") and "note:" not in out
+    final = json.loads((wsx.ws / "final.json").read_text())
+    final["name"] = "re-run"
+    (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
+    msg = "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    code, out, err = run(["junctions", wsx.ws], capsys)
+    assert code == 0 and err == "" and out.splitlines()[0].startswith("4 junctions in final (") and out.splitlines()[-1] == f"note: {msg}"
+    code, out, err = run(["junctions", wsx.ws, "--index", "1"], capsys)
+    assert code == 0 and out.splitlines()[-1] == f"note: {msg}"
+    assert (wsx.ws / "human.json").exists()
+    code, out, _ = run(["export", wsx.ws, "--stage", "roughcut", "--format", "edl"], capsys)
+    assert f"note: {msg}" in out.splitlines()
+    code, out, _ = run(["import", wsx.ws, patched_otio(wsx)], capsys)
+    assert code == 0 and any(l.startswith(f"  - {msg}; this import replaces it") for l in out.splitlines())
+
+
+def test_import_against_an_earlier_stage_prints_the_warning(wsx, capsys):
+    w = wsx.world
+    snapped, _ = export_timeline(w.by_stage["roughcut"], w.bounds, w.src)
+    path = wsx.tmp / "rough.otio"
+    path.write_text(json.dumps(export_otio(snapped, "roughcut", w.src, w.jb["roughcut"])))
+    code, out, err = run(["import", wsx.ws, path], capsys)
+    assert code == 0 and "against roughcut: 0 human decisions" in out
+    assert "  - human stage is based on roughcut, not final: junction histories compare it with final, so changes the later stages made show as differences" in out.splitlines()
 
 
 # -- structure ---------------------------------------------------------------------------------------

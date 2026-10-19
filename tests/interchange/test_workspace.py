@@ -15,16 +15,17 @@ from matchcut.interchange import InterchangeError, workspace
 from matchcut.interchange.common import export_timeline, layout
 from matchcut.interchange.edl import export_edl
 from matchcut.interchange.fcpxml import export_fcpxml, fcpxml_stages
-from matchcut.interchange.otio import export_otio
+from matchcut.interchange.otio import export_otio, import_otio
 from matchcut.interchange.workspace import ExportResult, ImportResult, diff_human_edits, export_workspace, human_stage, import_timeline
 from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
-from matchcut.pipeline.junctions import build_junctions, load_stage_timelines, scorer_for_workspace, stage_timeline_paths
+from matchcut.pipeline.junctions import build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition
 from matchcut.tui.widgets.inspector import render_inspector
 
 from .conftest import exported
+from .test_otio import fake_src
 
 
 # -- fixtures and helpers -------------------------------------------------------------------------
@@ -117,7 +118,7 @@ def test_export_subsets_and_a_different_out_dir(wsx):
 
 
 def test_export_errors_are_one_line(wsx):
-    for kwargs, match in (({"stages": ("nope",)}, f"^no stage nope in {re.escape(str(wsx.ws))}$"), ({"formats": ("aaf",)}, "unknown format 'aaf'"),
+    for kwargs, match in (({"stages": ("nope",)}, f"^no stage nope in {re.escape(str(wsx.ws))}$"), ({"formats": ("aaf",)}, "^unknown format aaf: use otio, fcpxml or edl$"),
                           ({"stages": ()}, "no stage"), ({"formats": ()}, "no format")):
         with pytest.raises(InterchangeError, match=match) as exc:
             export_workspace(wsx.ws, wsx.cfg, **kwargs)
@@ -225,11 +226,9 @@ def test_otio_edited_like_an_editor_gives_exactly_the_expected_human_decisions(w
     for k in (0, 4):
         assert (human.clips[k].source_in, human.clips[k].source_out) == (final.clips[k].source_in, final.clips[k].source_out)
     assert human.clips[2].transition_in.is_cut and final.clips[3].transition_in.duration == 0.75
-    # matchcut's 0.75 s (18.75 frames) was exported as the 18 frames error diffusion gave it behind the first dissolve; with that dissolve
-    # gone it would lay out as 19, so the human stage carries the editor's 18 (0.72 s) and lays out exactly as the edit does
-    assert human.clips[3].transition_in.kind == "dissolve" and human.clips[3].transition_in.duration == 0.72
-    assert [(r.in_f, r.out_f, r.kind, r.tr) for r in layout(human, wsx.world.src.rate)] == \
-        [(r.in_f, r.out_f, r.kind, r.tr) for r in layout(editor_timeline(snapped, wsx.world.src.rate), wsx.world.src.rate)]
+    # matchcut's 0.75 s (18.75 frames) went out as the 18 frames error diffusion gave it behind the first dissolve; the editor did not touch it,
+    # so the human stage keeps matchcut's own value and the junction shows no human line
+    assert human.clips[3].transition_in == final.clips[3].transition_in
     assert human.clips[1].source_in == pytest.approx(final.clips[1].source_in + 0.2, abs=1e-3)
     assert human.fade_in == final.fade_in and human.fade_out == final.fade_out
 
@@ -393,7 +392,7 @@ def test_import_errors_are_one_line(wsx):
     notfile = wsx.tmp / "x.txt"
     notfile.write_text("hello")
     cases = [(wsx.tmp / "missing.otio", None, "cannot read "), (bad, None, "invalid OTIO"), (notfile, None, "cannot tell the format"),
-             (notfile, "aaf", "unknown format 'aaf'"), (notfile, "edl", "invalid EDL"), (notfile, "fcpxml", "invalid FCPXML")]
+             (notfile, "aaf", "^unknown format aaf: use otio, fcpxml or edl$"), (notfile, "edl", "invalid EDL"), (notfile, "fcpxml", "invalid FCPXML")]
     for path, fmt, match in cases:
         with pytest.raises(InterchangeError, match=match) as exc:
             import_timeline(wsx.ws, wsx.cfg, path, fmt)
@@ -437,13 +436,13 @@ def test_stale_human_stage_is_warned_by_export_and_import(wsx):
     final = json.loads((wsx.ws / "final.json").read_text())
     final["clips"][0]["source_out"] = round(final["clips"][0]["source_out"] - 0.04, 4)
     (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
-    msg = "human.json is stale: final.json changed since the import"
+    msg = "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
     assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes
     keep = (wsx.ws / "human.json").read_bytes(), (wsx.ws / "human_import.json").read_bytes()
     assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",)).notes
     assert ((wsx.ws / "human.json").read_bytes(), (wsx.ws / "human_import.json").read_bytes()) == keep  # export never touches them
     again = import_timeline(wsx.ws, wsx.cfg, edited)
-    assert any(n.startswith(msg) for n in again.notes), again.notes  # the replaced stage was stale
+    assert any(n.startswith(msg) and n.endswith("this import replaces it") for n in again.notes), again.notes  # the replaced stage was stale
     assert not any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # the new import is fresh
     # a missing stage file is stale too
     (wsx.ws / "final.json").unlink()
@@ -528,3 +527,211 @@ def test_diff_and_stage_functions_leave_their_inputs_alone():
     stage = human_stage(tl, ed, rate)
     assert tl.to_dict() == snap and ed.to_dict() == before
     assert stage.stage == "human" and stage.history[0].action == "notes" and stage.history[-1].action == "trim"
+
+
+# -- fix round 1 ---------------------------------------------------------------------------------------------
+def test_an_fcpxml_of_another_film_is_refused_like_the_other_formats(wsx):
+    final, snapped = final_of(wsx)
+    root = ET.fromstring(export_fcpxml([("final", snapped, wsx.world.jb["final"])], wsx.world.src))
+    for el in list(root.iter()):  # an editor's file: no matchcut metadata, markers or keywords, and a different movie
+        for m in list(el):
+            if m.tag in ("metadata", "marker", "keyword"):
+                el.remove(m)
+    for a in root.iter("asset"):
+        a.set("uid", "ABCDEF")
+        a.set("name", "otherfilm")
+        for r in a.iter("media-rep"):
+            r.set("src", "file:///Volumes/other/otherfilm.mov")
+    for ac in root.iter("asset-clip"):
+        ac.set("name", "otherfilm")
+    for pr in root.iter("project"):
+        pr.set("name", "Other film")
+    other = wsx.tmp / "otherfilm.fcpxml"
+    other.write_text(ET.tostring(root, encoding="unicode"))
+    with pytest.raises(InterchangeError, match=r"^no clip of the FCPXML spine references the source footage ") as exc:
+        import_timeline(wsx.ws, wsx.cfg, other)
+    assert "\n" not in str(exc.value) and str(wsx.world.src.path) in str(exc.value)
+    assert not (wsx.ws / "human.json").exists()
+    # the reader itself, with the workspace's footage given
+    with pytest.raises(InterchangeError, match="references the source footage"):
+        workspace.import_fcpxml(other.read_text(), None, None, wsx.world.src)
+
+
+def rough_edit_file(wsx, untouched: bool = False) -> Path:
+    w = wsx.world
+    snapped, _ = exported(w, "roughcut")
+    ed = snapped.copy()
+    if not untouched:
+        ed.clips[0].source_in = round(ed.clips[0].source_in + 4 / float(w.src.rate), 4)
+    path = wsx.tmp / "rough_edit.otio"
+    path.write_text(json.dumps(export_otio(ed, "roughcut", w.src, w.jb["roughcut"])))
+    return path
+
+
+def test_the_human_stage_is_stale_when_the_latest_stage_whose_history_it_copies_changed(wsx):
+    res = import_timeline(wsx.ws, wsx.cfg, rough_edit_file(wsx))
+    rec = json.loads((wsx.ws / "human_import.json").read_text())
+    assert (rec["stage"], rec["latest_stage"]) == ("roughcut", "final")
+    assert rec["stage_sha256"] == sha(wsx.ws / "roughcut.json") and rec["latest_stage_sha256"] == sha(wsx.ws / "final.json")
+    assert stale_human(wsx.ws) is None and [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "human"
+    human_bytes = (wsx.ws / "human.json").read_bytes()
+    final = json.loads((wsx.ws / "final.json").read_text())  # only the LATEST stage changes (a re-run that left the rough cut alone)
+    final["history"].append({"pass_name": "x", "action": "notes", "clip_ids": [], "detail": "a later run", "score": None, "data": {}})
+    (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
+    msg = stale_human(wsx.ws)
+    assert msg == "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    assert [s for s, _ in stage_timeline_paths(wsx.ws)][-1] == "final" and [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "final"
+    assert (wsx.ws / "human.json").read_bytes() == human_bytes  # never deleted nor rewritten
+    assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("edl",)).notes
+    # a re-import makes it current again
+    import_timeline(wsx.ws, wsx.cfg, rough_edit_file(wsx))
+    assert stale_human(wsx.ws) is None and [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "human"
+
+
+def test_a_pin_is_judged_by_the_canonical_stage_once_the_human_stage_is_stale(wsx):
+    import_timeline(wsx.ws, wsx.cfg, rough_edit_file(wsx))
+    stages = load_stage_timelines(wsx.ws)
+    j = build_junctions(stages)[1]
+    pin = Pin(j.out_shot, j.in_shot, round(j.current.out_time, 3), round(j.current.in_time, 3))
+    PinStore(wsx.ws).put(pin)
+    Pipeline(copy.deepcopy(wsx.cfg)).refine()  # rewrites the rough cut (pins are applied to it) and every later stage
+    assert stale_human(wsx.ws) is not None
+    after = load_stage_timelines(wsx.ws)
+    assert [s for s, _ in after][-1] == "final"
+    assert pin_outcome(after[-1][1], pin) is not None  # the new pin reads as applied against the latest stage, not "pending"
+    assert not any(d.pass_name == "human" for jj in build_junctions(after) for d in jj.decisions)
+    assert (wsx.ws / "human.json").exists()
+
+
+def test_the_stale_message_survives_a_missing_or_unreadable_import_record(wsx):
+    import_timeline(wsx.ws, wsx.cfg, rough_edit_file(wsx))
+    (wsx.ws / "human_import.json").write_text("{broken")
+    assert "human_import.json is missing or unreadable" in stale_human(wsx.ws) and [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "final"
+    (wsx.ws / "human_import.json").unlink()
+    assert "human_import.json is missing or unreadable" in stale_human(wsx.ws)
+
+
+def cut_with_fractional_dissolves() -> Timeline:
+    """Seven clips on the 25 fps grid; dissolves of 0.3, 0.75, 0.45 and 0.75 s (7.5, 18.75, 11.25, 18.75 frames: error diffusion matters)."""
+    tl = Timeline(source="/x/media.mp4", fps=25.0, stage="final")
+    ds = [0.0, 0.0, 0.3, 0.75, 0.45, 0.75, 0.0]
+    tl.clips = [Clip(f"c{k + 1:03d}", k, 4.0 * k, 4.0 * k + 2.0, transition_in=Transition("dissolve", d) if d else Transition()) for k, d in enumerate(ds)]
+    return tl
+
+
+def deleted_early(tl: Timeline) -> Timeline:
+    """What an editor's re-export reads as when the second clip is deleted from matchcut's OTIO by hand."""
+    doc = export_otio(tl, "final", fake_src(Fraction(25)), [])
+    kids = doc["tracks"]["children"][0]["children"]
+    del kids[next(k for k, c in enumerate(kids) if c["OTIO_SCHEMA"].startswith("Clip") and c["metadata"]["matchcut"]["clip_id"] == "c002")]
+    return import_otio(doc)[0]
+
+
+def test_untouched_dissolves_show_no_human_line_when_a_clip_is_deleted_early():
+    rate = Fraction(25)
+    tl = cut_with_fractional_dissolves()
+    human = human_stage(tl, deleted_early(tl), rate)
+    assert [d.action for d in human.history[len(tl.history):]] == ["removed"]
+    assert [c.transition_in for c in human.clips[1:]] == [c.transition_in for c in tl.clips[2:]]  # 0.3, 0.75, 0.45, 0.75 exactly as matchcut had them
+    js = build_junctions([("final", tl), ("human", human)])
+    untouched = [j for j in js if j.baseline.stage == "final"]
+    assert [(j.out_clip, j.in_clip) for j in untouched] == [("c003", "c004"), ("c004", "c005"), ("c005", "c006"), ("c006", "c007")]
+    for j in untouched:
+        assert len(j.history()) == 1 and not any(d.pass_name == "human" for d in j.decisions), (j.in_clip, j.history())
+    # a dissolve the editor did change takes the editor's frame count
+    doc = export_otio(tl, "final", fake_src(rate), [])
+    trs = [k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Transition")]
+    trs[1]["in_offset"]["value"], trs[1]["out_offset"]["value"] = 4, 4  # the 0.75 s dissolve into c004 becomes 8 frames
+    edited = import_otio(doc)[0]
+    decisions = diff_human_edits(tl, edited, rate)
+    assert [(d.action, d.clip_ids, d.data["after"]) for d in decisions] == [("transition", ["c003", "c004"], {"kind": "dissolve", "frames": 8})]
+    assert human_stage(tl, edited, rate).clips[3].transition_in.duration == 0.32
+
+
+def test_a_junction_made_adjacent_by_a_human_deletion_says_what_was_removed():
+    rate = Fraction(25)
+    tl = cut_with_fractional_dissolves()
+    human = human_stage(tl, deleted_early(tl), rate)
+    j = next(j for j in build_junctions([("final", tl), ("human", human)]) if (j.out_clip, j.in_clip) == ("c001", "c003"))
+    assert j.why().startswith("made adjacent by human: removed c002 (shot 1")
+    assert j.adjacent_detail.startswith("removed c002")
+
+
+def test_importing_against_an_earlier_stage_warns_in_one_line(wsx):
+    warning = "human stage is based on roughcut, not final: junction histories compare it with final, so changes the later stages made show as differences"
+    res = import_timeline(wsx.ws, wsx.cfg, rough_edit_file(wsx, untouched=True))
+    assert res.stage == "roughcut" and warning in res.notes
+    assert any(n.startswith("the human history continues the final stage's history") for n in res.notes)
+    assert json.loads((wsx.ws / "human_import.json").read_text())["notes"] == res.notes
+    final_import = import_timeline(wsx.ws, wsx.cfg, patched_otio(wsx))
+    assert not any("human stage is based on" in n for n in final_import.notes) and not any("continues the" in n for n in final_import.notes)
+
+
+def test_a_narrower_export_keeps_the_records_of_the_earlier_ones_while_their_stages_hold(wsx):
+    export_workspace(wsx.ws, wsx.cfg)
+    out = wsx.ws / "exports"
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    prov = json.loads((out / "provenance.json").read_text())
+    assert list(prov["stages"]) == ["roughcut", "final"] and prov["stage_order"] == ["roughcut", "final"]
+    assert all(prov["stages"][s]["canonical_sha256"] == sha(wsx.ws / f"{s}.json") for s in prov["stages"])
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert {s: sorted(by) for s, by in fid["stages"].items()} == {"roughcut": ["edl", "fcpxml", "otio"], "final": ["edl", "fcpxml", "otio"]}
+    assert all(d["canonical_sha256"] == sha(wsx.ws / f"{s}.json") for s, by in fid["stages"].items() for d in by.values()) and fid["ok"] is True
+    assert "Stage: roughcut" in (out / "fidelity.md").read_text() and any("earlier records" in n for n in res.notes)
+    assert [(r.stage, r.fmt) for r in res.results] == [("final", "edl")]
+    # matchcut.fcpxml is rewritten with the one project, so the roughcut project's record goes; the other roughcut files are still there
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("fcpxml",))
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert sorted(fid["stages"]["roughcut"]) == ["edl", "otio"] and sorted(fid["stages"]["final"]) == ["edl", "fcpxml", "otio"]
+    # a stage file that changed since is no longer recorded
+    rough = json.loads((wsx.ws / "roughcut.json").read_text())
+    rough["name"] = "re-run"
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    assert list(json.loads((out / "provenance.json").read_text())["stages"]) == ["final"]
+    assert list(json.loads((out / "fidelity.json").read_text())["stages"]) == ["final"]
+
+
+def tc_shift(tc: str, frames: int, fps: int = 25) -> str:
+    h, m, sec, f = (int(x) for x in tc.split(":"))
+    n = ((h * 60 + m) * 60 + sec) * fps + f + frames
+    return f"{n // (fps * 3600):02d}:{n // (fps * 60) % 60:02d}:{n // fps % 60:02d}:{n % fps:02d}"
+
+
+def test_an_edl_edited_by_hand_in_its_text(wsx):
+    final, snapped = final_of(wsx)
+    assert wsx.world.src.start_tc_frames == 0 and wsx.world.src.rate == 25
+    text = export_edl(snapped, "final", wsx.world.src, "demo - final")
+    lines = text.splitlines()
+    k = next(i for i, l in enumerate(lines) if l.startswith("005 "))
+    tcs = lines[k].split()[-4:]  # source in, source out, record in, record out
+    assert len(tcs) == 4
+    si, so, ri, ro = tcs
+    lines[k] = lines[k].replace(" ".join(tcs), " ".join([tc_shift(si, 5), so, ri, tc_shift(ro, -5)]))  # the editor trimmed 5 frames off the head
+    assert lines[k] != text.splitlines()[k]
+    path = wsx.tmp / "by_hand.edl"
+    path.write_text("\n".join(lines) + "\n")
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert summary(res.decisions) == [("trim", ["c005"], {"in_frames": 5, "out_frames": 0})], (res.decisions, res.notes)
+
+
+def test_an_fcpxml_edited_by_hand_in_its_text(wsx):
+    final, snapped = final_of(wsx)
+    xml = export_fcpxml([("final", snapped, wsx.world.jb["final"])], wsx.world.src)
+    root = ET.fromstring(xml)
+    last = [e for e in root.iter("asset-clip") if "shot7" in e.get("name", "")][0]
+
+    def frames(t):
+        num, _, den = t.rstrip("s").partition("/")
+        return round(Fraction(int(num), int(den or 1)) * 25)
+
+    def secs(n):
+        f = Fraction(n, 25)
+        return f"{f.numerator}/{f.denominator}s"
+
+    last.set("start", secs(frames(last.get("start")) + 5))  # the editor slipped the head by 5 frames ...
+    last.set("duration", secs(frames(last.get("duration")) - 5))  # ... and shortened the clip
+    path = wsx.tmp / "by_hand.fcpxml"
+    path.write_text(ET.tostring(root, encoding="unicode"))
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert summary(res.decisions) == [("trim", ["c005"], {"in_frames": 5, "out_frames": 0})], (res.decisions, res.notes)

@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
-from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace
+from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_human
 from matchcut.pipeline.sampling import FrameCache
 from matchcut.pipeline.timeline import clip_origin
 from matchcut.review import controller, items
@@ -90,7 +90,7 @@ class EditView(Vertical):
     @staticmethod
     def _data_fingerprint(state: RunState) -> tuple:
         ws = state.workspace
-        files = [ws / "probe.json", ws / "analysis.npz", ws / "narrative.json", ws / "editorial.json"] + state.timeline_files()
+        files = [ws / "probe.json", ws / "analysis.npz", ws / "narrative.json", ws / "editorial.json", ws / "human.json", ws / "human_import.json"] + state.timeline_files()
         return tuple(file_fingerprint(f) for f in files)
 
     def refresh_from_state(self, state: RunState) -> None:
@@ -134,7 +134,8 @@ class EditView(Vertical):
         summary = f" ({self.stages.index(stage) + 1}/{len(self.stages)}) · {len(tl.clips) if tl else 0} clips · {tl.duration if tl else 0:.1f}s · {len(self.junctions)} junctions · {len(pins)} pinned"
         if unplaced:
             summary += f" · {len(unplaced)} pin(s) not placed"
-        header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim")))
+        stale = stale_human(state.workspace)  # an imported editor cut that no longer fits is left out of the stages: say why
+        header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
         self._show_junction()
 

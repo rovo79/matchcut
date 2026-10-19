@@ -6,7 +6,8 @@ fidelity report, and validates every file by reading it back with matchcut's own
 ``import_timeline`` reads an OTIO, FCPXML or EDL file, finds the canonical stage it was exported from, and writes the **human stage**:
 ``human.json`` (a stage timeline, always listed after ``final``) whose history is the canonical history plus one ``human`` decision per
 change the editor made (trim, transition, removed, added, reorder), and ``human_import.json`` (what was read, the import report, the
-stage it was compared with and the sha256 of that stage file).  Canonical stage files and ``provenance.json`` are only ever read.
+stage it was compared with and the latest canonical stage whose history it copies, each with the sha256 of its file: the engine's
+``junctions.stale_human`` leaves the human stage out once either changes).  Canonical stage files and ``provenance.json`` are only ever read.
 
 The human stage continues the history of the LATEST canonical stage, which is the stage it is listed after: the junction code reads a
 stage's new decisions as ``history[len(previous stage's history):]``, so editor pins and the attribution of every earlier decision stay
@@ -25,12 +26,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
-from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stage_timeline_paths
+from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 
 from . import InterchangeError, fidelity
-from .common import LaidClip, SourceInfo, clip_key, export_timeline, layout, source_info
+from .common import LaidClip, SourceInfo, clip_key, export_timeline, layout, plain, source_info
 from .edl import export_edl, import_edl
 from .fcpxml import export_fcpxml, fcpxml_stages, import_fcpxml
 from .fidelity import FORMATS, FidelityResult
@@ -114,21 +115,53 @@ def _sha256(path: Optional[Path]) -> Optional[str]:
         return None
 
 
-def stale_note(ws: Path) -> Optional[str]:
-    """``human.json is stale: <stage file> changed since the import`` when the stage file the human stage was diffed against has changed
-    (or gone) since; None when there is no human stage, no import record, or the stage file is as it was."""
-    ws = Path(ws)
-    if not (ws / "human.json").exists():
-        return None
+def _read_json(path: Path) -> Optional[Dict[str, Any]]:
     try:
-        record = json.loads((ws / "human_import.json").read_text())
-        stage, want = str(record["stage"]), record["stage_sha256"]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        doc = json.loads(Path(path).read_text())
+        return doc if isinstance(doc, dict) else None
+    except (OSError, ValueError):
         return None
-    path = dict(stage_timeline_paths(ws)).get(stage)
-    if _sha256(path) == want:
-        return None
-    return f"human.json is stale: {path.name if path is not None else stage + '.json'} changed since the import"
+
+
+def _merge_provenance(path: Path, doc: Dict[str, Any], old: Optional[Dict[str, Any]], order: Sequence[str], hashes: Dict[str, Optional[str]],
+                      stages: Sequence[str]) -> List[str]:
+    """Stamp each exported stage of ``doc`` with the sha256 of its stage file and carry over, from the provenance.json that was there,
+    the stages not exported now whose stage file is unchanged (same source and rate).  Rewrites ``path``; returns the carried stages."""
+    for s in stages:
+        doc["stages"][s]["canonical_sha256"] = hashes[s]
+    kept: List[str] = []
+    if old and old.get("source") == doc.get("source") and old.get("rate") == doc.get("rate") and isinstance(old.get("stages"), dict):
+        for s, entry in old["stages"].items():
+            if s not in doc["stages"] and isinstance(entry, dict) and hashes.get(s) and entry.get("canonical_sha256") == hashes[s]:
+                doc["stages"][s] = entry
+                kept.append(s)
+    doc["stage_order"] = [s for s in order if s in doc["stages"]]
+    doc["stages"] = {s: doc["stages"][s] for s in doc["stage_order"]}
+    path.write_text(json.dumps(plain(doc), indent=1))
+    return kept
+
+
+def _carried_results(old: Optional[Dict[str, Any]], out: Path, hashes: Dict[str, Optional[str]], now: set) -> List[FidelityResult]:
+    """The entries of an earlier fidelity.json that this export does not replace and that still hold: the stage file is unchanged and
+    the exported file is still there (for FCPXML, still has the stage's project)."""
+    carried: List[FidelityResult] = []
+    stages = (old or {}).get("stages")
+    if not isinstance(stages, dict):
+        return carried
+    for stage, by_fmt in stages.items():
+        for fmt, d in (by_fmt.items() if isinstance(by_fmt, dict) else []):
+            try:
+                if (stage, fmt) in now or fmt not in FORMATS or not hashes.get(stage) or d.get("canonical_sha256") != hashes[stage]:
+                    continue
+                if fmt == "fcpxml":
+                    if stage not in fcpxml_stages((out / "matchcut.fcpxml").read_text(encoding="utf-8")):
+                        continue
+                elif not (out / f"{stage}.{fmt}").exists():
+                    continue
+                carried.append(FidelityResult.from_dict(d))
+            except (OSError, InterchangeError, KeyError, TypeError, AttributeError):
+                continue
+    return carried
 
 
 # -- export ------------------------------------------------------------------------------------------
@@ -144,7 +177,7 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
         raise InterchangeError("no format to export")
     for f in formats:
         if f not in FORMATS:
-            raise InterchangeError(f"unknown format {f!r} (choose from {', '.join(FORMATS)})")
+            raise InterchangeError(f"unknown format {f}: use otio, fcpxml or edl")
     formats = [f for f in FORMATS if f in formats]
     stage_files = dict(stage_timeline_paths(ws))
     canonical = _canonical(ws)
@@ -194,7 +227,10 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
             files.append(path)
             texts[(s, "edl")] = path.read_text(encoding="utf-8")
     prov = out / "provenance.json"
-    write_provenance(prov, [(s, by_stage[s]) for s in stages], junctions, src)
+    hashes = {s: _sha256(stage_files[s]) for s in by_stage}
+    old_prov, old_fidelity = _read_json(prov), _read_json(out / "fidelity.json")
+    doc = write_provenance(prov, [(s, by_stage[s]) for s in stages], junctions, src)
+    kept = _merge_provenance(prov, doc, old_prov, [s for s, _ in canonical], hashes, stages)
     files.append(prov)
     # validation: what was written, read back by matchcut's own readers, against the stage
     results: List[FidelityResult] = []
@@ -215,8 +251,16 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
             res = fidelity.check(by_stage[s], back, fmt, src.rate, snapped[s])
             res.stage = s
             results.append(res)
-    files += list(fidelity.write_report(results, out))
-    stale = stale_note(ws)
+    for r in results:
+        r.canonical_sha256 = hashes[r.stage] or ""
+    carried = _carried_results(old_fidelity, out, hashes, {(r.stage, r.fmt) for r in results})
+    order = {s: k for k, (s, _) in enumerate(canonical)}
+    everything = sorted(results + carried, key=lambda r: (order.get(r.stage, len(order)), FORMATS.index(r.fmt)))
+    files += list(fidelity.write_report(everything, out))
+    if kept or carried:
+        notes.append("the earlier records of this directory are kept where their stage file is unchanged: "
+                     + ", ".join([f"provenance {s}" for s in kept] + [f"fidelity {r.stage}/{r.fmt}" for r in carried]))
+    stale = stale_human(ws)
     if stale:
         notes.append(stale)
     for r in results:
@@ -363,29 +407,8 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
         clips.append(c)
     out = Timeline(source=canonical.source, fps=canonical.fps, clips=clips, fade_in=canonical.fade_in, fade_out=canonical.fade_out,
                    name="human edit", stage=HUMAN)
-    _conform(out, edited, diff.erows, rate)
     out.history = [Decision.from_dict(d.to_dict()) for d in history_from.history] + diff.decisions
     return out, diff
-
-
-def _conform(human: Timeline, edited: Timeline, erows: Sequence[LaidClip], rate: Fraction) -> None:
-    """Make ``human`` lay out exactly like the edit on the frame grid.
-
-    Values the editor did not move are kept as matchcut had them (no snapping noise in the junction history), but a kept value may not
-    reproduce the editor's frames: an unsnapped edge that the shot bounds pulled to another frame, or a dissolve length whose error
-    diffusion (``common.layout``) shifts once an earlier dissolve is gone.  Where it does not, the editor's own value is used.
-    """
-    fps = float(rate)
-    rows = layout(human, rate)
-    for j, (c, e, want) in enumerate(zip(human.clips, edited.clips, erows)):
-        got = rows[j]
-        if got.in_f != want.in_f:
-            c.source_in = e.source_in
-        if got.out_f != want.out_f:
-            c.source_out = e.source_out
-        if j and (got.kind, got.tr) != (want.kind, want.tr):
-            c.transition_in = Transition(want.kind, round(want.tr / fps, 4)) if want.tr else Transition()
-            rows = layout(human, rate)  # a changed dissolve shifts the error diffusion of every later one
 
 
 def human_stage(canonical: Timeline, edited: Timeline, rate: Fraction, snapped: Optional[Timeline] = None) -> Timeline:
@@ -399,7 +422,7 @@ def human_stage(canonical: Timeline, edited: Timeline, rate: Fraction, snapped: 
 def _format_of(path: Path, fmt: Optional[str]) -> str:
     if fmt is not None:
         if fmt not in FORMATS:
-            raise InterchangeError(f"unknown format {fmt!r} (choose from {', '.join(FORMATS)})")
+            raise InterchangeError(f"unknown format {fmt}: use otio, fcpxml or edl")
         return fmt
     found = _EXTENSIONS.get(path.suffix.lower())
     if found is None:
@@ -486,15 +509,20 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     if diff.by_range:
         notes.append(f"{diff.by_range} clip{'s' if diff.by_range != 1 else ''} matched by source range because the clip key was missing or unknown")
     if chosen != latest_name:
-        notes.append(f"the human history continues the {latest_name} stage's, so every earlier decision stays attributed")
-    previous = stale_note(ws)
+        notes.append(f"human stage is based on {chosen}, not {latest_name}: junction histories compare it with {latest_name}, "
+                     "so changes the later stages made show as differences")
+        notes.append(f"the human history continues the {latest_name} stage's history, so the decisions of every stage stay attributed")
+    previous = stale_human(ws)
     if previous:
-        notes.append(f"{previous} (this import replaces it)")
-    stage_path = dict(stage_timeline_paths(ws))[chosen]
+        notes.append(f"{previous}; this import replaces it")
+    stage_files = dict(stage_timeline_paths(ws))
+    stage_path, latest_path = stage_files[chosen], stage_files[latest_name]
     record = {
         "schema": IMPORT_SCHEMA, "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "source_file": str(path.resolve()),
-        "format": fmt, "stage": chosen, "stage_file": stage_path.name, "stage_sha256": _sha256(stage_path), "decisions": len(diff.decisions),
-        "notes": notes,
+        "format": fmt, "stage": chosen, "stage_file": stage_path.name, "stage_sha256": _sha256(stage_path),
+        # the stage whose history the human history copies: a change to either file makes the human stage stale (junctions.stale_human)
+        "latest_stage": latest_name, "latest_stage_file": latest_path.name, "latest_stage_sha256": _sha256(latest_path),
+        "decisions": len(diff.decisions), "notes": notes,
     }
     human_path = ws / "human.json"
     _atomic_write(human_path, json.dumps(human.to_dict(), indent=2))

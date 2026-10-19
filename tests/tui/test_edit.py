@@ -396,6 +396,43 @@ def test_an_imported_human_stage_is_the_last_stage_and_keeps_an_untouched_pin_ap
     run_async(body())
 
 
+def test_a_stale_human_stage_is_left_out_and_the_edit_view_says_why(mock_workspace, tmp_path):
+    """A re-run after an import: the human stage no longer fits, so it is not the latest stage and a new pin is judged by the real one."""
+    from matchcut.interchange.workspace import export_workspace, import_timeline
+    from matchcut.pipeline.junctions import stale_human
+
+    ws = own_copy(mock_workspace, tmp_path)
+    cfg = PipelineConfig.load(ws / "config.json")
+    export_workspace(ws, cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((ws / "exports" / "final.otio").read_text())
+    clips = [k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Clip")]
+    clips[1]["source_range"]["start_time"]["value"] += 3
+    clips[1]["source_range"]["duration"]["value"] -= 3
+    (tmp_path / "edit.otio").write_text(json.dumps(doc))
+    import_timeline(ws, cfg, tmp_path / "edit.otio")
+    assert stale_human(ws) is None
+    j1 = next(j for j in build_junctions(load_stage_timelines(ws)) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    key = (j1.out_shot, j1.in_shot)
+    refine_in(ws, pin=Pin(j1.out_shot, j1.in_shot, round(j1.baseline.out_time, 3), round(j1.baseline.in_time, 3)))
+    message = stale_human(ws)
+    assert message and message.startswith("human.json is stale: ")
+    assert (ws / "human.json").exists()
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-1] == "final" and view.current_stage() == "final" and "human" not in view.stages
+            assert message in str(app.query_one("#edit-header").content)
+            await pilot.press(*(["right"] * select_pair(view, key)))
+            panel = str(app.query_one("#junction-panel").content)
+            assert "pinned (" in panel and "pending" not in panel
+
+    run_async(body())
+
+
 def test_the_apply_hint_follows_where_the_run_is(mock_workspace):
     async def body():
         app = app_for(mock_workspace)
