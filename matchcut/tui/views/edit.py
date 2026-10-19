@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from rich.text import Text
 from textual.app import ComposeResult
@@ -27,6 +27,15 @@ FRAME_IDS = ("out-frame", "in-frame", "blend-frame")
 
 class _Busy(Exception):
     """A request for a junction that is already being prepared."""
+
+
+class _Identity(NamedTuple):
+    """What identifies the selected junction across stages (``EditView._identity`` / ``_restore``)."""
+    pair: Tuple[int, int]  # (out shot, in shot)
+    occurrence: int  # how many junctions of the stage before it have this shot pair
+    index: int
+    origins: Optional[Tuple[str, str]]  # ``clip_origin`` of its two clips: the instances; None when the stage cannot be read
+    origin_occurrence: int  # how many junctions of the stage before it have these two instances
 
 
 class EditView(Vertical):
@@ -57,7 +66,7 @@ class EditView(Vertical):
         self._shown: Optional[tuple] = None  # (fingerprint, stage, junction, expanded) the panel text was rendered for
         self._frames_key: Optional[tuple] = None  # (stage, clips, cut points, media) the three frames were rendered for
         self._blend_image = None
-        self._keep_pair: Optional[Tuple[int, int]] = None  # the shot pair to stay on when the junctions are rebuilt for another stage
+        self._keep: Optional[_Identity] = None  # the junction to stay on when the junctions are rebuilt for another stage
         self._review_fp: Optional[tuple] = None  # the workspace data the review statuses belong to
         self._review_status: Dict[tuple, Tuple[str, str]] = {}  # (stage, out_shot, in_shot) -> (text, style)
         self._preparing: set = set()  # keys being prepared; touched by the UI thread and the review workers
@@ -123,8 +132,8 @@ class EditView(Vertical):
         pairs = [(s, state.timeline(s)) for s in upto]
         pairs = [(s, t) for s, t in pairs if t is not None]
         self.junctions = build_junctions(pairs, scorer_for_workspace(state.workspace, state.config), pins=PinStore(state.workspace).load()) if pairs else []
-        pair, self._keep_pair = self._keep_pair, None
-        kept = next((i for i, j in enumerate(self.junctions) if (j.out_shot, j.in_shot) == pair), None) if pair is not None else None
+        keep, self._keep = self._keep, None
+        kept = self._restore(keep, state.timeline(stage)) if keep is not None else None
         self.selected = kept if kept is not None else min(self.selected, max(0, len(self.junctions) - 1))
         tl = state.timeline(stage)
         track.set_timeline(tl)
@@ -140,6 +149,36 @@ class EditView(Vertical):
         header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
         self._show_junction()
+
+    def _origins(self, tl, index: int) -> Optional[Tuple[str, str]]:
+        """The clip instances (``clip_origin``) on either side of junction ``index`` of ``tl``."""
+        if tl is None or index + 1 >= len(tl.clips):
+            return None
+        return (clip_origin(tl.clips[index]), clip_origin(tl.clips[index + 1]))
+
+    def _identity(self, tl) -> Optional[_Identity]:
+        """The selected junction as the other stages can find it again: its clip instances, its shot pair and which occurrence of each it is."""
+        j = self.current_junction()
+        if j is None:
+            return None
+        pair = (j.out_shot, j.in_shot)
+        origins = self._origins(tl, j.index)
+        before = self.junctions[: j.index]
+        return _Identity(pair, sum((o.out_shot, o.in_shot) == pair for o in before), j.index, origins,
+                         sum(self._origins(tl, o.index) == origins for o in before) if origins is not None else 0)
+
+    def _restore(self, keep: _Identity, tl) -> Optional[int]:
+        """The index in the rebuilt junctions (of stage timeline ``tl``) that is ``keep``, or None to keep the clamped index.
+        In order: the junction between the same clip instances (the k-th when the cut repeats them, else the one nearest the old index); the
+        same shot pair at the same occurrence; the same shot pair nearest the old index."""
+        if keep.origins is not None:
+            same = [j.index for j in self.junctions if self._origins(tl, j.index) == keep.origins]
+            if same:
+                return same[keep.origin_occurrence] if keep.origin_occurrence < len(same) else min(same, key=lambda i: abs(i - keep.index))
+        same = [j.index for j in self.junctions if (j.out_shot, j.in_shot) == keep.pair]
+        if not same:
+            return None
+        return same[keep.occurrence] if keep.occurrence < len(same) else min(same, key=lambda i: abs(i - keep.index))
 
     @staticmethod
     def _beat_strip(state: RunState, tl) -> Text:
@@ -256,8 +295,7 @@ class EditView(Vertical):
         if not self.stages or self._state is None:
             return
         current = self.stages.index(self.current_stage())
-        j = self.current_junction()
-        self._keep_pair = (j.out_shot, j.in_shot) if j is not None else None
+        self._keep = self._identity(self._state.timeline(self.current_stage()))
         target = max(0, min(len(self.stages) - 1, current + delta))
         self.stage_index = -1 if target == len(self.stages) - 1 else target
         self._fingerprint = None  # rebuild the junctions for the newly inspected stage
@@ -386,12 +424,13 @@ class EditView(Vertical):
         if not toggle:
             self._set_review_status(key, "preparing the junction for review...", "dim")
         ws, cfg, index = self._state.workspace, self._state.config, j.index
+        fp = self._data_fingerprint(self._state)  # the cut this request is about: a result for an older cut is not a pair to toggle
         self.run_worker(
-            lambda: self._review_job(ctl, key, ws, cfg, stage, index, ab, toggle),
+            lambda: self._review_job(ctl, key, ws, cfg, stage, index, ab, toggle, fp),
             thread=True, group="review", exit_on_error=False,
         )
 
-    def _review_job(self, ctl, key: tuple, ws: Path, cfg, stage: str, index: int, ab: bool, toggle: bool) -> None:
+    def _review_job(self, ctl, key: tuple, ws: Path, cfg, stage: str, index: int, ab: bool, toggle: bool, fp: Optional[tuple] = None) -> None:
         """Runs in a worker thread: nothing here touches a widget; the outcome goes back through ``_review_done``."""
         text, style, note, ab_pair, played = "", "", "", False, False
         claimed = not toggle
@@ -432,7 +471,7 @@ class EditView(Vertical):
                 except Exception:
                     pass
         if text:
-            self._ui(self._review_done, key, text, style, note, ab_pair, played)
+            self._ui(self._review_done, key, text, style, note, ab_pair, played, fp, ab)
 
     def _ui(self, fn, *args) -> None:
         try:
@@ -440,11 +479,17 @@ class EditView(Vertical):
         except Exception:
             pass  # the app has closed
 
-    def _review_done(self, key: tuple, text: str, style: str, note: str, ab_pair: bool, played: bool = False) -> None:
+    def _review_done(self, key: tuple, text: str, style: str, note: str, ab_pair: bool, played: bool = False,
+                     fp: Optional[tuple] = None, ab: bool = False) -> None:
         if style == "busy":
             self.app.notify(text, severity="warning")
             return
-        if ab_pair:
+        # The workspace data changed while this was prepared (a re-run, a pin): what was handed to the controller was cut from the old
+        # timeline.  The editor asked for that playback, so it stays, but it is not the pair `a` toggles: the next `a` prepares afresh.
+        stale = fp is not None and self._state is not None and self._data_fingerprint(self._state) != fp
+        if stale and played and style != "red":
+            text += " (the cut changed: press a again to compare the new cut)" if ab else " (the cut changed: press p again to play the new cut)"
+        if ab_pair and not stale:
             self._ab_key = key
         if played:
             self._playing_key = key

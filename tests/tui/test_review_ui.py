@@ -272,6 +272,41 @@ def test_a_change_to_the_workspace_forgets_the_prepared_pair(mock_workspace, tmp
     run_async(body())
 
 
+def test_a_preparation_that_finishes_after_the_cut_changed_is_not_a_pair_to_toggle(mock_workspace, tmp_path, fakes):
+    ws = own_copy(mock_workspace, tmp_path)
+    gate = fakes.state["gate"] = threading.Event()
+
+    async def body():
+        app = app_for(ws)
+        try:
+            async with app.run_test(size=(120, 40)) as pilot:
+                view = await edit_ready(pilot, app)
+                await pilot.press("a")
+                await wait_for(pilot, lambda: len(fakes.prepared) == 1)
+                before = view._review_fp
+                await pilot.press("l")  # a pin rewrites editorial.json while the pair is being prepared
+                await wait_for(pilot, lambda: view._review_fp != before)
+                gate.set()
+                ctl = fakes.controller()
+                await wait_for(pilot, lambda: ctl.calls == ["play_pair"])
+                # the playback the editor asked for stays, and the status says the cut moved under it
+                await wait_for(pilot, lambda: "the cut changed: press a again to compare the new cut" in status_of(app))
+                assert status_of(app).startswith("playing A")
+                assert view._ab_key is None
+                await pilot.press("a")
+                await wait_for(pilot, lambda: len(fakes.prepared) == 2)
+                await wait_for(pilot, lambda: ctl.calls == ["play_pair", "play_pair"])
+                assert "toggle" not in ctl.calls
+                assert fakes.prepared[1]["ab"] is True
+                await wait_for(pilot, lambda: view._ab_key is not None)  # prepared afresh against the new cut: it toggles from here
+                await pilot.press("a")
+                await wait_for(pilot, lambda: ctl.calls[-1] == "toggle")
+        finally:
+            gate.set()
+
+    run_async(body())
+
+
 def test_two_junctions_with_the_same_shot_pair_are_reviewed_separately(mock_workspace, tmp_path, fakes):
     from matchcut.pipeline.timeline import Timeline
     ws = own_copy(mock_workspace, tmp_path)
