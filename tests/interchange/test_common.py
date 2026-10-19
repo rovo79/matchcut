@@ -7,11 +7,12 @@ from fractions import Fraction
 import pytest
 
 from matchcut.interchange import InterchangeError, common
-from matchcut.interchange.common import (clip_key, export_timeline, junction_id, junction_ids, layout, record_frames, rt, snap_rate,
+from matchcut.interchange.common import (clip_key, exact_rate, export_timeline, junction_id, junction_ids, layout, record_frames, rt, snap_rate,
                                          source_info, to_frames)
+from matchcut.pipeline.demo import make_demo_footage
 from matchcut.pipeline.timeline import Clip, Timeline, Transition, clip_origin
 
-from .conftest import exported
+from .conftest import make_cover_art_mp3, record_tolerance_frames, exported
 
 NTSC = Fraction(30000, 1001)
 FILM = Fraction(24000, 1001)
@@ -46,6 +47,32 @@ def test_source_info_missing_file_is_a_one_line_error(tmp_path):
         source_info(str(tmp_path / "nothere.mp4"))
 
 
+def test_source_info_ignores_cover_art_and_supports_an_audio_only_mode(tmp_path):
+    mp3 = make_cover_art_mp3(tmp_path / "cover.mp3", 10.0)
+    m = source_info(str(mp3))  # the attached picture is a video stream to ffprobe (90000 fps, 0.04 s); it is not footage
+    assert (m.width, m.height, m.has_audio) == (0, 0, True) and m.rate == Fraction(22050) and abs(m.seconds - 10.0) < 0.2
+    assert source_info(str(mp3), audio_only=True) == m
+    with pytest.raises(InterchangeError, match="no audio stream"):
+        source_info(str(make_demo_footage(tmp_path / "v.mp4", shots=[("color=c=0x204080:s={w}x{h}:r={fps}", 1.0)], audio=False)), audio_only=True)
+
+
+def test_audio_only_mode_ignores_the_video_of_a_file_that_has_audio(footage):
+    a = source_info(str(footage), audio_only=True)
+    assert (a.width, a.height, a.has_audio) == (0, 0, True) and a.rate != Fraction(25) and abs(a.seconds - 18.5) < 0.2
+
+
+def test_probed_rationals_a_hair_off_a_common_rate_are_snapped(world, monkeypatch):
+    for text, expected in (("2997/100", NTSC), ("23976/1000", FILM), ("24/1", Fraction(24)), ("5994/100", Fraction(60000, 1001)),
+                           ("30/1", Fraction(30)), ("12/1", Fraction(12))):
+        class Proc:
+            stdout = json.dumps({"streams": [{"codec_type": "video", "r_frame_rate": text, "width": 10, "height": 10, "duration": "2.0"}],
+                                 "format": {"duration": "2.0"}}).encode()
+
+        monkeypatch.setattr(common, "run", lambda cmd, Proc=Proc: Proc)
+        assert source_info(world.video).rate == expected, text
+    assert exact_rate(Fraction(30000, 1001)) == NTSC and exact_rate(Fraction(2997, 100)) == NTSC
+
+
 def test_source_info_falls_back_to_the_nearest_common_rate_for_a_float_only_probe(world, monkeypatch):
     class Proc:
         stdout = json.dumps({"streams": [{"codec_type": "video", "r_frame_rate": "0/0", "avg_frame_rate": "23.976", "width": 10, "height": 10,
@@ -58,7 +85,8 @@ def test_source_info_falls_back_to_the_nearest_common_rate_for_a_float_only_prob
 
 @pytest.mark.parametrize("value,expected", [
     (23.976, FILM), (23.976023976, FILM), (24.0, Fraction(24)), (25.0, Fraction(25)), (29.97, NTSC), (30.0, Fraction(30)),
-    (50.0, Fraction(50)), (59.94, Fraction(60000, 1001)), (60.0, Fraction(60)), (12.0, Fraction(12)),
+    (50.0, Fraction(50)), (59.94, Fraction(60000, 1001)), (60.0, Fraction(60)), (12.0, Fraction(12)), (47.952, Fraction(48000, 1001)),
+    (48.0, Fraction(48)), (119.88, Fraction(120000, 1001)), (120.0, Fraction(120)),
 ])
 def test_snap_rate_table(value, expected):
     assert snap_rate(value) == expected
@@ -67,6 +95,8 @@ def test_snap_rate_table(value, expected):
 @pytest.mark.parametrize("t,rate,frames", [
     (0.0, Fraction(25), 0), (0.04, Fraction(25), 1), (1.0, Fraction(25), 25), (0.02, Fraction(25), 1),  # 0.5 frame rounds away from zero
     (0.06, Fraction(25), 2), (0.019, Fraction(25), 0), (-0.02, Fraction(25), -1), (-0.01, Fraction(25), 0),
+    (1 / 48, Fraction(24), 1), (3 / 48, Fraction(24), 2), (-1 / 48, Fraction(24), -1), (0.5 * 1001 / 30000, NTSC, 1), (1.5 * 1001 / 30000, NTSC, 2),
+    (2.5 * 1001 / 24000, FILM, 3), (-0.5 * 1001 / 30000, NTSC, -1), (1.02, Fraction(25), 26),
     (1.001, FILM, 24), (2.002, FILM, 48), (10.01, NTSC, 300), (0.0417, FILM, 1), (1.0 / 24 * 1.5, Fraction(24), 2),
 ])
 def test_to_frames_rounds_half_away_from_zero(t, rate, frames):
@@ -100,14 +130,14 @@ def test_export_timeline_note_text_and_untouched_canonical():
     tl.clips = [Clip("c001", 0, 1.0, 3.0), Clip("c003", 1, 5.0, 6.0), Clip("c004", 2, 8.0, 9.52)]
     before = tl.to_dict()
     # shot 1 starts one frame after the clip's in-point: the snap pulls the in-point back inside the shot
-    snapped, notes = export_timeline(tl, {0: (0.0, 5.0), 1: (5.04, 8.0), 2: (7.0, 12.0)})
+    snapped, notes = export_timeline(tl, {0: (0.0, 5.0), 1: (5.04, 8.0), 2: (7.0, 12.0)}, Fraction(25))
     assert tl.to_dict() == before  # the canonical timeline is never touched
     assert notes == ["c003: in moved +1 frame"]
     assert snapped.clips[1].source_in == pytest.approx(5.04)
     assert snapped.clips[1].origin == "1@5.000-6.000"  # identity of the unsnapped clip
     # off-grid times report the fraction of a frame
     tl.clips[0].source_in = 1.01
-    assert export_timeline(tl, None)[1] == ["c001: in moved -0.25 frame"]
+    assert export_timeline(tl, None, Fraction(25))[1] == ["c001: in moved -0.25 frame"]
 
 
 # -- ids -----------------------------------------------------------------------------------------
@@ -143,7 +173,7 @@ def test_layout_odd_dissolve_splits_frames_and_diffuses_rounding_error():
     rows = layout(tl, Fraction(25))
     assert [r.tr for r in rows] == [0, 13, 12, 13]  # 12.5 f each: the running total is rounded, not each transition
     assert rows[1].transition == ("dissolve", 6, 7) and rows[2].transition == ("dissolve", 6, 6)
-    assert abs(record_frames(rows) - tl.duration * 25) <= 0.5 + 1e-9
+    assert abs(record_frames(rows) - tl.duration * 25) <= record_tolerance_frames(Fraction(25))
 
 
 def test_layout_rejects_a_clip_swallowed_by_its_transitions():
@@ -160,13 +190,13 @@ def test_ntsc_rates_use_exact_rationals_in_the_layout():
     rows = layout(tl, NTSC)
     assert rows[1].tr == 14 and rows[1].transition == ("dissolve", 7, 7)
     assert rows[1].rec == to_frames(3.0, NTSC) - to_frames(1.0, NTSC) - 14  # A is 2 s long
-    assert abs(record_frames(rows) - tl.duration * fps) <= 0.5 + 1e-9
+    assert abs(record_frames(rows) - tl.duration * fps) <= record_tolerance_frames(NTSC)
 
 
 def test_layout_of_real_stages_keeps_the_record_length_within_half_a_frame(world):
     for stage in ("roughcut", "final"):
         tl, _ = exported(world, stage)
         rows = layout(tl, world.src.rate)
-        assert abs(record_frames(rows) - tl.duration * 25) <= 0.5 + 1e-6, stage
+        assert abs(record_frames(rows) - tl.duration * 25) <= record_tolerance_frames(world.src.rate), stage
         for i, r in enumerate(rows):
-            assert abs((r.rec / 25) - tl.record_start(i)) <= 1 / 25 + 1e-6, (stage, i)
+            assert abs(r.rec - tl.record_start(i) * 25) <= record_tolerance_frames(world.src.rate), (stage, i)

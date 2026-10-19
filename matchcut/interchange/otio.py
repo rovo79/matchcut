@@ -88,18 +88,29 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
             jid = ids[j.index]
             markers.append({"OTIO_SCHEMA": "Marker.2", "metadata": {"matchcut": junction_meta(j, jid)}, "name": f"J{j.index + 1} s{j.out_shot}->s{j.in_shot}",
                             "color": "RED" if j.pinned else "GREEN", "marked_range": _range(rows[j.index + 1].cut, 1, r), "comment": truncate(j.why())})
+    has_music = music is not None and bool(music.path)
+    muted = has_music and music.only  # the render drops the source audio entirely
     tracks = [_track("Video", "V1", children(), markers)]
     if src.has_audio:
-        tracks.append(_track("Audio", "A1", children()))
-    if music is not None and music.path:
+        a1 = _track("Audio", "A1", children())
+        if muted:
+            a1["enabled"] = False
+            a1["metadata"] = {"matchcut": {"muted": True, "note": "source audio disabled: music.only drops it from the render"}}
+        tracks.append(a1)
+    if has_music:
         if music_src is None:
             raise InterchangeError(f"music file not probed: {music.path}")
         mrate = float(rate)
+        avail = to_frames(music_src.seconds, rate)
         start = to_frames(music.start, rate)
-        mref = {**_ref(music_src, Path(music_src.path).stem),
-                "available_range": _range(0, to_frames(music_src.seconds, rate), mrate)}
-        tracks.append(_track("Audio", "A2", [_clip(Path(music_src.path).name, _range(start, record_frames(rows), mrate), mref,
-                                                   {"kind": "music", "gain_db": music.gain_db, "duck": music.duck, "start": music.start})]))
+        if max(0.0, music.start) >= music_src.seconds:
+            raise InterchangeError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_src.seconds:.1f}s)")
+        start = max(start, 0)
+        dur = min(record_frames(rows), avail - start)  # the renderer clamps the same way: min(total, music_duration - start)
+        mref = {**_ref(music_src, Path(music_src.path).stem), "available_range": _range(0, avail, mrate)}
+        tracks.append(_track("Audio", "A2", [_clip(Path(music_src.path).name, _range(start, dur, mrate), mref,
+                                                   {"kind": "music", "gain_db": music.gain_db, "duck": music.duck, "start": music.start,
+                                                    "fade_out": music.fade_out, "only": music.only})]))
     return {
         "OTIO_SCHEMA": "Timeline.1",
         "metadata": {"matchcut": {"stage": stage, "source": src.path, "rate": [rate.numerator, rate.denominator], "fade_in": tl.fade_in,
@@ -111,8 +122,11 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
 
 
 # -- import --------------------------------------------------------------------------------------
-def _schema(item: Dict[str, Any]) -> str:
-    return str(item.get("OTIO_SCHEMA", "")).split(".")[0]
+_SKIP: Tuple[str, Dict[str, Any]] = ("skip", {})
+
+
+def _schema(item: Any) -> str:
+    return str(item.get("OTIO_SCHEMA", "")).split(".")[0] if isinstance(item, dict) else ""
 
 
 def _path_of(clip: Dict[str, Any]) -> Optional[str]:
@@ -122,14 +136,68 @@ def _path_of(clip: Dict[str, Any]) -> Optional[str]:
     return unquote(urlparse(url).path) if url and url.startswith("file:") else (url or None)
 
 
+def _available(clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    refs = clip.get("media_references") or {}
+    ref = refs.get(clip.get("active_media_reference_key")) or next(iter(refs.values()), None) or {}
+    return ref.get("available_range")
+
+
 def _same_media(a: Optional[str], b: Optional[str]) -> bool:
     return a is None or b is None or a == b or Path(a).name == Path(b).name
 
 
+def _is_time(t: Any) -> bool:
+    return isinstance(t, dict) and isinstance(t.get("rate"), (int, float)) and isinstance(t.get("value"), (int, float)) and t["rate"] > 0
+
+
+def _first_rate(vt: Dict[str, Any]) -> float:
+    """The rate of the first RationalTime in the video track: a clip's source range, its media's available range, a transition."""
+    kids = vt.get("children") or []
+    for k in kids:
+        if _schema(k) == "Clip":
+            for rng in (k.get("source_range"), _available(k)):
+                if isinstance(rng, dict) and _is_time(rng.get("start_time")):
+                    return float(rng["start_time"]["rate"])
+    for k in kids:
+        if _schema(k) == "Transition":
+            for key in ("in_offset", "out_offset"):
+                if _is_time(k.get(key)):
+                    return float(k[key]["rate"])
+    raise InterchangeError("OTIO video track has no usable time base (no clip or transition with a rate)")
+
+
+def _meta_rate(value: Any, notes: List[str]) -> Optional[Fraction]:
+    """metadata.matchcut.rate: [num, den] or a single number; anything else is reported and ignored."""
+    try:
+        if isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in value):
+            if value[0] > 0 and value[1] > 0:
+                return Fraction(int(value[0]), int(value[1])) if value[0] == int(value[0]) and value[1] == int(value[1]) else snap_rate(value[0] / value[1])
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return snap_rate(float(value))
+    except (ValueError, ZeroDivisionError, OverflowError):
+        pass
+    notes.append(f"metadata.matchcut.rate {value!r} is not a valid rate, read from the time values instead")
+    return None
+
+
 def import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Timeline, List[str]]:
-    """OTIO document (a dict) -> (Timeline, notes).  Everything that cannot be mapped is listed in ``notes``."""
-    meta = (doc.get("metadata") or {}).get("matchcut", {})
-    tracks = (doc.get("tracks") or {}).get("children", [])
+    """OTIO document (a dict) -> (Timeline, notes).  Everything that cannot be mapped is listed in ``notes``.
+
+    A malformed document raises ``InterchangeError`` (one line), never a bare KeyError or TypeError.
+    """
+    try:
+        return _import_otio(doc, bounds)
+    except InterchangeError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError, ZeroDivisionError, OverflowError) as exc:
+        raise InterchangeError(f"invalid OTIO document: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
+
+
+def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]]) -> Tuple[Timeline, List[str]]:
+    if not isinstance(doc, dict):
+        raise InterchangeError("invalid OTIO document: not a JSON object")
+    meta = (doc.get("metadata") or {}).get("matchcut") or {}
+    tracks = (doc.get("tracks") or {}).get("children") or []
     notes: List[str] = []
     videos = [t for t in tracks if _schema(t) == "Track" and t.get("kind") == "Video"]
     if not videos:
@@ -138,58 +206,80 @@ def import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]] = None) 
     for extra in videos[1:]:
         notes.append(f"video track {extra.get('name') or '?'} ignored (only the first video track is read)")
     for t in tracks:
-        if t.get("kind") == "Audio" and any(_schema(k) == "Clip" and "matchcut" not in (k.get("metadata") or {}) for k in t.get("children", [])):
+        if _schema(t) == "Track" and t.get("kind") == "Audio" and any(
+                _schema(k) == "Clip" and "matchcut" not in (k.get("metadata") or {}) for k in t.get("children") or []):
             notes.append(f"audio track {t.get('name') or '?'} ignored (matchcut reads the picture only)")
-    first = next((k for k in vt.get("children", []) if _schema(k) == "Clip"), None)
-    if first is None:
+    if not any(_schema(k) == "Clip" for k in vt.get("children") or []):
         raise InterchangeError("OTIO video track has no clips")
-    if meta.get("rate"):
-        rate = Fraction(int(meta["rate"][0]), int(meta["rate"][1]))
-    else:
-        rate = snap_rate(float(first["source_range"]["start_time"]["rate"]))
+    rate = _meta_rate(meta["rate"], notes) if "rate" in meta else None
+    if rate is None:
+        rate = snap_rate(_first_rate(vt))
     rf = float(rate)
 
-    def fr(t: Dict[str, Any]) -> int:
+    def fr(t: Any) -> int:
         """RationalTime -> frames at ``rate`` (a time on another base, e.g. a re-export at 29.97, is converted)."""
+        if not _is_time(t):
+            raise ValueError("RationalTime without a usable rate and value")
         tr_ = float(t["rate"])
         if abs(tr_ - rf) < 1e-6 * max(rf, 1.0):
             return int(round(float(t["value"])))
         return to_frames(float(t["value"]) / float(snap_rate(tr_)), rate)
 
+    first = next(k for k in vt["children"] if _schema(k) == "Clip")
     want = meta.get("source") or _path_of(first)
     items: List[Tuple[str, Dict[str, Any]]] = []
     mapped = 0
     skipped_media = 0
-    for ch in vt.get("children", []):
+    offsets: Dict[int, int] = {}
+    for ch in vt.get("children") or []:
         kind = _schema(ch)
         name = ch.get("name") or kind
         if kind == "Clip":
             if not _same_media(_path_of(ch), want):
                 skipped_media += 1
                 notes.append(f"clip {name}: other media {_path_of(ch)} ignored")
-                items.append(("skip", {}))
+                items.append(_SKIP)
                 continue
-            sr = ch.get("source_range") or (ch.get("media_references", {}).get(ch.get("active_media_reference_key"), {}) or {}).get("available_range")
-            if not sr:
-                notes.append(f"clip {name}: no source range, ignored")
-                items.append(("skip", {}))
+            avail = _available(ch)
+            sr = ch.get("source_range") or avail
+            try:
+                vis_in, dur = fr(sr["start_time"]), fr(sr["duration"])
+                # source_range is in the media's own time: the media's start (source timecode) is its frame 0
+                origin = fr(avail["start_time"]) if isinstance(avail, dict) and _is_time(avail.get("start_time")) else 0
+                if not ch.get("source_range"):
+                    notes.append(f"clip {name}: no source range, the media's whole available range used")
+            except (KeyError, TypeError, ValueError):
+                notes.append(f"clip {name}: no usable source range, ignored")
+                items.append(_SKIP)
                 continue
+            if origin:
+                offsets[origin] = offsets.get(origin, 0) + 1
             for eff in ch.get("effects") or []:
                 notes.append(f"clip {name}: effect {eff.get('name') or _schema(eff)} ignored")
             mapped += 1
-            items.append(("clip", {"vis_in": fr(sr["start_time"]), "dur": fr(sr["duration"]), "name": name, "meta": (ch.get("metadata") or {}).get("matchcut", {})}))
+            items.append(("clip", {"vis_in": vis_in - origin, "dur": dur, "name": name, "meta": (ch.get("metadata") or {}).get("matchcut") or {}}))
         elif kind == "Transition":
-            tm = (ch.get("metadata") or {}).get("matchcut", {})
+            tm = (ch.get("metadata") or {}).get("matchcut") or {}
             tkind = "dip_to_black" if tm.get("kind") == "dip_to_black" else "dissolve"
-            items.append(("tr", {"in": fr(ch["in_offset"]), "out": fr(ch["out_offset"]), "kind": tkind}))
+            try:
+                items.append(("tr", {"in": fr(ch.get("in_offset")), "out": fr(ch.get("out_offset")), "kind": tkind}))
+            except ValueError:
+                notes.append(f"transition {name}: in_offset or out_offset missing or invalid, ignored")
+                items.append(_SKIP)
         elif kind == "Gap":
-            notes.append(f"gap {name} ({fr(ch['source_range']['duration']) if ch.get('source_range') else '?'} frames) ignored: the following clips close up")
-            items.append(("skip", {}))
+            try:
+                length = str(fr(ch["source_range"]["duration"]))
+            except (KeyError, TypeError, ValueError):
+                length = "?"
+            notes.append(f"gap {name} ({length} frames) ignored: the following clips close up")
+            items.append(_SKIP)
         else:
-            notes.append(f"{kind} {name} ignored (nested or unsupported item)")
-            items.append(("skip", {}))
+            notes.append(f"{kind or 'item'} {name} ignored (nested or unsupported item)")
+            items.append(_SKIP)
     if not mapped:
         raise InterchangeError(f"no clip of the OTIO video track references the source footage {want}" if skipped_media else "OTIO video track has no usable clips")
+    for origin, n in sorted(offsets.items()):
+        notes.append(f"source start timecode of {origin} frames subtracted from the source times of {n} clip{'s' if n != 1 else ''}")
     # a transition only means something between two mapped clips
     cleaned: List[Tuple[str, Dict[str, Any]]] = []
     for k, (kind, d) in enumerate(items):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import wave
 from fractions import Fraction
 from pathlib import Path
@@ -22,9 +23,27 @@ from matchcut.pipeline.pipeline import Pipeline
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Timeline
 
-RESEARCH = Path(os.environ.get("INTEGRATION_RESEARCH", "/tmp/claude-0/-home-user-matchcut/b10444db-d5c0-5098-b105-b181b23029e7/scratchpad/integration"))
-OTIO_VENV_PYTHON = Path(os.environ.get("OTIO_VENV_PYTHON", str(RESEARCH / "venv/bin/python")))
-FCPXML_DTD = Path(os.environ.get("FCPXML_DTD", str(RESEARCH / "dtd/FCPXMLv1_10.dtd")))
+
+
+def _tool(env: str, relative: str) -> Path:
+    """An optional external tool: the environment variable wins; the author's scratch location is only a fallback when it exists."""
+    if os.environ.get(env):
+        return Path(os.environ[env])
+    for root in (os.environ.get("INTEGRATION_RESEARCH"), "/tmp/claude-0/-home-user-matchcut/b10444db-d5c0-5098-b105-b181b23029e7/scratchpad/integration"):
+        if root and (Path(root) / relative).exists():
+            return Path(root) / relative
+    return Path("/nonexistent") / relative  # absent: tests that need it skip
+
+
+OTIO_VENV_PYTHON = _tool("OTIO_VENV_PYTHON", "venv/bin/python")
+FCPXML_DTD = _tool("FCPXML_DTD", "dtd/FCPXMLv1_10.dtd")
+
+# record times are stored to 4 decimals: a record position or length is within half a frame plus a millisecond of the exact one
+RECORD_TOLERANCE_S = 0.001
+
+
+def record_tolerance_frames(rate: Fraction) -> float:
+    return 0.5 + RECORD_TOLERANCE_S * float(rate)
 
 
 def check_equivalent(a: Timeline, b: Timeline, rate: Fraction, tol: int = 0) -> None:
@@ -35,7 +54,22 @@ def check_equivalent(a: Timeline, b: Timeline, rate: Fraction, tol: int = 0) -> 
         assert abs(x.in_f - y.in_f) <= tol and abs(x.out_f - y.out_f) <= tol, i
         assert x.transition[0] == y.transition[0] and abs(x.tr - y.tr) <= tol, i
         assert abs(x.rec - y.rec) <= tol, i
+        assert abs(x.cut - y.cut) <= tol, i
     assert abs(la[-1].rec_out - lb[-1].rec_out) <= tol
+
+
+def make_cover_art_mp3(path: Path, seconds: float = 10.0) -> Path:
+    """A silent MP3 with an attached cover picture: ffprobe lists the picture as a video stream (attached_pic)."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not installed")
+    cover = path.with_suffix(".jpg")
+    base = [ffmpeg, "-v", "error", "-nostdin", "-y"]
+    subprocess.run(base + ["-f", "lavfi", "-i", "color=c=red:s=64x64:r=1", "-frames:v", "1", str(cover)], check=True, capture_output=True)
+    subprocess.run(base + ["-f", "lavfi", "-t", str(seconds), "-i", "anullsrc=r=22050:cl=mono", "-i", str(cover), "-map", "0:a", "-map", "1:v",
+                           "-c:a", "libmp3lame", "-c:v", "copy", "-id3v2_version", "3", "-disposition:v", "attached_pic", str(path)],
+                   check=True, capture_output=True)
+    return path
 
 
 def write_wav(path: Path, seconds: float = 30.0, rate: int = 8000) -> Path:
@@ -84,4 +118,4 @@ def world(footage, tmp_path_factory) -> SimpleNamespace:
 
 def exported(world: SimpleNamespace, stage: str):
     """(snapped timeline, snap notes) of a world stage."""
-    return export_timeline(world.by_stage[stage], world.bounds, world.src.rate)
+    return export_timeline(world.by_stage[stage], world.bounds, world.src)

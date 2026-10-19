@@ -15,7 +15,7 @@ from matchcut.interchange.provenance import write_provenance
 from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.timeline import Clip, Timeline, Transition, clip_origin
 
-from .conftest import OTIO_VENV_PYTHON, check_equivalent, exported
+from .conftest import OTIO_VENV_PYTHON, check_equivalent, exported, make_cover_art_mp3, record_tolerance_frames, write_wav
 from .test_common import FILM, NTSC, synthetic
 
 OTIO_INSPECT = r"""
@@ -31,7 +31,13 @@ for path in sys.argv[1:]:
         items.append({"type": type(c).__name__, "start": r.start_time.value, "dur": r.duration.value,
                       "in_off": c.in_offset.value if t else None, "out_off": c.out_offset.value if t else None,
                       "ttype": c.transition_type if t else None})
-    out[path] = {"frames": v.duration().value, "items": items, "markers": len(v.markers), "audio_tracks": len(tl.audio_tracks()),
+    audio = []
+    for a in tl.audio_tracks():
+        audio.append({"name": a.name, "enabled": a.enabled, "items": [{"start": a.range_of_child(c).start_time.value, "dur": a.range_of_child(c).duration.value,
+                                                                         "src_start": c.source_range.start_time.value if hasattr(c, "source_range") and c.source_range else None}
+                                                                        for c in a if not isinstance(c, otio.schema.Transition)]})
+    out[path] = {"frames": v.duration().value, "items": items, "markers": len(v.markers), "audio_tracks": len(tl.audio_tracks()), "audio": audio,
+                 "marker_starts": [m.marked_range.start_time.value for m in v.markers], "marker_durs": [m.marked_range.duration.value for m in v.markers],
                  "again": json.loads(otio.adapters.write_to_string(tl, "otio_json"))}
 print(json.dumps(out))
 """
@@ -153,8 +159,43 @@ def test_music_track_a2_has_the_cut_duration_gain_and_start(world, music_file):
     assert (val(clip, "start_time"), val(clip, "duration")) == (50, total)  # music.start = 2.0 s at 25 fps; the cut's record duration
     assert clip["media_references"]["DEFAULT_MEDIA"]["target_url"] == msrc.url
     assert clip["media_references"]["DEFAULT_MEDIA"]["available_range"]["duration"]["value"] == 750  # 30 s at the timeline's rate
-    assert clip["metadata"]["matchcut"]["gain_db"] == -6.0 and clip["metadata"]["matchcut"]["duck"] is False
+    assert clip["metadata"]["matchcut"] == {"kind": "music", "gain_db": -6.0, "duck": False, "start": 2.0, "fade_out": 2.0, "only": False}
+    assert tracks(doc)[1]["enabled"] is True
     assert import_otio(json.loads(json.dumps(doc)))[1] == []  # our own music track is not an "ignored" item
+
+
+def test_music_clip_is_clamped_to_the_track_like_the_renderer(world, tmp_path):
+    short = write_wav(tmp_path / "short.wav", 5.0)  # 125 frames at 25 fps; the cut is longer
+    tl, doc = doc_of(world, "final", MusicConfig(path=str(short), start=3.0), source_info(str(short)))
+    assert record_frames(layout(tl, world.src.rate)) > 125
+    clip = tracks(doc)[2]["children"][0]
+    assert (val(clip, "start_time"), val(clip, "duration")) == (75, 50)  # min(total, music_duration - start) = 2 s
+    assert val(clip, "start_time") + val(clip, "duration") <= clip["media_references"]["DEFAULT_MEDIA"]["available_range"]["duration"]["value"]
+
+
+def test_music_start_past_the_end_of_the_track_is_an_error(world, tmp_path):
+    short = write_wav(tmp_path / "short.wav", 5.0)
+    for start in (5.0, 7.5):
+        with pytest.raises(InterchangeError, match=r"^music\.start \(%.1fs\) is past the end of the track \(5\.0s\)$" % start):
+            doc_of(world, "final", MusicConfig(path=str(short), start=start), source_info(str(short)))
+
+
+def test_music_from_a_file_with_cover_art_uses_the_audio_length(world, tmp_path):
+    mp3 = make_cover_art_mp3(tmp_path / "cover.mp3", 10.0)
+    tl, doc = doc_of(world, "final", MusicConfig(path=str(mp3), start=0.0), source_info(str(mp3), audio_only=True))
+    avail = tracks(doc)[2]["children"][0]["media_references"]["DEFAULT_MEDIA"]["available_range"]["duration"]["value"]
+    assert abs(avail - 250) <= 5  # 10 s at 25 fps, not the cover picture's single frame
+
+
+def test_music_only_disables_the_source_audio_track(world, music_file):
+    msrc = source_info(str(music_file))
+    _, doc = doc_of(world, "final", MusicConfig(path=str(music_file), only=True), msrc)
+    a1, a2 = tracks(doc)[1], tracks(doc)[2]
+    assert a1["name"] == "A1" and a1["enabled"] is False and a1["metadata"]["matchcut"]["muted"] is True
+    assert "music.only" in a1["metadata"]["matchcut"]["note"] and a2["enabled"] is True
+    assert a2["children"][0]["metadata"]["matchcut"]["only"] is True
+    back, notes = import_otio(json.loads(json.dumps(doc)))
+    assert notes == [] and len(back.clips) == len(world.by_stage["final"].clips)
 
 
 def test_no_music_track_without_a_configured_file(world, music_file):
@@ -254,6 +295,94 @@ def test_import_accepts_a_clip_relinked_to_the_same_file_name():
     assert len(import_otio(doc)[0].clips) == 3
 
 
+def test_import_reads_the_rate_from_the_first_time_value_that_has_one():
+    # a clip with "source_range": null falls back to its media's available range
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    doc["metadata"] = {}
+    kids = tracks(doc)[0]["children"]
+    kids[0]["source_range"] = None
+    back, notes = import_otio(doc)
+    assert back.fps == 24.0 and len(back.clips) == 3
+    assert back.clips[0].source_in == 0.0 and back.clips[0].source_out > 59.9  # the whole 60 s of the media
+    assert any("whole available range" in n for n in notes)
+    # no range anywhere and no transition: no time base at all
+    doc2 = export_otio(synthetic(), "final", fake_src(), [])
+    doc2["metadata"] = {}
+    for k in tracks(doc2)[0]["children"]:
+        if k["OTIO_SCHEMA"].startswith("Clip"):
+            k["source_range"] = None
+            k["media_references"]["DEFAULT_MEDIA"]["available_range"] = None
+    # a transition supplies the rate, but there is no clip left to map
+    with pytest.raises(InterchangeError, match="no usable clips"):
+        import_otio(doc2)
+    tracks(doc2)[0]["children"].pop(1)
+    with pytest.raises(InterchangeError, match="no usable time base"):
+        import_otio(doc2)
+
+
+@pytest.mark.parametrize("value,ok", [([24, 1], True), ([24.0, 1.0], True), (24.0, True), (24, True), ([30000, 1001], True), ("24", False),
+                                      ([24], False), ([0, 1], False), ([24, 0], False), (None, False), ([True, 1], False), ({"a": 1}, False), (-24.0, False)])
+def test_import_validates_the_rate_metadata(value, ok):
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    doc["metadata"]["matchcut"]["rate"] = value
+    back, notes = import_otio(doc)
+    assert back.fps == (pytest.approx(float(Fraction(30000, 1001))) if value == [30000, 1001] else 24.0) or not ok
+    assert [c.shot_index for c in back.clips] == [0, 1, 2]
+    assert any("not a valid rate" in n for n in notes) is (not ok)
+
+
+def test_import_reports_a_transition_without_offsets_and_a_clip_without_a_range():
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    kids = tracks(doc)[0]["children"]
+    del kids[1]["in_offset"]
+    back, notes = import_otio(doc)
+    assert [c.transition_in.kind for c in back.clips] == ["cut", "cut", "cut"] and any("in_offset or out_offset" in n for n in notes)
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    kids = tracks(doc)[0]["children"]
+    kids[3]["source_range"] = None
+    kids[3]["media_references"]["DEFAULT_MEDIA"]["available_range"] = None
+    back, notes = import_otio(doc)
+    assert len(back.clips) == 2 and any("no usable source range" in n for n in notes)
+
+
+@pytest.mark.parametrize("damage", [
+    lambda d: d.update(tracks=None), lambda d: d.update(tracks={"children": [None, 5]}), lambda d: d["tracks"]["children"][0]["children"].__setitem__(0, 7),
+    lambda d: d["tracks"]["children"][0]["children"][0]["source_range"]["start_time"].pop("rate"),
+    lambda d: d["tracks"]["children"][0]["children"][0]["source_range"]["start_time"].pop("value"),
+    lambda d: d["tracks"]["children"][0]["children"][0]["source_range"].update(duration="x"),
+    lambda d: d["tracks"]["children"][0]["children"][0].update(media_references=7),
+    lambda d: d.update(metadata=7), lambda d: d["metadata"].update(matchcut=[1]),
+    lambda d: d["tracks"]["children"][0]["children"][0].update(metadata=5),
+])
+def test_import_never_leaks_a_bare_exception_on_a_malformed_document(damage):
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    try:
+        damage(doc)
+    except (KeyError, TypeError, IndexError):
+        pytest.skip("damage does not apply")
+    try:
+        import_otio(doc)
+    except InterchangeError as exc:
+        assert "\n" not in str(exc) and str(exc)
+    for bad in (None, [], "x", 5):
+        with pytest.raises(InterchangeError):
+            import_otio(bad)
+
+
+def test_import_subtracts_the_media_start_timecode():
+    tl = synthetic()
+    doc = export_otio(tl, "final", fake_src(), [])
+    start = 24 * 3600  # an editor re-export: the media starts at 01:00:00:00 and source ranges are in that time
+    for t in tracks(doc):
+        for k in t["children"]:
+            if k["OTIO_SCHEMA"].startswith("Clip"):
+                k["source_range"]["start_time"]["value"] += start
+                k["media_references"]["DEFAULT_MEDIA"]["available_range"]["start_time"]["value"] = float(start)
+    back, notes = import_otio(doc)
+    assert [(c.source_in, c.source_out) for c in back.clips] == [(c.source_in, c.source_out) for c in tl.clips]
+    assert any(f"source start timecode of {start} frames subtracted" in n and "3 clips" in n for n in notes)
+
+
 # -- provenance ----------------------------------------------------------------------------------
 def test_provenance_sidecar_is_keyed_by_stable_ids(world, tmp_path):
     side = write_provenance(tmp_path / "p.json", world.stages, world.jb, world.src)
@@ -289,24 +418,40 @@ def test_otio_documents_load_in_real_opentimelineio(world, music_file, tmp_path)
     docs, paths = {}, []
     for stage in ("roughcut", "final"):
         _, docs[stage] = doc_of(world, stage, music if stage == "final" else None, msrc if stage == "final" else None)
+    dip_tl = synthetic()
+    dip_tl.clips[1].transition_in = Transition("dip_to_black", 0.5)
+    docs["dip"] = export_otio(dip_tl, "final", fake_src(), [])
+    for stage, doc in docs.items():
         p = tmp_path / f"{stage}.otio"
-        p.write_text(json.dumps(docs[stage], indent=1))
+        p.write_text(json.dumps(doc, indent=1))
         paths.append(str(p))
     res = subprocess.run([str(OTIO_VENV_PYTHON), "-c", OTIO_INSPECT] + paths, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
     out = json.loads(res.stdout)
     rate = 25
+    # a dip to black loads as a Custom_Transition centred like a dissolve, with its matchcut metadata intact
+    dip = out[paths[2]]
+    assert [i["type"] for i in dip["items"]] == ["Clip", "Transition", "Clip", "Clip"]
+    assert (dip["items"][1]["ttype"], dip["items"][1]["in_off"], dip["items"][1]["out_off"]) == ("Custom_Transition", 6, 6)
+    assert dip["again"]["tracks"]["children"][0]["children"][1]["metadata"]["matchcut"]["kind"] == "dip_to_black"
     for stage, path in zip(("roughcut", "final"), paths):
         tl, _ = exported(world, stage)
+        rows = layout(tl, world.src.rate)
         o, doc = out[path], docs[stage]
-        assert abs(o["frames"] - tl.duration * rate) <= 1.0, (stage, o["frames"], tl.duration * rate)
+        assert abs(o["frames"] - tl.duration * rate) <= record_tolerance_frames(Fraction(rate)), (stage, o["frames"], tl.duration * rate)
+        assert o["frames"] == record_frames(rows)
         trs = [i for i in o["items"] if i["type"] == "Transition"]
-        want = [c.transition_in.duration for c in tl.clips[1:] if not c.transition_in.is_cut]
+        want = [r for r in rows if r.tr]
         assert len(trs) == len(want)
-        for t, d in zip(trs, want):
-            assert abs((t["in_off"] + t["out_off"]) - d * rate) <= 1.0 and t["ttype"] == "SMPTE_Dissolve"
+        for t, r in zip(trs, want):
+            assert (t["in_off"], t["out_off"]) == r.transition[1:] and t["ttype"] == "SMPTE_Dissolve"
         assert o["markers"] == len(world.jb[stage]) == len(tl.clips) - 1
+        assert o["marker_starts"] == [rows[j.index + 1].cut for j in world.jb[stage]] and set(o["marker_durs"]) <= {1.0}
         assert o["audio_tracks"] == (2 if stage == "final" else 1)
+        if stage == "final":  # A2: the music clip's range survives the real library
+            a2 = o["audio"][1]
+            assert a2["name"] == "A2" and a2["items"][0]["src_start"] == 25.0 and a2["items"][0]["start"] == 0
+            assert a2["items"][0]["dur"] == min(record_frames(rows), 750 - 25)
         # record times: a clip with an incoming transition starts where the transition starts (= matchcut record_start)
         starts, items = [], o["items"]
         for k, it in enumerate(items):
@@ -315,7 +460,7 @@ def test_otio_documents_load_in_real_opentimelineio(world, music_file, tmp_path)
             elif it["type"] == "Transition":
                 starts.append(it["start"])
         for i, s in enumerate(starts):
-            assert abs(s / rate - tl.record_start(i)) * rate <= 1.0 + 1e-6, (stage, i)
+            assert abs(s - tl.record_start(i) * rate) <= record_tolerance_frames(Fraction(rate)), (stage, i)
         # metadata survives the real library's load + re-serialise exactly
         again = o["again"]
         assert again["metadata"] == doc["metadata"]
@@ -325,7 +470,7 @@ def test_otio_documents_load_in_real_opentimelineio(world, music_file, tmp_path)
         assert [k["metadata"] for k in v_again["children"]] == [k["metadata"] for k in v_doc["children"]]
         if stage == "final":
             a2 = tracks(again)[2]["children"][0]
-            assert a2["metadata"]["matchcut"] == {"kind": "music", "gain_db": -7.0, "duck": True, "start": 1.0}
+            assert a2["metadata"]["matchcut"] == {"kind": "music", "gain_db": -7.0, "duck": True, "start": 1.0, "fade_out": 2.0, "only": False}
             assert a2["source_range"]["start_time"]["value"] == 25.0
         assert again["metadata"]["matchcut"]["rate"] == [25, 1]
         back, _ = import_otio(again, world.bounds)  # what the library re-serialised still imports to the same cut

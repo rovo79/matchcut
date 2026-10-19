@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from matchcut.pipeline.junctions import Junction
 from matchcut.pipeline.media import MediaError, _require, run
@@ -29,29 +29,43 @@ from matchcut.pipeline.timeline import Clip, Timeline, Transition, clip_origin
 
 from . import InterchangeError
 
-# the rates a probe that only reports a float is snapped to
+# the rates a probe that only reports a float (or an approximate rational) is snapped to
 COMMON_RATES: Tuple[Fraction, ...] = (
-    Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30),
-    Fraction(50), Fraction(60000, 1001), Fraction(60),
+    Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30), Fraction(48000, 1001), Fraction(48),
+    Fraction(50), Fraction(60000, 1001), Fraction(60), Fraction(120000, 1001), Fraction(120),
 )
-_SNAP_TOLERANCE = 0.002  # relative: 23.976 and 29.97 are 0.0001 and 0.0001 off their rationals
+_SNAP_TOLERANCE = 0.002  # relative, for a float rate: 23.976 and 29.97 are 0.0001 off their rationals
+_EXACT_TOLERANCE = 0.0005  # relative, for a probed rational such as 2997/100: closer than this to a common rate is that rate
 
 
-# -- rates, frames, rationals --------------------------------------------------------------------
+def _nearest_common(rate: float) -> Tuple[Fraction, float]:
+    best = min(COMMON_RATES, key=lambda r: abs(float(r) - rate))
+    return best, abs(float(best) - rate) / rate
+
+
 def snap_rate(rate: float) -> Fraction:
     """The common rate nearest to a float rate (24000/1001 for 23.976); an unusual rate becomes a small rational."""
     if rate <= 0:
         raise InterchangeError(f"invalid frame rate {rate}")
-    best = min(COMMON_RATES, key=lambda r: abs(float(r) - rate))
-    if abs(float(best) - rate) <= _SNAP_TOLERANCE * rate:
-        return best
-    return Fraction(rate).limit_denominator(10000)
+    best, err = _nearest_common(rate)
+    return best if err <= _SNAP_TOLERANCE else Fraction(rate).limit_denominator(10000)
+
+
+def exact_rate(rate: Fraction) -> Fraction:
+    """A probed rational, with one a hair off a common rate (2997/100, 23976/1000) replaced by that rate."""
+    if rate in COMMON_RATES:
+        return rate
+    best, err = _nearest_common(float(rate))
+    return best if err <= _EXACT_TOLERANCE else rate
 
 
 def to_frames(t: float, rate: Fraction) -> int:
-    """Seconds -> whole frames at ``rate``, ties rounded away from zero (6 decimals of ``t`` are significant)."""
-    x = Fraction(repr(round(float(t), 6))) * Fraction(rate)
-    n = math.floor(abs(x) + Fraction(1, 2))
+    """Seconds -> whole frames at ``rate``, ties rounded away from zero.
+
+    A millionth of a frame of slack makes exact halves robust against the binary float ``t`` (1/48 s at 24 fps is 1 frame).
+    """
+    x = Fraction(float(t)) * Fraction(rate)
+    n = math.floor(abs(x) + Fraction(1, 2) + Fraction(1, 1000000))
     return -n if x < 0 else n
 
 
@@ -92,8 +106,12 @@ def _fraction(text: Any) -> Optional[Fraction]:
     return f if f > 0 else None
 
 
-def source_info(media_path: str) -> SourceInfo:
-    """Probe ``media_path``: absolute path and URL, exact rate, duration in frames, size, audio, content key."""
+def source_info(media_path: str, audio_only: bool = False) -> SourceInfo:
+    """Probe ``media_path``: absolute path and URL, exact rate, duration in frames, size, audio, content key.
+
+    Cover art (a video stream with ``disposition.attached_pic``) is not footage and is ignored.  ``audio_only`` reads
+    the audio stream even when the file also has real video (the music path); the rate is then the sample rate.
+    """
     p = Path(media_path)
     if not p.is_file():
         raise InterchangeError(f"source footage not found: {media_path}")
@@ -104,17 +122,20 @@ def source_info(media_path: str) -> SourceInfo:
     except MediaError as exc:
         raise InterchangeError(f"cannot probe {media_path}: {str(exc).splitlines()[0]}") from exc
     streams = data.get("streams", [])
-    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    video = None if audio_only else next(
+        (s for s in streams if s.get("codec_type") == "video" and not (s.get("disposition") or {}).get("attached_pic")), None)
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     if video is None and audio is None:
-        raise InterchangeError(f"no video or audio stream in {media_path}")
+        raise InterchangeError(f"no {'audio' if audio_only else 'video or audio'} stream in {media_path}")
     st = p.stat()
-    seconds = float((video or audio).get("duration") or data.get("format", {}).get("duration") or 0.0)
+    fmt_seconds = float(data.get("format", {}).get("duration") or 0.0)
+    seconds = float((video or audio).get("duration") or fmt_seconds or 0.0)
     if video is not None:
         rate = _fraction(video.get("r_frame_rate"))
         if rate is None:  # a float only (or 0/0): the nearest common rate
             fps = _fraction(video.get("avg_frame_rate"))
             rate = snap_rate(float(fps)) if fps is not None else Fraction(25)
+        rate = exact_rate(rate)
         nb = str(video.get("nb_frames") or "")
         frames = int(nb) if nb.isdigit() and int(nb) > 0 else to_frames(seconds, rate)
         width, height = int(video.get("width", 0)), int(video.get("height", 0))
@@ -139,16 +160,14 @@ def _moved(v: float) -> str:
     return f"{round(v):+d}" if abs(v - round(v)) < 0.005 else f"{v:+.2f}"
 
 
-def export_timeline(tl: Timeline, bounds: Optional[Dict[int, Sequence[float]]] = None,
-                    rate: Optional[Fraction] = None) -> Tuple[Timeline, List[str]]:
+def export_timeline(tl: Timeline, bounds: Optional[Dict[int, Sequence[float]]], rate: Union[Fraction, SourceInfo]) -> Tuple[Timeline, List[str]]:
     """A frame-snapped copy of ``tl`` (``Timeline.snap_to_frames(bounds)``) and a note per clip the snap moved.
 
-    The copy keeps each clip's identity: ``origin`` is stamped with the unsnapped clip's key.  With ``rate`` the
-    snap uses that exact rate instead of ``tl.fps``.
+    Snapping is on the source's exact ``rate`` (a ``Fraction`` or the ``SourceInfo``), never on the float ``tl.fps``.
+    The copy keeps each clip's identity: ``origin`` is stamped with the unsnapped clip's key.
     """
     base = tl.copy()
-    if rate is not None:
-        base.fps = float(rate)
+    base.fps = float(rate.rate if isinstance(rate, SourceInfo) else rate)
     fps = base.fps
     for c in base.clips:
         c.origin = clip_origin(c)
