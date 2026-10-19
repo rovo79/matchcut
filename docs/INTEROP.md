@@ -41,6 +41,11 @@ failure (`no stage X in WS`, `unknown format aaf: use otio, fcpxml or edl`,
 | `provenance.json` | matchcut's own record of every exported stage by stable id (never only in the interchange files) |
 | `fidelity.json`, `fidelity.md` | what each export keeps, approximates and loses, per stage and format |
 | `open_in_resolve.py` | only with `--resolve-script` |
+| `.stages/<stage>-<12 hex>.json` | a copy of the stage file as exported (named by the first 12 hex digits of its sha256), so that an editor's file made from it can be imported after the pipeline has run again; written atomically, never deleted by matchcut |
+
+Every exported file also records the sha256 of the stage file it was made from (its fingerprint): OTIO `metadata.matchcut.stage_sha256`,
+the FCPXML sequence's `com.matchcut.stage_sha256` md key, and an EDL comment `* MATCHCUT STAGE_SHA256 <hex>`. A narrower export or `--out DIR` keeps its
+snapshots in `DIR/.stages/`.
 
 The `final.edl` that `run` writes in the workspace root is the older delivery EDL
 (`Timeline.to_edl`, written by `pipeline.py` at the end of the run: source times from frame 0, no media timecode, no ids). For an editor
@@ -112,6 +117,10 @@ snap, dissolve lengths rounded). Entries marked UNVERIFIED have not been checked
 - dip to black: written as a dissolve plus a MATCHCUT TRANSITION comment; an editor shows a plain dissolve
 - timecode is NON-DROP: at 23.976 and 29.97 fps the frame counts are exact but the timecode runs slow against the wall clock
 
+For media whose own start timecode is drop-frame, the EDL's NON-DROP entry is replaced by this one (the file says `FCM: DROP FRAME`):
+
+- timecode is DROP FRAME, as the media's own start timecode is: the frame counts are exact and the timecode follows the wall clock; UNVERIFIED that Resolve and Final Cut Pro read the ';' separators of this EDL as drop-frame
+
 **CMX3600 EDL, lost**
 
 - ducking: the render ducks the music under speech, no format carries that automation
@@ -148,7 +157,11 @@ snap, dissolve lengths rounded). Entries marked UNVERIFIED have not been checked
   incoming one starts `d//2` late. Everything a transition shows is inside matchcut's own
   clip ranges, so no extra media is needed. The EDL's `D nnn` event is the same geometry.
 - **Drop-frame.** Media with a drop-frame start timecode gets a drop-frame EDL and
-  FCPXML `tcFormat="DF"`. An EDL for non-drop 29.97 or 23.976 counts non-drop and says so.
+  FCPXML `tcFormat="DF"`; the report's EDL row then carries the DROP FRAME entry below instead of the NON-DROP one. An EDL for non-drop 29.97 or 23.976
+  counts non-drop and says so.
+- **The frame rate the exports use.** The exports take the footage's `r_frame_rate` (the container's base rate), the pipeline's engine reads
+  `avg_frame_rate`. They are the same for ordinary footage; for some streams (a raw H.264 stream: 50 and 25) they are not. When they differ the export prints one
+  note naming both (`frame rate: ffprobe reports 50 fps (r_frame_rate) but the pipeline cut at 25 fps (avg_frame_rate): ...`); the files are written at the first.
 
 ## Ids and provenance
 
@@ -181,7 +194,9 @@ Every export is validated before it counts: matchcut reads each file it wrote ba
 with its own reader and compares the result with the stage (it is the frame-snapped
 copy that was exported): clip count and order, shots, source in/out (exact), transition kind and
 frames, clip keys, record duration (within half a frame plus a millisecond, the precision
-matchcut stores times to). A difference nothing explains fails the export with a one-line
+matchcut stores times to), and **where the clips sit on the record side**, which is what an editor places them by: the EDL's record
+timecodes against the layout (a gap or an overlap the reader notes is an error), the FCPXML spine's clip and transition offsets and the
+sequence's duration and start, the OTIO video track and each audio track that mirrors the picture (clip durations and total length). A difference nothing explains fails the export with a one-line
 error and exit 1, after `fidelity.json` and `fidelity.md` have been written. Otherwise the
 report lists per stage and format what was **preserved**, what is **approximated** (with the
 measured counts and largest deltas: clips moved by the snap, dissolve lengths rounded to whole
@@ -190,12 +205,36 @@ frames, dips to black in the cut) and what is **lost**.
 ## Importing an editor's file
 
 `import WORKSPACE FILE` reads an OTIO, FCPXML or EDL file (the format from the extension,
-or `--format`). The stage it was exported from is read from the file (OTIO timeline metadata
+or `--format`; a Final Cut Pro `.fcpxmld` bundle, which is a directory, is read through the `Info.fcpxml` inside it). The stage it was exported from is read from the file (OTIO timeline metadata
 or name, FCPXML project, EDL title) or given with `--stage`, else `final`. Clips are matched
 back to matchcut's clips by clip key, then by name, then by source range; arbitrary rational time bases and
 renumbered ids are accepted. Anything it cannot map (other media, gaps, extra video tracks,
 audio-only items, speed changes, effects, nested items) is listed in the **import report**
 and ignored; nothing is dropped silently.
+
+- **The source footage** is the workspace's: a clip is the footage when its media path is the footage's exact path (symbolic links resolved); only when no
+  clip has the exact path are clips with the same file name taken for it, and the report says so (camera names such as `C0001.MP4` repeat across cards, so
+  a name never outvotes an exact path). A clip whose media is a generator, an offline or missing reference, or none (OTIO) is not footage: it is listed
+  (`generator/missing media ignored`) and skipped, as are clips of other media. If no clip is the footage the import stops with `no clip of the OTIO video
+  track references the source footage <path>`.
+- **Times are the media's.** Source times and durations are converted at the footage's own frame rate, whatever the file's time base is: an OTIO on a 48000 base,
+  25 fps media in a 24 fps FCPXML sequence (or an OTIO timeline of another rate). When the file's sequence or timeline rate differs from the media's the report says so
+  (`the sequence runs at 24 fps and the media at 25 fps: times were converted at the media's rate`); an untouched file still gives no decisions.
+- **Dip to black.** matchcut's own metadata says it. Without metadata, FCPXML reads a transition (or its effect) called a dip or Fade To Color, and so does OTIO
+  (a `Custom_Transition` whose name does); an **EDL cannot say it: a dip written without matchcut's `TRANSITION` comment reads as a dissolve**, so the same untouched cut
+  gives a `human changed transition dip_to_black Nf -> dissolve Nf` decision from an EDL that lost its comments, and none from the other two formats.
+- **Which version of the stage.** The pipeline may have run again between the export and the editor's file coming back. Every export carries the fingerprint of the stage
+  file it was made from (see above); the import compares it with the stage file now:
+  - equal: the editor's file is diffed against the stage as it is;
+  - different, and the snapshot of that version is there: the file is diffed against **the snapshot**, so the decisions are the editor's changes only (not the pipeline's), with the
+    note `<file> was exported from an earlier <stage>: the editor's changes were diffed against that version; junction histories compare the human stage with the current <stage>`.
+    `human_import.json` records `base_snapshot` and `base_snapshot_sha256`; its `stage_sha256` stays the current stage file's, so the human stage is not stale at once;
+  - different, and the snapshot is missing: the import stops with one line (`<file> was exported from an earlier <stage> (sha <12 hex>) and its snapshot exports/.stages/<stage>-<12 hex>.json is missing: re-export and redo the edit, or restore the snapshot`);
+  - no fingerprint (an application dropped the metadata, or the file is from an older matchcut or another tool): the file is read against the current stage, and the note says
+    `<file> carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions`.
+
+  The snapshot is looked up in `WORKSPACE/exports/.stages/`, then in `.stages/` next to the imported file (an export made with `--out DIR` keeps it in `DIR/.stages/`; save the editor's file there or copy the folder into `WORKSPACE/exports/`). A copy
+  that does not hash to the fingerprint is not used.
 
 The result is the **human stage**: `human.json` (a stage timeline, listed after `final`
 in `junctions`, the TUI's Edit view and the review package) and `human_import.json` (what was read and
@@ -221,11 +260,13 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   histories compare it with final, so changes the later stages made show as differences`), because the human
   history continues the latest stage's history (so pins and the attribution of every earlier
   decision stay valid).
-- **Stale human stage.** `human_import.json` records the stage file it was compared with and the latest stage whose
+- **Stale human stage.** `human_import.json` records the stage file it was compared with (its sha256 as it is now, also when the file was diffed against a snapshot) and the latest stage whose
   history it copies, each with a sha256. If either file changes (the pipeline ran again), `human.json` is
   **stale**: it is left out of the stage list (so it never becomes the latest stage and pins are judged
   against the real one), reported in one line by `junctions`, `export` and `import`, and **never
-  deleted**. Importing the editor's file again replaces it. A missing or unreadable `human_import.json` counts as stale.
+  deleted**. The line says what to do: re-export, or re-import the editor's file; matchcut diffs it against the stage it was exported from (the snapshot), so the
+  re-import records the editor's changes only. A file with no fingerprint, or one whose snapshot is gone, cannot be checked that way (see above).
+  A missing or unreadable `human_import.json` counts as stale.
 - **Untouched dissolves.** A dissolve the editor did not change keeps matchcut's own value (for
   example 0.75 s), not the whole-frame length the file carried, so the junction shows no `human`
   line for it. The same holds when a clip is deleted: the untouched fractional dissolves
@@ -259,12 +300,12 @@ checklist in M2A-ACCEPTANCE.md is done.
    the documented API in `tests/interchange/test_resolve.py`).
    What the script cannot know is written at its top: the timeline's start timecode and the media conform
    (above). Its `START_TC` is the record start matchcut writes (00:00:00:00); marker frame ids are record
-   frames from the timeline start and the playhead timecode is `START_TC` plus the junction's frame. If Resolve starts the
+   frames from the timeline start and the playhead timecode is `START_TC` plus the junction's frame, worked out **when the script runs**. If Resolve starts the
    timeline elsewhere (its default is often 01:00:00:00), set the timeline's start timecode to `START_TC` in Timeline
-   Settings or edit `START_TC` and `NAVIGATE_TC`. The script checks what Resolve returns. `AddMarker` is False when a marker already
+   Settings, or edit `START_TC` at the top of the script to the timeline's start timecode and run it again: the playhead follows it. The script checks what Resolve returns. `AddMarker` is False when a marker already
    sits on that frame (Resolve may bring matchcut's own OTIO markers along): the script then gives that marker the junction id with
    `UpdateMarkerCustomData`, prints how many junctions carry their id and exits non-zero if any does not. If `SetCurrentTimecode` fails it
-   prints the start-timecode hint and exits non-zero. If the import returns nothing and a timeline of that name already exists, it says
+   prints the timecode it tried (`START_TC` plus the junction's frame), says to edit `START_TC` and run again, and exits non-zero. If the import returns nothing and a timeline of that name already exists, it says
    `timeline X already existed: markers added to it; delete it and re-run to import the new export` and uses that timeline. `TIMELINE_FILE` is the absolute path of the OTIO file at export time: edit it if you move the directory.
    `open_in_resolve.py` is derived output: any export that writes the OTIO of the stage the script targets regenerates it (flag or not) and says so; if
    that OTIO was not exported again and the stage file changed, the stale note names the script too.
@@ -286,7 +327,8 @@ warnings, that the dissolves are Cross Dissolves (the effect id is taken from re
 markers, keywords and `md` keys survive, and a dip to black ("Fade To Color" id from secondary sources). FCP
 has no scripting API; the markers (value `s0-s1 (s0 -> s1)`, the why line as the note) and the keywords `mc:<id>` are
 the navigation aids. After editing, export XML again and `import` it: FCP renumbers resource ids and changes time
-bases, which the reader accepts.
+bases, which the reader accepts. Since Final Cut Pro 10.6 the default export is a `.fcpxmld` bundle (a directory): give `import` the bundle itself,
+it reads the `Info.fcpxml` inside.
 
 ## Optional external checks
 

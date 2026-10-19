@@ -39,7 +39,7 @@ def test_export_options(wsx, capsys):
     out_dir = wsx.tmp / "elsewhere"
     code, out, err = run(["export", wsx.ws, "--stage", "final", "--format", "edl", "--format", "otio", "--out", out_dir], capsys)
     assert code == 0 and err == "" and out.splitlines()[0] == f"exported 5 files to {out_dir}"
-    assert sorted(p.name for p in out_dir.iterdir()) == ["fidelity.json", "fidelity.md", "final.edl", "final.otio", "provenance.json"]
+    assert sorted(p.name for p in out_dir.iterdir()) == [".stages", "fidelity.json", "fidelity.md", "final.edl", "final.otio", "provenance.json"]
     assert "fidelity: 2 checks, 0 errors" in out
     code, out, _ = run(["export", wsx.ws, "--stage", "roughcut", "--stage", "polish", "--format", "otio", "--out", out_dir], capsys)
     assert code == 0 and "polish.otio" in out and "roughcut.otio" in out
@@ -61,8 +61,8 @@ def test_export_errors_go_to_stderr_with_exit_1(wsx, capsys, monkeypatch):
     assert (code, out) == (1, "") and err == f"no stage nope in {wsx.ws}\n"
     real = workspace.fidelity.check
 
-    def broken(canonical, back, fmt, rate, exported=None):
-        r = real(canonical, back, fmt, rate, exported)
+    def broken(canonical, back, fmt, rate, exported=None, **kw):
+        r = real(canonical, back, fmt, rate, exported, **kw)
         if fmt == "otio" and r.stage == "final":
             r.errors.append("record duration 99 != 100 frames")
         return r
@@ -118,7 +118,7 @@ def test_import_stage_option_and_stale_warning(wsx, capsys):
     stale["name"] = "changed after the import"
     (wsx.ws / "roughcut.json").write_text(json.dumps(stale))
     code, out, err = run(["export", wsx.ws, "--stage", "roughcut", "--format", "edl"], capsys)
-    assert code == 0 and "note: human.json is stale: roughcut.json changed since the import (re-import the editor's file to see it)" in out.splitlines()
+    assert code == 0 and "note: human.json is stale: roughcut.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)" in out.splitlines()
 
 
 def test_import_errors_go_to_stderr_with_exit_1(wsx, capsys):
@@ -140,7 +140,7 @@ def test_junctions_says_when_the_human_stage_is_stale_and_leaves_it_out(wsx, cap
     final = json.loads((wsx.ws / "final.json").read_text())
     final["name"] = "re-run"
     (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
-    msg = "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    msg = "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
     code, out, err = run(["junctions", wsx.ws], capsys)
     assert code == 0 and err == "" and out.splitlines()[0].startswith("4 junctions in final (") and out.splitlines()[-1] == f"note: {msg}"
     code, out, err = run(["junctions", wsx.ws, "--index", "1"], capsys)

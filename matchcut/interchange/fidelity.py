@@ -32,6 +32,13 @@ _ALL_APPROX = [
     "Resolve and Final Cut Pro conform timecoded camera media from it (human gate)",
 ]
 
+# The EDL entry that depends on the media: an EDL written for drop-frame media (``FCM: DROP FRAME``, ``;`` separators) replaces the NON-DROP
+# entry of ``KNOWN`` by this one.
+EDL_NON_DROP = "timecode is NON-DROP: at 23.976 and 29.97 fps the frame counts are exact but the timecode runs slow against the wall clock"
+EDL_DROP_FRAME = ("timecode is DROP FRAME, as the media's own start timecode is: the frame counts are exact and the timecode follows the wall clock; "
+                  "UNVERIFIED that Resolve and Final Cut Pro read the ';' separators of this EDL as drop-frame")
+
+
 # What each format cannot carry or carries only approximately, whatever the stage.  Entries marked UNVERIFIED have not been
 # checked in an editor.
 KNOWN: Dict[str, Dict[str, List[str]]] = {
@@ -59,7 +66,7 @@ KNOWN: Dict[str, Dict[str, List[str]]] = {
     "edl": {
         "approximated": _ALL_APPROX + [
             "dip to black: written as a dissolve plus a MATCHCUT TRANSITION comment; an editor shows a plain dissolve",
-            "timecode is NON-DROP: at 23.976 and 29.97 fps the frame counts are exact but the timecode runs slow against the wall clock",
+            EDL_NON_DROP,
         ],
         "lost": _ALL_LOST + [
             "music: an EDL has no second track, so the music file is not carried",
@@ -69,6 +76,21 @@ KNOWN: Dict[str, Dict[str, List[str]]] = {
         ],
     },
 }
+
+
+def known(fmt: str, drop_frame: bool = False) -> Dict[str, List[str]]:
+    """The ``KNOWN`` lists of ``fmt`` for these media: ``drop_frame`` (the EDL of drop-frame media) swaps the NON-DROP entry for ``EDL_DROP_FRAME``."""
+    if fmt not in KNOWN:
+        raise InterchangeError(f"unknown interchange format {fmt!r}")
+    out = {kind: list(entries) for kind, entries in KNOWN[fmt].items()}
+    if drop_frame and fmt == "edl":
+        out["approximated"] = [EDL_DROP_FRAME if e == EDL_NON_DROP else e for e in out["approximated"]]
+    return out
+
+
+# what the record placement check compares, per format (for the report)
+PLACEMENT_WHAT = {"otio": "clip durations of the video and audio tracks against the layout", "fcpxml": "spine offsets and the sequence duration against the layout",
+                  "edl": "record timecodes against the layout, no gap or overlap"}
 
 
 @dataclass
@@ -226,7 +248,8 @@ def _fmt_rate(rate: Fraction) -> str:
     return f"{rate.numerator}/{rate.denominator} ({float(rate):.3f})" if rate.denominator != 1 else str(rate.numerator)
 
 
-def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, exported: Optional[Timeline] = None) -> FidelityResult:
+def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, exported: Optional[Timeline] = None,
+          drop_frame: bool = False, placement: Optional[Sequence[str]] = None) -> FidelityResult:
     """Validate one export.
 
     ``canonical`` is the stage as matchcut holds it; ``exported`` is the frame-snapped copy that was written (``canonical`` itself
@@ -239,8 +262,10 @@ def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, e
     res = FidelityResult(fmt, canonical.stage or exp.stage)
     snap_errors = _snap_errors(canonical, exp, rate) if exp is not canonical else []
     found = _compare(exp, reimported, rate, tol=0, rec_tol=record_tolerance_frames(rate), keys=True)
-    res.errors = snap_errors + [m for _, m in found]
+    res.errors = snap_errors + [m for _, m in found] + list(placement or [])
     bad = {cat for cat, _ in found}
+    if placement:
+        bad.add("record")
     if snap_errors:  # what was written is not the stage: nothing below is a statement about the stage
         bad |= {"clips", "shots", "source", "transitions", "keys"}
     if "clips" not in bad:
@@ -254,9 +279,11 @@ def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, e
             res.preserved.append(f"transition kind and length in frames ({trs} transition{'s' if trs != 1 else ''}, {n - 1 - trs} cuts)")
         if "record" not in bad:
             res.preserved.append(f"record duration {record_frames(layout(exp, rate))} frames (within {record_tolerance_frames(rate):.2f} frame)")
+        if placement is not None and not placement:
+            res.preserved.append(f"record placement of every clip and transition ({PLACEMENT_WHAT[fmt]})")
         if "keys" not in bad:
             res.preserved.append("clip keys (the lineage ids of the clips)")
-    res.approximated = list(KNOWN[fmt]["approximated"])
+    res.approximated = known(fmt, drop_frame)["approximated"]
     for note in (_snap_note(canonical, exp, rate) if not snap_errors else None, _dissolve_note(canonical, rate), _dip_note(canonical)):
         if note:
             res.approximated.append(note)

@@ -19,8 +19,16 @@ and in the script's `TIMELINE_FILE`). Nothing else was changed, so the files do 
 footage `demo.mp4` they name does not ship. The content key (`size`, `mtime_ns`) of the footage is as it was on the
 machine that made them. To get usable files, run the command above on a workspace of your own.
 `tests/interchange/test_docs.py` regenerates these files on the test fixture and fails if they differ from the code's output once the paths, the footage's
-modification time, the path-derived uids, the stage-file hashes and the matchcut version are normalised away; if it fails, run the command on a workspace
+modification time and size, the path-derived uids, the stage-file hashes and the matchcut version are normalised away; if it fails, run the command on a workspace
 built like the fixture's, replace the scratch directory of the footage and of the exports directory by `/ABSOLUTE/PATH/TO` and commit the files again.
+
+**The footage is the one thing the test cannot control.** `make_demo_footage` encodes the clip with the local ffmpeg, and shot detection and the scores
+run on the encoded video, so another ffmpeg build can find other shot boundaries. The line below records what the committed files were made from. The
+test compares it with the fixture footage of the machine it runs on and, when they differ, **skips with the two fingerprints in its message**
+instead of failing: the examples cannot be compared there, and nothing is wrong with the code. After regenerating the files on a machine whose
+footage differs, replace the line.
+
+Fixture footage (fingerprint): 462 frames at 25 fps; shots (s): 0.00-2.00 2.00-5.00 5.00-6.50 6.50-9.00 9.00-12.00 12.00-14.00 14.00-16.00 16.00-18.50
 
 `simulate_editor.py` (one directory up) edits an exported `final.otio` the way an editor's re-export would be
 changed (a 5-frame trim, a dissolve turned into a cut, a clip deleted), for the round trip described in

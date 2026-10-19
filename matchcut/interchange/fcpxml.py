@@ -23,7 +23,7 @@ import re
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
 from matchcut.pipeline.config import MusicConfig
@@ -31,7 +31,8 @@ from matchcut.pipeline.junctions import Junction
 from matchcut.pipeline.timeline import Timeline
 
 from . import MATCHCUT_VERSION, InterchangeError
-from .common import SourceInfo, assemble, clip_key, exact_rate, junction_ids, layout, music_window, record_frames, rt, truncate
+from .common import (BY_NAME_NOTE, DIP_NAME, SHA256, LaidClip, SourceInfo, assemble, clip_key, exact_rate, junction_ids, layout, media_matcher, music_window,
+                     record_frames, rt, truncate)
 
 FCPXML_VERSION = "1.10"
 CROSS_DISSOLVE_UID = "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"  # seen in real FCP exports (research: secondary source)
@@ -66,8 +67,10 @@ def _uid(src: SourceInfo) -> str:
 
 
 def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], src: SourceInfo, music: Optional[MusicConfig] = None,
-                  music_src: Optional[SourceInfo] = None, name: str = "matchcut") -> str:
-    """One FCPXML 1.10 document: an event ``name`` with a project ``"<name> - <stage>"`` per stage (timelines normally frame-snapped)."""
+                  music_src: Optional[SourceInfo] = None, name: str = "matchcut", stage_sha256: Optional[Mapping[str, str]] = None) -> str:
+    """One FCPXML 1.10 document: an event ``name`` with a project ``"<name> - <stage>"`` per stage (timelines normally frame-snapped).
+
+    ``stage_sha256`` maps a stage to the sha256 of its stage file; it is written as the sequence's ``stage_sha256`` md key."""
     rate = src.rate
     tcf = "DF" if src.start_tc_drop and rate in (Fraction(30000, 1001), Fraction(60000, 1001)) else "NDF"  # drop-frame media keeps its timecode format
     tc0 = src.start_tc_frames  # source times are in the media's own timecode: the asset starts there
@@ -127,6 +130,8 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
             _md(ac, clip_key=clip_key(c), clip_id=c.id, shot_index=c.shot_index, beat_id=c.beat_id, stage=stage)
         smd: Dict[str, Any] = {"stage": stage, "source": src.path, "source_size": src.size, "source_mtime_ns": src.mtime_ns, "fade_in": tl.fade_in, "fade_out": tl.fade_out, "provenance_file": "provenance.json",
                                "matchcut_version": MATCHCUT_VERSION}
+        if (stage_sha256 or {}).get(stage):
+            smd["stage_sha256"] = stage_sha256[stage]
         if muted:
             smd["source_audio"] = "disabled (srcEnable=video on every clip): music.only drops the source audio from the render"
         _md(seq, **smd)
@@ -136,7 +141,6 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
 
 # -- import --------------------------------------------------------------------------------------
 _SKIP: Tuple[str, Dict[str, Any]] = ("skip", {})
-_DIP = re.compile(r"dip|fade to (color|colour|black)", re.I)
 
 
 def _time(text: Optional[str]) -> Fraction:
@@ -148,6 +152,10 @@ def _time(text: Optional[str]) -> Fraction:
         return Fraction(s[:-1])
     except ZeroDivisionError as exc:
         raise ValueError(f"invalid time {text!r}") from exc
+
+
+def _fps(rate: Fraction) -> str:
+    return f"{rate.numerator}/{rate.denominator}" if rate.denominator != 1 else str(rate.numerator)
 
 
 def _md_of(el: Optional[ET.Element]) -> Dict[str, str]:
@@ -167,19 +175,16 @@ def _path_of(asset: Optional[ET.Element]) -> Optional[str]:
     return unquote(urlparse(url).path) if url.startswith("file:") else url
 
 
-def _same_media(a: Optional[str], b: Optional[str]) -> bool:
-    return a is None or b is None or a == b or Path(a).name == Path(b).name
-
-
 def _source_path(declared: Optional[str], used: List[ET.Element], clips: List[ET.Element]) -> Optional[str]:
     """The path of the source footage among the assets the spine uses: the sequence's declared source, else the asset our uid marks,
     else the one our clip metadata points at, else the most used, else the first."""
     if not used:
         return None
     if declared:
-        for a in used:
-            p = _path_of(a)
-            if p is not None and _same_media(p, declared):
+        paths = [p for p in (_path_of(a) for a in used) if p is not None]
+        is_declared, _ = media_matcher(paths, declared)
+        for p in paths:
+            if is_declared(p):
                 return p
     ours = [a for a in used if (a.get("uid") or "").startswith("com.matchcut.source.")]
     marked = {k.get("ref") for k in clips if _md_of(k).get("clip_id") or _md_of(k).get("clip_key")}
@@ -259,6 +264,10 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
     if frame <= 0:
         raise InterchangeError("FCPXML sequence has no usable frame duration (its format has none)")
     rate = exact_rate(1 / frame)
+    if src is not None:  # frames are the media's frames: asset and sequence times are seconds, converted at the media's own rate
+        if rate != src.rate:
+            notes.append(f"the sequence runs at {_fps(rate)} fps and the media at {_fps(src.rate)} fps: times were converted at the media's rate")
+        rate = src.rate
 
     def fr(text: Optional[str]) -> int:
         """Time -> whole frames at ``rate`` (halves rounded up): editors write times on any common grid."""
@@ -270,11 +279,14 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
         raise InterchangeError("FCPXML spine has no clips")
     want = _source_path(_md_of(seq).get("source"), [assets[k.get("ref")] for k in kids if k.tag == "asset-clip" and k.get("ref") in assets],
                         [k for k in kids if k.tag == "asset-clip"])
+    used_paths = [_path_of(assets[k.get("ref")]) for k in kids if k.tag == "asset-clip" and k.get("ref") in assets]
     if src is not None:  # the workspace's own footage decides, not whatever the file's assets say
-        used_paths = [_path_of(assets[k.get("ref")]) for k in kids if k.tag == "asset-clip" and k.get("ref") in assets]
-        if not any(_same_media(p, src.path) for p in used_paths):
-            raise InterchangeError(f"no clip of the FCPXML spine references the source footage {src.path}")
         want = src.path
+        is_source, by_name = media_matcher([p for p in used_paths if p is not None], want)
+        if not any(p is None or is_source(p) for p in used_paths):
+            raise InterchangeError(f"no clip of the FCPXML spine references the source footage {src.path}")
+    else:  # the file's own source: the exact path of its asset, else an asset of the same name
+        is_source, by_name = media_matcher([p for p in used_paths if p is not None], want) if want else (lambda p: False, False)
     items: List[Tuple[str, Dict[str, Any]]] = []
     mapped = 0
     skipped_media = 0
@@ -290,7 +302,7 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
             fv = el.find("filter-video")
             eff = effects.get(fv.get("ref")) if fv is not None else None
             label = " ".join([name, fv.get("name", "") if fv is not None else "", eff.get("name", "") if eff is not None else ""])
-            dip = _md_of(el).get("kind") == "dip_to_black" or bool(_DIP.search(label)) or (eff is not None and eff.get("uid") == FADE_TO_COLOR_UID)
+            dip = _md_of(el).get("kind") == "dip_to_black" or bool(DIP_NAME.search(label)) or (eff is not None and eff.get("uid") == FADE_TO_COLOR_UID)
             try:
                 dur = fr(el.get("duration"))
                 off: Optional[int] = fr(el.get("offset")) if el.get("offset") else None
@@ -313,7 +325,7 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
                 items.append(_SKIP)
                 continue
             path = _path_of(asset)
-            if not _same_media(path, want):
+            if path is not None and not is_source(path):  # an asset that names no file cannot be told from the footage
                 skipped_media += 1
                 notes.append(f"clip {name}: other media {path} ignored")
                 items.append(_SKIP)
@@ -370,6 +382,8 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
             items.append(_SKIP)
     if not mapped:
         raise InterchangeError(f"no clip of the FCPXML spine references the source footage {want}" if skipped_media else "FCPXML spine has no usable clips")
+    if by_name:
+        notes.append(BY_NAME_NOTE.format(want=want))
     for origin, n in sorted(offsets.items()):
         notes.append(f"source start timecode of {origin} frames subtracted from the source times of {n} clip{'s' if n != 1 else ''}")
     # a transition only means something between two mapped clips; its in/out split comes from where it starts relative to the cut
@@ -413,6 +427,50 @@ def fcpxml_stages(xml: Any) -> List[str]:
         return [_stage_of(p) or p.get("name", "").rsplit(" - ", 1)[-1] for p in root.iter("project") if p.find("sequence") is not None]
     except (TypeError, ValueError, AttributeError) as exc:
         raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
+
+
+def placement_errors(xml: Any, stage: str, rows: Sequence[LaidClip], rate: Fraction) -> List[str]:
+    """Where matchcut's own FCPXML puts the clips and transitions on the spine against the layout: the sequence's duration and start, each
+    clip's ``offset`` (its cut) and each transition's ``offset`` and ``duration``.  An editor places clips by these."""
+    proj, _ = _select(_parse(xml), stage)
+    seq = proj.find("sequence")
+    spine = seq.find("spine")
+    errs: List[str] = []
+
+    def check(what: str, text: Optional[str], want: int) -> None:
+        try:
+            got = _time(text) * rate
+        except ValueError:
+            errs.append(f"{what}: no usable time ({text!r})")
+            return
+        if got != want:
+            errs.append(f"{what}: {float(got):g} frames != {want}")
+
+    check("sequence duration", seq.get("duration"), record_frames(rows))
+    check("sequence start", seq.get("tcStart") or "0s", 0)
+    clips = [k for k in (spine if spine is not None else []) if k.tag == "asset-clip"]
+    trs = [k for k in (spine if spine is not None else []) if k.tag == "transition"]
+    if len(clips) != len(rows):
+        return errs + [f"the spine has {len(clips)} clips for {len(rows)}"]
+    for i, (el, row) in enumerate(zip(clips, rows)):
+        check(f"clip {i + 1} offset", el.get("offset"), row.cut)
+    with_tr = [r for r in rows if r.tr]
+    if len(trs) != len(with_tr):
+        return errs + [f"the spine has {len(trs)} transitions for {len(with_tr)}"]
+    for el, row in zip(trs, with_tr):
+        check(f"transition into clip {row.index + 1} offset", el.get("offset"), row.cut - row.head)
+        check(f"transition into clip {row.index + 1} duration", el.get("duration"), row.tr)
+    return errs
+
+
+def stage_fingerprint(xml: Any, stage: Optional[str] = None) -> str:
+    """The ``stage_sha256`` md key of the sequence ``import_fcpxml(xml, stage)`` would read ("" when there is none or it is not a sha256)."""
+    try:
+        proj, _ = _select(_parse(xml), stage)
+    except (TypeError, ValueError, AttributeError, InterchangeError):
+        return ""
+    value = _md_of(proj.find("sequence")).get("stage_sha256", "")
+    return value if SHA256.fullmatch(value) else ""
 
 
 def fcpxml_junction_ids(xml: Any, stage: Optional[str] = None) -> List[str]:

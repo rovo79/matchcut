@@ -31,15 +31,15 @@ backend, no network, no editor. The modules, all under `tests/interchange/`:
 | Module | What it proves |
 |---|---|
 | `test_common.py` | Exact frame rates (ffprobe rationals, a float-only probe snapped to the nearest common rate, NTSC), half-away rounding to frames, FCPXML rationals, the frame snap of a stage with a note per clip it moved (none for `final`), stable junction and clip ids with repeats made unique, the dissolve conversion (odd lengths, error diffusion, a clip swallowed by its transitions), real stages keeping the record length within half a frame |
-| `test_otio.py` | OTIO export (tracks, `Transition.1`, markers with metadata, mirrored `A1`, music track `A2` clamped like the renderer, `music.only`, the dip to black label) and import (round trip of every stage, clip keys, float rates, stripped metadata, source-range matching, ignored items listed, foreign documents and malformed input as one-line errors, media start timecode); `provenance.json` keyed by stable ids; the real OpenTimelineIO loads the files (optional) |
-| `test_fcpxml.py` | FCPXML structure and metadata, the dissolve geometry, dip to black as Fade To Color, NTSC, junction markers, keywords and 240-character notes, a music lane, DTD validity (optional), re-import without metadata, arbitrary rationals, rewritten ids and time bases, several projects, the declared source, b-roll and audio-only clips, split edits, malformed input |
-| `test_edl.py` | CMX3600 events and dissolve pairs on the frame grid, columns and comments, round trips of the synthetic cut and every workspace stage at several rates, 23.976/25/29.97 timecode and drop-frame, a foreign EDL mapped by source range, other media, wipes, speed changes, reel and clip names, overlapping events, malformed input |
+| `test_otio.py` | OTIO export (tracks, `Transition.1`, markers with metadata, mirrored `A1`, music track `A2` clamped like the renderer, `music.only`, the dip to black label) and import (round trip of every stage, clip keys, float rates, stripped metadata, source-range matching, ignored items listed, foreign documents and malformed input as one-line errors, media start timecode, the workspace's exact source path first, b-roll or a generator, offline or media-less clip on the video track never read as footage, an OTIO on a 48000 base or a timeline rate other than the media's read at the media's rate); `provenance.json` keyed by stable ids; the real OpenTimelineIO loads the files (optional) |
+| `test_fcpxml.py` | FCPXML structure and metadata, the dissolve geometry, dip to black as Fade To Color, NTSC, junction markers, keywords and 240-character notes, a music lane, DTD validity (optional), re-import without metadata, arbitrary rationals, rewritten ids and time bases, several projects, the declared source, b-roll and audio-only clips, split edits, a clip of the same file name from another folder never taking the exact path's place, 25 fps media in a 24 fps sequence, malformed input |
+| `test_edl.py` | CMX3600 events and dissolve pairs on the frame grid, columns and comments, round trips of the synthetic cut and every workspace stage at several rates, 23.976/25/29.97 timecode and drop-frame, a foreign EDL mapped by source range, other media (the exact path before the same file name), wipes, speed changes, reel and clip names, overlapping events, malformed input |
 | `test_timecode.py` | The media's start timecode (25 fps non-drop, 29.97 drop-frame) written by all three exporters and subtracted by all three importers, the drop-frame EDL, clips outside the media reported, junction markers on a timecoded file |
-| `test_fidelity.py` | The validation gate: it re-reads each export and fails on a dropped clip, a moved edge beyond what snapping explains, a changed transition, key or duration; `KNOWN` entries and measured approximations in every report; the report files; stale entries (`"stale": true`) round trip, are marked and do not decide `ok` |
-| `test_workspace.py` | `export_workspace` (every file and report, subsets, `--out`, a failing validation writing the reports before raising, music and `music.only`, snap notes); records of a narrower export kept while their stage file holds, **kept flagged stale with a note naming the files** once it changed, cleared by a new export or a restored stage, dropped when their files are gone, stale per format when a stage is exported again in one format only; `open_in_resolve.py` regenerated whenever the OTIO it targets is exported again (flag or not) and named in the stale note when it is not; `simulate_editor.py` run on a workspace with a music track; `import_timeline` (exactly the expected human decisions for an edited OTIO, FCPXML and EDL, edited by hand in their text too; removed, added and reordered clips; clip-key and range matching; other media; stage detection; one-line errors); the human stage (listed last, shown in junction histories, pins and badges unchanged, history continuing the latest stage, untouched dissolves keeping matchcut's value, a stale human stage left out and reported, never deleted, a base other than `final` warned); canonical files and `provenance.json` byte-identical after an import |
+| `test_fidelity.py` | The validation gate: it re-reads each export and fails on a dropped clip, a moved edge beyond what snapping explains, a changed transition, key or duration; `KNOWN` entries and measured approximations in every report; the record-placement check passing every legitimate random stage at six rates (the sweep behind the gate); the report files; stale entries (`"stale": true`) round trip, are marked and do not decide `ok` |
+| `test_workspace.py` | `export_workspace` (every file and report, subsets, `--out`, a failing validation writing the reports before raising, music and `music.only`, snap notes); records of a narrower export kept while their stage file holds, **kept flagged stale with a note naming the files** once it changed, cleared by a new export or a restored stage, dropped when their files are gone, stale per format when a stage is exported again in one format only; `open_in_resolve.py` regenerated whenever the OTIO it targets is exported again (flag or not) and named in the stale note when it is not; `simulate_editor.py` run on a workspace with a music track; `import_timeline` (exactly the expected human decisions for an edited OTIO, FCPXML and EDL, edited by hand in their text too; removed, added and reordered clips; clip-key and range matching; other media; stage detection; one-line errors); the human stage (listed last, shown in junction histories, pins and badges unchanged, history continuing the latest stage, untouched dissolves keeping matchcut's value, a stale human stage left out and reported, never deleted, a base other than `final` warned); canonical files and `provenance.json` byte-identical after an import; **the stage fingerprint and snapshot** (every export records the stage file's sha256 and keeps a copy; a re-import after a pipeline re-run gives exactly the editor's decisions in all three formats, with the note and `base_snapshot` in `human_import.json`; a missing or damaged snapshot is a one-line error; the snapshot is found next to the imported file for `--out` exports; a file without a fingerprint says so); the gate failing on a shifted EDL record timecode, a moved spine offset or transition, a 1-frame sequence duration and a truncated or shortened A1; a dip to black read the same from OTIO and FCPXML without metadata (the EDL exception asserted); the DROP FRAME EDL entry for drop-frame media; a `.fcpxmld` bundle; the frame-rate note |
 | `test_cli.py` | `export` and `import` output lines, options, exit codes and one-line stderr errors, notes, the stale and earlier-stage warnings, `junctions` saying a stale human stage is left out; the interchange package imported lazily by the CLI and never importing `textual`, `matchcut.tui` or `matchcut.review` |
-| `test_resolve.py` | The generated Resolve script run against a **fake of the documented scripting API** (the fake implements only the documented methods and rejects the others): call order and arguments, markers on the OTIO's cut frames with the junction id as customData, the playhead set last; only documented method names appear in the script (an AST check) and no 21.1 call; the playhead timecode follows `START_TC` (non-drop and drop-frame); every return value is checked against fake failures: no Resolve, no project, an import that returns nothing (with and without a timeline of that name already there, which is said in one line), markers that came with the import (`AddMarker` False, so `UpdateMarkerCustomData` sets the id), a junction left without its id (counted, non-zero exit), a playhead that cannot be set (start-timecode hint, non-zero exit); odd names stay one literal each; bad input is a one-line error; `--resolve-script` writes `open_in_resolve.py` next to the exports and fails in one line without the otio format; the exporters' record start is zero |
-| `test_docs.py` | `INTEROP.md` and this file list every `KNOWN` fidelity entry verbatim, no document claims a format is a complete copy of a cut, or names a model, the example exports carry no absolute path but the placeholder and equal what the code writes now (regenerated on the fixture and diffed after normalising paths, the footage's mtime, path-derived uids, stage-file hashes and the version), and the human gates read PENDING |
+| `test_resolve.py` | The generated Resolve script run against a **fake of the documented scripting API** (the fake implements only the documented methods and rejects the others): call order and arguments, markers on the OTIO's cut frames with the junction id as customData, the playhead set last; only documented method names appear in the script (an AST check) and no 21.1 call; the playhead timecode is worked out by the script from `START_TC` plus the junction's frame (non-drop and drop-frame, and editing `START_TC` in the script moves it); every return value is checked against fake failures: no Resolve, no project, an import that returns nothing (with and without a timeline of that name already there, which is said in one line), markers that came with the import (`AddMarker` False, so `UpdateMarkerCustomData` sets the id), a junction left without its id (counted, non-zero exit), a playhead that cannot be set (the hint says to edit `START_TC`, non-zero exit); odd names stay one literal each; bad input is a one-line error; `--resolve-script` writes `open_in_resolve.py` next to the exports and fails in one line without the otio format; the exporters' record start is zero |
+| `test_docs.py` | `INTEROP.md` and this file list every `KNOWN` fidelity entry verbatim, no document claims a format is a complete copy of a cut, or names a model, the example exports carry no absolute path but the placeholder and equal what the code writes now (regenerated on the fixture and diffed after normalising paths, the footage's mtime and size, path-derived uids, stage-file hashes and the version; skipped with both fingerprints in the message when the machine's ffmpeg encodes the fixture footage with other shot boundaries than the committed examples), and the human gates read PENDING |
 
 Optional automated checks (skipped when the tool is missing; both ran for the figures below):
 
@@ -54,7 +54,8 @@ Suites at the commit that added this file: see the last section.
 Per format, from `matchcut/interchange/fidelity.py` (`KNOWN`), the table every export
 and report uses. **Preserved** on every export: clip count and order and each clip's shot,
 source in/out frames (exact at the source's rate), transition kind and length in whole
-frames, clip keys, and the record duration (within half a frame plus a millisecond). Every
+frames, clip keys, the record duration (within half a frame plus a millisecond) and where each clip sits on the record side (EDL record timecodes, FCPXML
+spine offsets and sequence duration, the length of the OTIO video and audio tracks). Every
 export is read back by matchcut's own reader to check exactly this; an editor's behaviour is
 not covered. The report adds what each export measured (clips moved by the frame snap, dissolve
 lengths rounded). UNVERIFIED marks what has not been checked in an editor.
@@ -95,6 +96,10 @@ lengths rounded). UNVERIFIED marks what has not been checked in an editor.
 - dip to black: written as a dissolve plus a MATCHCUT TRANSITION comment; an editor shows a plain dissolve
 - timecode is NON-DROP: at 23.976 and 29.97 fps the frame counts are exact but the timecode runs slow against the wall clock
 
+For media whose own start timecode is drop-frame, the EDL's NON-DROP entry is replaced by this one (the file says `FCM: DROP FRAME`):
+
+- timecode is DROP FRAME, as the media's own start timecode is: the frame counts are exact and the timecode follows the wall clock; UNVERIFIED that Resolve and Final Cut Pro read the ';' separators of this EDL as drop-frame
+
 **CMX3600 EDL, lost**
 
 - ducking: the render ducks the music under speech, no format carries that automation
@@ -118,12 +123,12 @@ target 8 s, mock backend, no render. 5 clips; rough cut 199 frames, final 173 fr
     python -m matchcut.pipeline.cli export WS --resolve-script
     exported 9 files to WS/exports
     fidelity: 6 checks, 0 errors (WS/exports/fidelity.md)
-      roughcut  otio  ok: 5 preserved, 5 approximated, 5 lost
-      roughcut  fcpxml  ok: 5 preserved, 5 approximated, 6 lost
-      roughcut  edl  ok: 5 preserved, 6 approximated, 6 lost
-      final  otio  ok: 5 preserved, 5 approximated, 5 lost
-      final  fcpxml  ok: 5 preserved, 5 approximated, 6 lost
-      final  edl  ok: 5 preserved, 6 approximated, 6 lost
+      roughcut  otio  ok: 6 preserved, 5 approximated, 5 lost
+      roughcut  fcpxml  ok: 6 preserved, 5 approximated, 6 lost
+      roughcut  edl  ok: 6 preserved, 6 approximated, 6 lost
+      final  otio  ok: 6 preserved, 5 approximated, 5 lost
+      final  fcpxml  ok: 6 preserved, 5 approximated, 6 lost
+      final  edl  ok: 6 preserved, 6 approximated, 6 lost
     note: roughcut: 3 of 5 clips moved by the frame snap (see fidelity.md)
     note: open_in_resolve.py imports final.otio into Resolve Studio (external scripting = Local); matchcut does not run it
 
@@ -162,8 +167,27 @@ The three decisions are exactly the three edits. `junctions WS` then lists 3 jun
 move by the halves of the dissolve). `roughcut.json`, `final.json`, every `passes/*.json` and `exports/provenance.json` have the same sha256 after the
 import as before. With `--strip-metadata` (every matchcut metadata block removed and the clips renamed, as an application that does not keep
 third-party metadata would) the same three decisions come out, and the import report says
-`4 clips matched by source range because the clip key was missing or unknown`. This simulates what an editor does to a file; it does not show
+`4 clips matched by source range because the clip key was missing or unknown` and that the file `carries no stage fingerprint`. This simulates what an editor does to a file; it does not show
 what Resolve or Final Cut Pro do (they may renumber ids, change time bases, or drop metadata).
+
+### Re-import after the pipeline ran again (synthetic)
+
+The export records the sha256 of the stage file it was made from in every file and keeps a copy of that stage file in `exports/.stages/`. On the same
+synthetic workspace, with the three edits above saved as `edited.otio`, the pipeline is run again with a longer target (`run FOOTAGE -w WS -t 12`, which changes
+`final.json`) and the file is imported:
+
+    python -m matchcut.pipeline.cli import WS edited.otio
+    imported edited.otio (otio) against final: 3 human decisions -> WS/human.json
+      removed c005  human removed c005 (shot 7, 17.76-18.48s)
+      trim c002  human trimmed c002: in +5f
+      transition c002 c003  human changed transition dissolve 8f -> cut
+    import report: 1 note
+      - edited.otio was exported from an earlier final: the editor's changes were diffed against that version; junction histories compare the human stage with the current final
+
+Still exactly the three edits: the re-run's own changes to the cut are not among them. Before the fingerprint, the same import after the
+re-run listed the pipeline's changes as the editor's decisions, and the stale hint told the user to do exactly that. With the snapshot deleted the import stops with
+one line naming the fix; a file without the fingerprint is read against the current stage and says so.
+(In the run above `human.json` from the earlier import was stale and the report had a second note saying this import replaces it.)
 
 ### Big Buck Bunny workspace (mock backend)
 
@@ -179,7 +203,8 @@ exporting (the original was not touched). 3 clips; rough cut 240 frames with 2 c
       final     otio/fcpxml/edl  ok: 5 preserved, 4/4/5 approximated, 5/6/6 lost
     note: roughcut: 3 of 3 clips moved by the frame snap (see fidelity.md)
 
-The rough cut's snap moved all 3 clips by at most 0.08 frame; the final cut needed no snap and no dissolve rounding. OpenTimelineIO 0.18.1 loads
+(Figures of that run, made before the gate also checked the record placement: each row would now list one more preserved item, "record placement of every clip
+and transition".) The rough cut's snap moved all 3 clips by at most 0.08 frame; the final cut needed no snap and no dissolve rounding. OpenTimelineIO 0.18.1 loads
 both `.otio` files (rough cut 240 frames, 2 markers, 0 transitions; final 204 frames, 2 markers, 2 transitions) and `xmllint --dtdvalid` accepts
 `matchcut.fcpxml`. The script puts markers at frames 71 and 133 and the playhead at `00:00:02:23`. The same simulated editor edits (a 5-frame trim of the
 second clip, the first dissolve turned into a cut, the last clip deleted) give
@@ -223,7 +248,8 @@ and `export WS --resolve-script`. Write what you see in the Verdict.
 6. **Music.** With `--music` configured, does the music clip arrive at the right start with the gain (OTIO track A2, FCPXML lane -1)? Does a `music.only` cut mute the
    source audio?
 7. **Dip to black and fades.** Export a cut with a dip to black transition and a fade in/out. What does each editor show?
-8. **Stale handling.** Re-run the pipeline after an import: does `junctions` say `human.json is stale` and keep showing the real final stage?
+8. **Stale handling.** Re-run the pipeline after an import: does `junctions` say `human.json is stale` and keep showing the real final stage? Import the same
+   editor's file again: are the decisions still only the ones you made, and does the report say it was diffed against an earlier `final`?
 
 ## Verdict
 
@@ -252,6 +278,10 @@ and `export WS --resolve-script`. Write what you see in the Verdict.
 - See [INTEROP.md](INTEROP.md#limits). In short: one video track and one source; picture only on import; no format carries ducking,
   loudness normalisation or the fades as effects; a dip to black is approximated everywhere.
 - A stale record (see INTEROP.md) is kept only while exported files of that stage are still in the directory.
+- The snapshot that makes a re-import after a pipeline re-run exact (`exports/.stages/`, one small copy per exported version of a stage, never deleted by matchcut) is
+  looked up in `WORKSPACE/exports/.stages/`, then next to the imported file; an export made with `--out DIR` elsewhere is found only when the editor's file is saved in
+  `DIR` too (or the folder is copied back). A file that lost its fingerprint cannot be checked against the stage it came from.
+- An EDL cannot carry a dip to black without matchcut's comment: a dip read back from an EDL that lost its comments is a dissolve (OTIO and FCPXML read it by name).
 - Applying human decisions to a new cut is not implemented: the `human` stage is a record, and the next pipeline run does not read it.
 - The mock backend produces no real why lines: in the examples six of the eight junction notes say "no pass changed this junction", and the two dissolves read
   "transitions: beat b1 -> b2: dissolve 0.30s" and "transitions: beat b2 -> b3: dissolve 0.75s" (the rule-based transitions pass).
@@ -265,8 +295,8 @@ and `export WS --resolve-script`. Write what you see in the Verdict.
 
 ## Suites at the commit that added this file
 
-`python -m pytest tests/interchange tests/pipeline tests/tui tests/review -q`, run per directory: interchange 326 passed
-(`test_cli` 13, `test_common` 61, `test_docs` 10, `test_edl` 36, `test_fcpxml` 54, `test_fidelity` 21, `test_otio` 49, `test_resolve` 29,
-`test_timecode` 9, `test_workspace` 44), pipeline 173, tui 143, review 87: 729 passed, 0 skipped (the optional OpenTimelineIO and
-`xmllint` checks ran). The `prototypes/interchange` suite no longer exists. The fixtures build their own synthetic footage and
+`python -m pytest tests/interchange tests/pipeline tests/tui tests/review -q`, run per directory: interchange 360 passed
+(`test_cli` 13, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 22, `test_otio` 54, `test_resolve` 30,
+`test_timecode` 9, `test_workspace` 67), pipeline 173, tui 143, review 87: 763 passed, 0 skipped (the optional OpenTimelineIO and
+`xmllint` checks ran; `test_docs`' example comparison ran because the fixture footage's fingerprint equals the one recorded in the examples' README). The `prototypes/interchange` suite no longer exists. The fixtures build their own synthetic footage and
 workspace, so the numbers do not depend on the demonstration data. This is automated verification only; the human gates above are PENDING.

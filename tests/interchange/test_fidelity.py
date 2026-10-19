@@ -284,3 +284,53 @@ def test_a_stage_that_passes_validate_does_not_fail_the_snap_gate():
     bad = copy.deepcopy(snapped)
     bad.clips[0].source_out = round(bad.clips[0].source_out - 3 / fps, 4)
     assert check(tl, import_edl(export_edl(bad, "roughcut", fake_src(rate), "t"), rate, "/x/media.mp4")[0], "edl", rate, bad).errors
+
+
+def sweep_stage(rng, rate: Fraction):
+    """A valid random stage (2-40 clips, dissolves and dips) and its shot bounds."""
+    fps = float(rate)
+    clips, bounds, t = [], {}, 0.0
+    for i in range(rng.randint(2, 40)):
+        start = t + rng.uniform(0.0, 0.3)
+        end = start + rng.uniform(0.6, 4.0)
+        bounds[i] = (round(start, 3), round(end, 3))
+        a = round(rng.uniform(bounds[i][0], bounds[i][0] + 0.2), 4)
+        b = round(rng.uniform(bounds[i][1] - 0.2, bounds[i][1]), 4)
+        tin = Transition()
+        if i and rng.random() < 0.6:
+            d = round(rng.uniform(0.04, min(0.5 * (b - a), 0.5 * (clips[-1].source_out - clips[-1].source_in), 1.2)), 3)
+            tin = Transition(rng.choice(["dissolve", "dissolve", "dip_to_black"]), d)
+        clips.append(Clip(f"c{i + 1:03d}", i, a, b, transition_in=tin))
+        t = end
+    return Timeline(source="/m/x.mov", fps=fps, clips=clips, fade_in=0.5, fade_out=0.5, stage="s"), bounds, int(t * fps) + 50
+
+
+def test_the_placement_check_passes_every_legitimate_stage_at_every_rate():
+    """Final review M2: the sweep behind the new gate (random stages x six rates x media timecodes x three formats) has no false positive."""
+    import random
+
+    from matchcut.interchange import edl as edl_mod, fcpxml as fcpxml_mod, otio as otio_mod
+    from matchcut.interchange.common import SourceInfo, layout
+    from matchcut.interchange.workspace import _PLACEMENT_NOTE
+
+    rng = random.Random(11)
+    done = 0
+    for trial in range(60):
+        rate = rng.choice([Fraction(24000, 1001), Fraction(25), Fraction(30000, 1001), Fraction(24), Fraction(60000, 1001), Fraction(50)])
+        tc0 = rng.choice([0, 90000, 107892])
+        drop = tc0 == 107892 and rate in (Fraction(30000, 1001), Fraction(60000, 1001))
+        tl, bounds, frames = sweep_stage(rng, rate)
+        if tl.validate(bounds):
+            continue
+        src = SourceInfo("/m/x.mov", "file:///m/x.mov", rate, frames, 1920, 1080, rng.random() < 0.8, 1, 1, tc0, drop)
+        snapped, _ = export_timeline(tl, bounds, src)
+        rows = layout(snapped, rate)
+        doc = export_otio(snapped, "s", src, [])
+        xml = export_fcpxml([("s", snapped, [])], src)
+        text = export_edl(snapped, "s", src, "t")
+        assert otio_mod.placement_errors(doc, rows, rate) == [] and fcpxml_mod.placement_errors(xml, "s", rows, rate) == []
+        assert edl_mod.placement_errors(text, rows, rate) == []
+        notes = import_otio(doc, bounds, src)[1] + import_fcpxml(xml, "s", bounds, src)[1] + import_edl(text, rate, src.path, bounds, src)[1]
+        assert not [n for n in notes if _PLACEMENT_NOTE.match(n)], (trial, rate, notes)
+        done += 1
+    assert done >= 40

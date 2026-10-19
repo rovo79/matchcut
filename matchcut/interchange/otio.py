@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
 from matchcut.pipeline.config import MusicConfig
@@ -21,8 +21,8 @@ from matchcut.pipeline.junctions import Junction
 from matchcut.pipeline.timeline import Timeline
 
 from . import MATCHCUT_VERSION, InterchangeError
-from .common import (SourceInfo, assemble, clip_key, junction_ids, junction_meta, layout, music_window, record_frames, snap_rate, to_frames,
-                     truncate)
+from .common import (BY_NAME_NOTE, DIP_NAME, SHA256, LaidClip, SourceInfo, assemble, clip_key, junction_ids, junction_meta, layout, media_matcher,
+                     music_window, record_frames, snap_rate, to_frames, truncate)
 
 UNVERIFIED_DIP = "dip_to_black is UNVERIFIED: OTIO has no such transition type (Custom_Transition + metadata); how an editor treats it is untested"
 
@@ -55,8 +55,11 @@ def _track(kind: str, name: str, children: List[Dict[str, Any]], markers: Option
 
 # -- export --------------------------------------------------------------------------------------
 def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[Junction], music: Optional[MusicConfig] = None,
-                music_src: Optional[SourceInfo] = None) -> dict:
-    """One OTIO document for ``tl`` (normally the frame-snapped copy from ``common.export_timeline``)."""
+                music_src: Optional[SourceInfo] = None, stage_sha256: str = "") -> dict:
+    """One OTIO document for ``tl`` (normally the frame-snapped copy from ``common.export_timeline``).
+
+    ``stage_sha256`` (the sha256 of the stage file) is written as ``metadata.matchcut.stage_sha256``: a later import finds out which
+    version of the stage the editor started from."""
     rate = src.rate
     r = float(rate)
     if not tl.clips:
@@ -107,10 +110,13 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
         tracks.append(_track("Audio", "A2", [_clip(Path(music_src.path).name, _range(start, dur, mrate), mref,
                                                    {"kind": "music", "gain_db": music.gain_db, "duck": music.duck, "start": music.start,
                                                     "fade_out": music.fade_out, "only": music.only})]))
+    tmeta = {"stage": stage, "source": src.path, "rate": [rate.numerator, rate.denominator], "fade_in": tl.fade_in,
+             "fade_out": tl.fade_out, "provenance_file": "provenance.json", "matchcut_version": MATCHCUT_VERSION}
+    if stage_sha256:
+        tmeta["stage_sha256"] = stage_sha256
     return {
         "OTIO_SCHEMA": "Timeline.1",
-        "metadata": {"matchcut": {"stage": stage, "source": src.path, "rate": [rate.numerator, rate.denominator], "fade_in": tl.fade_in,
-                                  "fade_out": tl.fade_out, "provenance_file": "provenance.json", "matchcut_version": MATCHCUT_VERSION}},
+        "metadata": {"matchcut": tmeta},
         "name": f"{stem} - {stage}", "global_start_time": _rt(0, r),
         "tracks": {"OTIO_SCHEMA": "Stack.1", "metadata": {}, "name": "tracks", "source_range": None, "effects": [], "markers": [],
                    "enabled": True, "color": None, "children": tracks},
@@ -126,9 +132,11 @@ def _schema(item: Any) -> str:
 
 
 def _path_of(clip: Dict[str, Any]) -> Optional[str]:
+    """The media file of a clip, or None when its media reference is not an ExternalReference with a target_url (a GeneratorReference,
+    a MissingReference, none)."""
     refs = clip.get("media_references") or {}
     ref = refs.get(clip.get("active_media_reference_key")) or next(iter(refs.values()), None) or {}
-    url = ref.get("target_url")
+    url = ref.get("target_url") if isinstance(ref, dict) and not _schema(ref).startswith(("Generator", "Missing")) else None
     return unquote(urlparse(url).path) if url and url.startswith("file:") else (url or None)
 
 
@@ -138,19 +146,15 @@ def _available(clip: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return ref.get("available_range")
 
 
-def _same_media(a: Optional[str], b: Optional[str]) -> bool:
-    return a is None or b is None or a == b or Path(a).name == Path(b).name
-
-
 def _is_time(t: Any) -> bool:
     return isinstance(t, dict) and isinstance(t.get("rate"), (int, float)) and isinstance(t.get("value"), (int, float)) and t["rate"] > 0
 
 
-def _first_rate(vt: Dict[str, Any]) -> float:
-    """The rate of the first RationalTime in the video track: a clip's source range, its media's available range, a transition."""
+def _first_rate(vt: Dict[str, Any], usable: Callable[[Dict[str, Any]], bool] = lambda k: True) -> float:
+    """The rate of the first RationalTime in the video track: the source range of a ``usable`` clip, its media's available range, a transition."""
     kids = vt.get("children") or []
     for k in kids:
-        if _schema(k) == "Clip":
+        if _schema(k) == "Clip" and usable(k):
             for rng in (k.get("source_range"), _available(k)):
                 if isinstance(rng, dict) and _is_time(rng.get("start_time")):
                     return float(rng["start_time"]["rate"])
@@ -160,6 +164,10 @@ def _first_rate(vt: Dict[str, Any]) -> float:
                 if _is_time(k.get(key)):
                     return float(k[key]["rate"])
     raise InterchangeError("OTIO video track has no usable time base (no clip or transition with a rate)")
+
+
+def _fps(rate: Fraction) -> str:
+    return f"{rate.numerator}/{rate.denominator}" if rate.denominator != 1 else str(rate.numerator)
 
 
 def _meta_rate(value: Any, notes: List[str]) -> Optional[Fraction]:
@@ -190,6 +198,52 @@ def import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]] = None, 
         raise InterchangeError(f"invalid OTIO document: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
 
 
+def placement_errors(doc: dict, rows: Sequence[LaidClip], rate: Fraction) -> List[str]:
+    """How long matchcut's own OTIO tracks are against the layout: the picture track and each audio track that mirrors it hold the clips
+    end to end, so their clip durations add up to the cut (and an audio clip is as long as its picture clip)."""
+    tracks = (doc.get("tracks") or {}).get("children") or []
+    total = record_frames(rows)
+
+    def frames(t: Any) -> float:
+        return float(t["value"]) / float(t["rate"]) * float(rate)
+
+    def durations(track: Dict[str, Any]) -> List[float]:
+        return [frames(k["source_range"]["duration"]) for k in track.get("children") or [] if _schema(k) == "Clip"]
+
+    errs: List[str] = []
+    video = next((t for t in tracks if _schema(t) == "Track" and t.get("kind") == "Video"), None)
+    if video is None:
+        return ["the document has no video track"]
+    want = [r.dur for r in rows]
+    for t in tracks:
+        if _schema(t) != "Track" or t.get("kind") not in ("Video", "Audio"):
+            continue
+        clips = [k for k in t.get("children") or [] if _schema(k) == "Clip"]
+        if t.get("kind") == "Audio" and any(((k.get("metadata") or {}).get("matchcut") or {}).get("kind") == "music" for k in clips):
+            continue  # the music clip is a window of the music file, not the picture's mirror
+        name = t.get("name") or t.get("kind")
+        try:
+            got = durations(t)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            errs.append(f"track {name}: a clip has no usable duration")
+            continue
+        if len(got) != len(rows):
+            errs.append(f"track {name} has {len(got)} clips for {len(rows)}")
+        elif any(abs(g - w) > 1e-6 for g, w in zip(got, want)):
+            k = next(i for i, (g, w) in enumerate(zip(got, want)) if abs(g - w) > 1e-6)
+            errs.append(f"track {name}: clip {k + 1} lasts {got[k]:g} frames != {want[k]}")
+        if abs(sum(got) - total) > 1e-6:
+            errs.append(f"track {name} lasts {sum(got):g} frames != the cut's {total}")
+    return errs
+
+
+def stage_fingerprint(doc: Any) -> str:
+    """The ``stage_sha256`` an export wrote into the document's timeline metadata ("" when there is none or it is not a sha256)."""
+    meta = ((doc.get("metadata") or {}).get("matchcut") or {}) if isinstance(doc, dict) else {}
+    value = meta.get("stage_sha256") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and SHA256.fullmatch(value) else ""
+
+
 def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: Optional[SourceInfo]) -> Tuple[Timeline, List[str]]:
     if not isinstance(doc, dict):
         raise InterchangeError("invalid OTIO document: not a JSON object")
@@ -208,9 +262,22 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
             notes.append(f"audio track {t.get('name') or '?'} ignored (matchcut reads the picture only)")
     if not any(_schema(k) == "Clip" for k in vt.get("children") or []):
         raise InterchangeError("OTIO video track has no clips")
-    rate = _meta_rate(meta["rate"], notes) if "rate" in meta else None
+    paths = [p for p in (_path_of(k) for k in vt["children"] if _schema(k) == "Clip") if p]
+    # the workspace's own footage decides (its exact path first, the same file name only when no clip has it); without it, the file's declared source
+    want = src.path if src is not None else (meta.get("source") or next(iter(paths), ""))
+    is_source, by_name = media_matcher(paths, want) if want else (lambda p: False, False)
+    rate = _meta_rate(meta["rate"], notes) if "rate" in meta else None  # the timeline's rate: its metadata, else the first source clip's time base
     if rate is None:
-        rate = snap_rate(_first_rate(vt))
+        try:
+            rate = snap_rate(_first_rate(vt, lambda k: (_path_of(k) is not None and is_source(_path_of(k))) if src is not None else True))
+        except InterchangeError:
+            if src is None:
+                raise
+    if src is not None:
+        # frames are the media's frames: every RationalTime is converted through seconds at the media's own rate, on whatever base it is written
+        if rate is not None and rate != src.rate and float(rate) <= 120:
+            notes.append(f"the timeline runs at {_fps(rate)} fps and the media at {_fps(src.rate)} fps: times were converted at the media's rate")
+        rate = src.rate
     rf = float(rate)
 
     def fr(t: Any) -> int:
@@ -221,9 +288,6 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
         if abs(tr_ - rf) < 1e-6 * max(rf, 1.0):
             return int(round(float(t["value"])))
         return to_frames(float(t["value"]) / float(snap_rate(tr_)), rate)
-
-    first = next(k for k in vt["children"] if _schema(k) == "Clip")
-    want = meta.get("source") or _path_of(first)
     items: List[Tuple[str, Dict[str, Any]]] = []
     mapped = 0
     skipped_media = 0
@@ -232,9 +296,15 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
         kind = _schema(ch)
         name = ch.get("name") or kind
         if kind == "Clip":
-            if not _same_media(_path_of(ch), want):
+            path = _path_of(ch)
+            if path is None:
                 skipped_media += 1
-                notes.append(f"clip {name}: other media {_path_of(ch)} ignored")
+                notes.append(f"clip {name}: generator/missing media ignored")
+                items.append(_SKIP)
+                continue
+            if not is_source(path):
+                skipped_media += 1
+                notes.append(f"clip {name}: other media {path} ignored")
                 items.append(_SKIP)
                 continue
             avail = _available(ch)
@@ -257,7 +327,9 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
             items.append(("clip", {"vis_in": vis_in - origin, "dur": dur, "name": name, "meta": (ch.get("metadata") or {}).get("matchcut") or {}}))
         elif kind == "Transition":
             tm = (ch.get("metadata") or {}).get("matchcut") or {}
-            tkind = "dip_to_black" if tm.get("kind") == "dip_to_black" else "dissolve"
+            # a dip to black: matchcut's own metadata, else (as in FCPXML) a Custom_Transition that is called one
+            dip = tm.get("kind") == "dip_to_black" or (ch.get("transition_type") == "Custom_Transition" and bool(DIP_NAME.search(str(ch.get("name") or ""))))
+            tkind = "dip_to_black" if dip else "dissolve"
             try:
                 items.append(("tr", {"in": fr(ch.get("in_offset")), "out": fr(ch.get("out_offset")), "kind": tkind}))
             except ValueError:
@@ -274,7 +346,10 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
             notes.append(f"{kind or 'item'} {name} ignored (nested or unsupported item)")
             items.append(_SKIP)
     if not mapped:
-        raise InterchangeError(f"no clip of the OTIO video track references the source footage {want}" if skipped_media else "OTIO video track has no usable clips")
+        raise InterchangeError(f"no clip of the OTIO video track references the source footage {want}" if skipped_media and want
+                               else "OTIO video track has no clip with a media file" if skipped_media else "OTIO video track has no usable clips")
+    if by_name:
+        notes.append(BY_NAME_NOTE.format(want=want))
     for origin, n in sorted(offsets.items()):
         notes.append(f"source start timecode of {origin} frames subtracted from the source times of {n} clip{'s' if n != 1 else ''}")
     # a transition only means something between two mapped clips

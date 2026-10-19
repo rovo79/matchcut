@@ -10,8 +10,9 @@ Needs DaVinci Resolve Studio running, with Preferences > System > General > Exte
 Not run against a live Resolve by matchcut's authors (human gate, see docs/M2A-ACCEPTANCE.md). Assumptions this script cannot check, all UNVERIFIED:
   * start timecode: matchcut writes the record side of every export from 00:00:00:00 (START_TC below). It is assumed that the
     imported timeline starts there, so that marker frame ids are record frames counted from the timeline start and the playhead
-    timecode is START_TC + the junction's record frame. Resolve's own default start timecode is often 01:00:00:00: if the
-    markers or the playhead land elsewhere, set the timeline's start timecode to START_TC (Timeline Settings) or edit START_TC and NAVIGATE_TC.
+    timecode is START_TC + the junction's record frame (computed when the script runs). Resolve's own default start timecode is often
+    01:00:00:00: if the markers or the playhead land elsewhere, set the timeline's start timecode to START_TC (Timeline Settings) or
+    edit START_TC to the timeline's start timecode and run the script again.
   * media conform: the files carry source times in the media's embedded start timecode. It is assumed that Resolve relinks the
     camera media by path and conforms it from that timecode.
   * AddMarker returns False when a marker already sits on that frame (Resolve may bring matchcut's own OTIO markers along). The script
@@ -26,8 +27,40 @@ TIMELINE_NAME = 'demo - final'
 START_TC = '00:00:00:00'        # the start timecode matchcut wrote for the timeline (unverified in Resolve)
 JUNCTIONS = {'s0-s1': 50, 's1-s3': 65, 's3-s6': 114, 's6-s7': 155}   # junction id -> record frame of the cut point (frames from the timeline start)
 NOTES = {'s0-s1': ('J1 s0->s1', 'no pass changed this junction'), 's1-s3': ('J2 s1->s3', 'transitions: beat b1 -> b2: dissolve 0.30s'), 's3-s6': ('J3 s3->s6', 'transitions: beat b2 -> b3: dissolve 0.75s'), 's6-s7': ('J4 s6->s7', 'no pass changed this junction')}           # junction id -> (marker name, note)
-NAVIGATE_TO = 's1-s3'
-NAVIGATE_TC = '00:00:02:15'
+NAVIGATE_TO = 's1-s3'       # the junction the playhead goes to ("" = the start of the timeline)
+RATE = (25, 1)             # the frame rate as (numerator, denominator)
+
+
+def nominal():
+    return max(1, int(round(RATE[0] / float(RATE[1]))))
+
+
+def is_drop_rate():
+    return RATE[1] == 1001 and RATE[0] in (30000, 60000)
+
+
+def timecode_to_frames(text):
+    """HH:MM:SS:FF (HH:MM:SS;FF for drop-frame) -> (frame count, drop-frame)."""
+    parts = text.strip().replace(";", ":").replace(",", ":").replace(".", ":").split(":")
+    h, m, s, f = [int(x) for x in parts]
+    drop = is_drop_rate() and any(c in text for c in ";,")
+    n = nominal()
+    total = ((h * 60 + m) * 60 + s) * n + f
+    if drop:
+        minutes = 60 * h + m
+        total -= (2 if n == 30 else 4) * (minutes - minutes // 10)
+    return total, drop
+
+
+def frames_to_timecode(frames, drop):
+    n = nominal()
+    if drop:  # put back the frame numbers drop-frame timecode skips
+        d = 2 if n == 30 else 4
+        per_minute, per_ten = n * 60 - d, n * 600 - 9 * d
+        tens, rest = divmod(frames, per_ten)
+        frames += 9 * d * tens + (d * ((rest - d) // per_minute) if rest >= d else 0)
+    seconds, f = divmod(frames, n)
+    return "%02d:%02d:%02d%s%0*d" % (seconds // 3600, seconds // 60 % 60, seconds % 60, ";" if drop else ":", max(2, len(str(n - 1))), f)
 
 
 def load_api():
@@ -76,10 +109,18 @@ def main():
     print("%d of %d junctions carry their id as marker customData" % (len(JUNCTIONS) - len(missing), len(JUNCTIONS))
           + ("; without it: " + ", ".join(missing) if missing else ""))
     problems = ["%d junctions have no marker with their id" % len(missing)] if missing else []
-    if timeline.SetCurrentTimecode(NAVIGATE_TC):
-        print("playhead at %s (%s)" % (NAVIGATE_TC, ("junction " + NAVIGATE_TO) if NAVIGATE_TO else "start of the timeline"))
+    # the playhead timecode is START_TC + the junction's record frame, worked out here so that editing START_TC moves it
+    try:
+        start, drop = timecode_to_frames(START_TC)
+    except ValueError:
+        sys.exit("START_TC %r is not a timecode: use HH:MM:SS:FF" % START_TC)
+    frame = JUNCTIONS[NAVIGATE_TO] if NAVIGATE_TO else 0
+    navigate_tc = frames_to_timecode(start + frame, drop)
+    if timeline.SetCurrentTimecode(navigate_tc):
+        print("playhead at %s (%s)" % (navigate_tc, ("junction " + NAVIGATE_TO) if NAVIGATE_TO else "start of the timeline"))
     else:
-        print("could not set the playhead to %s: the imported timeline may not start at %s: set START_TC" % (NAVIGATE_TC, START_TC))
+        print("could not set the playhead to %s (START_TC %s + the junction's record frame %d): if the imported timeline starts elsewhere, "
+              "edit START_TC at the top of this script to the timeline's start timecode and run it again" % (navigate_tc, START_TC, frame))
         problems.append("playhead not set")
     if problems:
         sys.exit("; ".join(problems))

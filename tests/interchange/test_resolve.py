@@ -15,7 +15,7 @@ from fractions import Fraction
 import pytest
 
 from matchcut.interchange import InterchangeError, resolve
-from matchcut.interchange.common import junction_ids, layout, truncate
+from matchcut.interchange.common import junction_ids, layout, parse_timecode, truncate
 from matchcut.interchange.edl import _tc
 from matchcut.pipeline import cli
 
@@ -215,23 +215,58 @@ def test_the_script_states_what_it_needs_and_assumes(world):
     assert "lossless" not in text.lower()
 
 
-def test_the_playhead_timecode_follows_the_start_timecode():
+def playhead(text: str, tmp_path, monkeypatch) -> str:
+    """The timecode the generated script gives SetCurrentTimecode when it runs against the fake Resolve."""
+    script = tmp_path / "playhead.py"
+    script.write_text(text)
+    calls = run_against_fake(script, monkeypatch)
+    (tc,) = [c[1] for c in calls if c[0] == "SetCurrentTimecode"]
+    return tc
+
+
+def test_the_playhead_timecode_follows_the_start_timecode(tmp_path, monkeypatch):
     frames = {"s1-s2": 100, "s2-s3": 250}
     rate = Fraction(25)
-    assert resolve.resolve_script("/x/a.otio", "t", frames, "s2-s3", rate=rate).count("NAVIGATE_TC = '00:00:10:00'") == 1
-    assert "NAVIGATE_TC = '01:00:10:00'" in resolve.resolve_script("/x/a.otio", "t", frames, "s2-s3", start_tc="01:00:00:00", rate=rate)
-    assert "NAVIGATE_TC = '00:00:04:00'" in resolve.resolve_script("/x/a.otio", "t", frames, "s1-s2", rate=rate)
+    gen = lambda nav, **kw: resolve.resolve_script("/x/a.otio", "t", frames, nav, rate=rate, **kw)  # noqa: E731
+    assert playhead(gen("s2-s3"), tmp_path, monkeypatch) == "00:00:10:00"
+    assert playhead(gen("s2-s3", start_tc="01:00:00:00"), tmp_path, monkeypatch) == "01:00:10:00"
+    assert playhead(gen("s1-s2"), tmp_path, monkeypatch) == "00:00:04:00"
+    assert "NAVIGATE_TC" not in gen("s1-s2")  # worked out when the script runs, not baked in
     # marker frame ids stay record frames: the playhead alone follows the start timecode
-    assert "'s2-s3': 250" in resolve.resolve_script("/x/a.otio", "t", frames, "s2-s3", start_tc="01:00:00:00", rate=rate)
+    assert "'s2-s3': 250" in gen("s2-s3", start_tc="01:00:00:00")
     # drop-frame: 01:00:00;00 + 1800 frames at 29.97 is 01:01:00;02
     df = resolve.resolve_script("/x/a.otio", "t", {"a-b": 1800}, "a-b", start_tc="01:00:00;00", rate=Fraction(30000, 1001))
-    assert "NAVIGATE_TC = '01:01:00;02'" in df
+    assert playhead(df, tmp_path, monkeypatch) == "01:01:00;02"
+    # the formatter in the script is the exporters': same text for a spread of frames at every kind of rate
+    for r, start in ((Fraction(24000, 1001), "00:00:00:00"), (Fraction(30000, 1001), "01:00:00;00"), (Fraction(60000, 1001), "00:00:00;00"),
+                     (Fraction(24), "10:00:00:00"), (Fraction(25), "00:59:59:24")):
+        for frame in (0, 1, 1799, 1800, 17981, 17982, 107892, 215785):
+            text = resolve.resolve_script("/x/a.otio", "t", {"j": frame}, "j", start_tc=start, rate=r)
+            base, drop = parse_timecode(start, r)
+            assert playhead(text, tmp_path, monkeypatch) == _tc(base + frame, r, drop), (r, start, frame)
 
 
-def test_a_cut_without_junctions_parks_the_playhead_at_the_start():
+def test_editing_start_tc_in_the_script_moves_the_playhead(world, tmp_path, monkeypatch):
+    """The playhead hint says "edit START_TC": it used to change nothing, because NAVIGATE_TC was written into the script (final review T5-a)."""
+    frames, notes, ids, _ = final_inputs(world)
+    text = resolve.resolve_script("/x/final.otio", "t", frames, ids[1], rate=world.src.rate, notes=notes)
+    assert "START_TC = '00:00:00:00'" in text
+    base = playhead(text, tmp_path, monkeypatch)
+    assert base == _tc(frames[ids[1]], world.src.rate)
+    moved = playhead(text.replace("START_TC = '00:00:00:00'", "START_TC = '01:00:00:00'"), tmp_path, monkeypatch)
+    assert moved == _tc(frames[ids[1]] + 3600 * 25, world.src.rate) and moved.startswith("01:")
+    # a START_TC that is no timecode is one line and no call to Resolve for the playhead
+    bad = tmp_path / "bad.py"
+    bad.write_text(text.replace("START_TC = '00:00:00:00'", "START_TC = 'one o clock'"))
+    code, calls = run_script(bad, monkeypatch)
+    assert code == "START_TC 'one o clock' is not a timecode: use HH:MM:SS:FF" and not any(c[0] == "SetCurrentTimecode" for c in calls)
+
+
+def test_a_cut_without_junctions_parks_the_playhead_at_the_start(tmp_path, monkeypatch):
     text = resolve.resolve_script("/x/a.otio", "t", {}, "", start_tc="01:00:00:00", rate=Fraction(24))
-    assert "NAVIGATE_TC = '01:00:00:00'" in text and "JUNCTIONS = {}" in text
+    assert "JUNCTIONS = {}" in text
     compile(text, "s", "exec")
+    assert playhead(text, tmp_path, monkeypatch) == "01:00:00:00"
 
 
 def test_odd_names_stay_one_literal_each(tmp_path, monkeypatch):
@@ -317,7 +352,8 @@ def test_a_failed_playhead_prints_the_start_timecode_hint_and_exits(world, tmp_p
     code, calls = run_script(script, monkeypatch, Behaviour(timecode_fails=True))
     out = capsys.readouterr().out
     assert code == "playhead not set" and "playhead at" not in out
-    assert "could not set the playhead to " in out and "the imported timeline may not start at 01:00:00:00: set START_TC" in out
+    assert "could not set the playhead to " in out and "edit START_TC at the top of this script to the timeline's start timecode and run it again" in out
+    assert "START_TC 01:00:00:00 + the junction's record frame" in out
     assert calls[-1][0] == "SetCurrentTimecode"
 
 

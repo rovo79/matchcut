@@ -635,3 +635,52 @@ def test_a_stage_without_clips_cannot_be_exported():
         export_fcpxml([("final", synthetic(), []), ("draft", empty, [])], fake_src(), None, None, "x")
     with pytest.raises(InterchangeError, match="^stage final has no clips to export$"):
         export_otio(empty, "final", fake_src(), [])
+
+
+# -- the source footage: its exact path first, the same file name only when no clip has it (final review T2-a) -------------
+def with_same_name_elsewhere(xml: str, n: int = 1, path: str = "file:///card2/media.mp4") -> str:
+    """``n`` clips of a file called like the footage, from another folder, lead the spine."""
+    root = ET.fromstring(xml)
+    ET.SubElement(root.find("resources"), "asset", id="r51", name="media", hasVideo="1").append(ET.Element("media-rep", src=path))
+    spine = root.find(".//spine")
+    for i in range(n):
+        spine.insert(0, ET.Element("asset-clip", ref="r51", name=f"card2 {i}", offset="0s", start="500s", duration="1s"))
+    return ET.tostring(root, encoding="unicode")
+
+
+def test_the_exact_path_beats_a_clip_of_the_same_file_name_in_another_folder():
+    tl = synthetic()
+    for xml in (with_same_name_elsewhere(fx(tl), 2), strip_metadata(with_same_name_elsewhere(fx(tl), 2))):
+        for src in (fake_src(), None):
+            back, notes = import_fcpxml(xml, "final", None, src)
+            assert [c.shot_index for c in back.clips] == [0, 1, 2]
+            check_equivalent(tl, back, RATE24)
+            assert [n for n in notes if "other media" in n] == [f"clip card2 {i}: other media /card2/media.mp4 ignored" for i in (1, 0)]
+            assert not any("file name" in n for n in notes)
+
+
+def test_without_an_exact_path_the_same_file_name_is_the_source_and_the_note_says_so():
+    tl = synthetic()
+    xml = fx(tl).replace("file:///x/media.mp4", "file:///moved/media.mp4")
+    back, notes = import_fcpxml(xml, "final", None, fake_src())
+    assert len(back.clips) == 3 and notes == ["no clip references /x/media.mp4: the clips whose file name is the same were taken for the source footage"]
+    with pytest.raises(InterchangeError, match="^no clip of the FCPXML spine references the source footage /x/media.mp4$"):
+        import_fcpxml(fx(tl).replace("file:///x/media.mp4", "file:///moved/other.mp4"), "final", None, fake_src())
+
+
+def test_media_of_one_rate_in_a_sequence_of_another_is_read_at_the_media_rate_and_noted():
+    """25 fps media in a 24 fps sequence, untouched: asset times are seconds, converted at the media's rate (final review M5)."""
+    src25 = fake_src(Fraction(25))
+    tl = synthetic()
+    xml25 = fx(tl, src=src25)
+    base, base_notes = import_fcpxml(xml25, "final", None, src25)
+    assert base_notes == []
+    xml = xml25.replace('frameDuration="1/25s"', 'frameDuration="1/24s"')
+    assert xml != xml25
+    back, notes = import_fcpxml(xml, "final", None, src25)
+    assert notes == ["the sequence runs at 24 fps and the media at 25 fps: times were converted at the media's rate"]
+    assert [(c.shot_index, c.source_in, c.source_out, c.transition_in.kind, c.transition_in.duration) for c in back.clips] == \
+        [(c.shot_index, c.source_in, c.source_out, c.transition_in.kind, c.transition_in.duration) for c in base.clips]
+    check_equivalent(base, back, Fraction(25))
+    # without the media (no workspace) the sequence's own rate is the grid, as before
+    assert import_fcpxml(xml, "final")[1] == []

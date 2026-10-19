@@ -33,18 +33,21 @@ from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 
 from . import InterchangeError, fidelity, resolve
-from .common import LaidClip, SourceInfo, clip_key, export_timeline, junction_ids, layout, plain, source_info, truncate
-from .edl import export_edl, import_edl
-from .fcpxml import export_fcpxml, fcpxml_stages, import_fcpxml
+from .common import LaidClip, SourceInfo, clip_key, export_timeline, is_drop_rate, junction_ids, layout, plain, source_info, truncate
+from .edl import export_edl, import_edl, placement_errors as edl_placement, stage_fingerprint as edl_fingerprint
+from .fcpxml import export_fcpxml, fcpxml_stages, import_fcpxml, placement_errors as fcpxml_placement, stage_fingerprint as fcpxml_fingerprint
 from .fidelity import FORMATS, FidelityResult
-from .otio import export_otio, import_otio
+from .otio import export_otio, import_otio, placement_errors as otio_placement, stage_fingerprint as otio_fingerprint
 from .provenance import write_provenance
 
 HUMAN = "human"
 DEFAULT_STAGES: Tuple[str, ...] = ("roughcut", "final")
 RESOLVE_SCRIPT = "open_in_resolve.py"
+SNAPSHOT_DIR = ".stages"  # <exports>/.stages/<stage>-<first 12 hex of the stage file's sha256>.json: the stage as it was exported
 IMPORT_SCHEMA = "matchcut.human_import/1"
-_EXTENSIONS = {".otio": "otio", ".fcpxml": "fcpxml", ".xml": "fcpxml", ".edl": "edl"}
+_PLACEMENT_NOTE = re.compile(r"^(gap\b|event \S+ starts \d+ frames before)")  # the readers' notes about a gap or an overlap on the record side
+_EXTENSIONS = {".otio": "otio", ".fcpxml": "fcpxml", ".fcpxmld": "fcpxml", ".xml": "fcpxml", ".edl": "edl"}
+BUNDLE_FILE = "Info.fcpxml"  # inside a Final Cut Pro .fcpxmld bundle (a directory)
 
 
 @dataclass
@@ -97,6 +100,10 @@ def _music(cfg: PipelineConfig) -> Tuple[Optional[MusicConfig], Optional[SourceI
     return cfg.music, source_info(cfg.music.path, audio_only=True)
 
 
+def _fps(rate: Fraction) -> str:
+    return f"{float(rate):.3f}".rstrip("0").rstrip(".")
+
+
 def _unique(items: Sequence[str]) -> List[str]:
     return list(dict.fromkeys(items))
 
@@ -124,6 +131,36 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
         return doc if isinstance(doc, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def _snapshot_name(stage: str, sha: str) -> str:
+    return f"{stage}-{sha[:12]}.json"
+
+
+def _save_snapshot(out: Path, stage: str, data: bytes) -> None:
+    """Keep a copy of the stage file as exported in ``<out>/.stages`` (atomically; matchcut never deletes it): an editor's file made from this
+    version of the stage is diffed against the copy even after the pipeline has run again."""
+    target = out / SNAPSHOT_DIR / _snapshot_name(stage, hashlib.sha256(data).hexdigest())
+    try:
+        if target.exists() and target.read_bytes() == data:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
+    except OSError as exc:
+        raise InterchangeError(f"cannot write {target}: {exc.strerror or exc}") from exc
+
+
+def _find_snapshot(ws: Path, imported: Path, stage: str, sha: str) -> Optional[Path]:
+    """The snapshot of ``stage`` as exported (``sha``): in the workspace's ``exports/.stages``, else in ``.stages`` next to the imported file
+    (an export made with ``--out DIR`` keeps its snapshots in ``DIR/.stages``).  A copy whose content does not hash to ``sha`` is not used."""
+    name = _snapshot_name(stage, sha)
+    for folder in (ws / "exports", imported.resolve().parent):
+        candidate = folder / SNAPSHOT_DIR / name
+        if _sha256(candidate) == sha:
+            return candidate
+    return None
 
 
 def _record_files(out: Path, stage: str, fmt: Optional[str] = None) -> List[str]:
@@ -253,8 +290,22 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
     if music is not None and music.only:
         notes.append("music.only: the source audio is muted in the render, so the exports mute it (OTIO track A1 disabled, FCPXML srcEnable=video, "
                      f"EDL V events); the music file itself is carried by OTIO and FCPXML only ({Path(music.path).name})")
+    for fps in _unique([f"{by_stage[s].fps:g}" for s in stages if abs(by_stage[s].fps - float(src.rate)) > 1e-3 * float(src.rate)]):
+        # the pipeline reads avg_frame_rate, the exports r_frame_rate (the container's base rate): they differ for some streams (raw H.264, variable rate)
+        notes.append(f"frame rate: ffprobe reports {_fps(src.rate)} fps (r_frame_rate) but the pipeline cut at {fps} fps (avg_frame_rate): "
+                     f"the exports are written at {_fps(src.rate)} fps, so a timecode base or frame count may not match the pipeline's")
     scorer = scorer_for_workspace(ws, cfg)
     junctions: Dict[str, List[Junction]] = {s: build_junctions(canonical, scorer, upto=s) for s in stages}
+    # the stage files as they are now: their hash is the fingerprint every export carries, and a copy of each is kept (see _save_snapshot)
+    stage_bytes: Dict[str, bytes] = {}
+    for s in stages:
+        try:
+            stage_bytes[s] = stage_files[s].read_bytes()
+        except OSError as exc:
+            raise InterchangeError(f"cannot read stage {s} ({stage_files[s]}): {exc.strerror or exc}") from exc
+    fingerprint = {s: hashlib.sha256(b).hexdigest() for s, b in stage_bytes.items()}
+    for s in stages:
+        _save_snapshot(out, s, stage_bytes[s])
     snapped: Dict[str, Timeline] = {}
     for s in stages:
         snapped[s], moved = export_timeline(by_stage[s], bounds, src)
@@ -265,21 +316,21 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
     texts: Dict[Tuple[str, str], str] = {}
     if "otio" in formats:
         for s in stages:
-            doc = export_otio(snapped[s], s, src, junctions[s], music, music_src)
+            doc = export_otio(snapped[s], s, src, junctions[s], music, music_src, fingerprint[s])
             path = out / f"{s}.otio"
             _atomic_write(path, json.dumps(doc, indent=1) + "\n")
             files.append(path)
             texts[(s, "otio")] = path.read_text(encoding="utf-8")
     if "fcpxml" in formats:
         path = out / "matchcut.fcpxml"
-        _atomic_write(path, export_fcpxml([(s, snapped[s], junctions[s]) for s in stages], src, music, music_src, name=stem))
+        _atomic_write(path, export_fcpxml([(s, snapped[s], junctions[s]) for s in stages], src, music, music_src, name=stem, stage_sha256=fingerprint))
         files.append(path)
         for s in stages:
             texts[(s, "fcpxml")] = path.read_text(encoding="utf-8")
     if "edl" in formats:
         for s in stages:
             path = out / f"{s}.edl"
-            _atomic_write(path, export_edl(snapped[s], s, src, f"{stem} - {s}", music))
+            _atomic_write(path, export_edl(snapped[s], s, src, f"{stem} - {s}", music, fingerprint[s]))
             files.append(path)
             texts[(s, "edl")] = path.read_text(encoding="utf-8")
     # open_in_resolve.py is derived output: with the flag it is written for the final stage (else the last exported); without it an existing
@@ -295,7 +346,7 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
         else:
             notes.append(f"{RESOLVE_SCRIPT} regenerated for the new {pick}.otio")
     prov = out / "provenance.json"
-    hashes = {s: _sha256(stage_files[s]) for s in by_stage}
+    hashes = {s: fingerprint.get(s) or _sha256(stage_files[s]) for s in by_stage}  # an exported stage: the hash its files carry
     old_prov, old_fidelity = _read_json(prov), _read_json(out / "fidelity.json")
     doc = write_provenance(prov, [(s, by_stage[s]) for s in stages], junctions, src)
     kept, stale_prov = _merge_provenance(prov, doc, old_prov, [s for s, _ in canonical], hashes, stages)
@@ -305,18 +356,25 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
     for s in stages:
         for fmt in formats:
             try:
+                rows = layout(snapped[s], src.rate)
                 if fmt == "otio":
-                    back, _ = import_otio(json.loads(texts[(s, fmt)]), bounds, src)
+                    doc_back = json.loads(texts[(s, fmt)])
+                    back, rnotes = import_otio(doc_back, bounds, src)
+                    where = otio_placement(doc_back, rows, src.rate)
                 elif fmt == "fcpxml":
-                    back, _ = import_fcpxml(texts[(s, fmt)], s, bounds, src)
+                    back, rnotes = import_fcpxml(texts[(s, fmt)], s, bounds, src)
+                    where = fcpxml_placement(texts[(s, fmt)], s, rows, src.rate)
                 else:
-                    back, _ = import_edl(texts[(s, fmt)], src.rate, src.path, bounds, src)
+                    back, rnotes = import_edl(texts[(s, fmt)], src.rate, src.path, bounds, src)
+                    where = edl_placement(texts[(s, fmt)], rows, src.rate)
+                # matchcut's own file has no gap and no overlap: a reader note about one is a placement error
+                where = [f"the file reads back with a {n}" for n in rnotes if _PLACEMENT_NOTE.match(n)] + where
             except InterchangeError as exc:
                 bad = FidelityResult(fmt, s, errors=[f"the file cannot be read back: {exc}"])
-                bad.lost = list(fidelity.KNOWN[fmt]["lost"])
+                bad.lost = fidelity.known(fmt)["lost"]
                 results.append(bad)
                 continue
-            res = fidelity.check(by_stage[s], back, fmt, src.rate, snapped[s])
+            res = fidelity.check(by_stage[s], back, fmt, src.rate, snapped[s], drop_frame=bool(src.start_tc_drop and is_drop_rate(src.rate)), placement=where)
             res.stage = s
             results.append(res)
     for r in results:
@@ -533,7 +591,10 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     ws, path = Path(ws), Path(path)
     fmt = _format_of(path, fmt)
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # a .fcpxmld is a bundle (a directory) with the document inside
+        text = (path / BUNDLE_FILE if fmt == "fcpxml" and path.is_dir() else path).read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError as exc:
+        raise InterchangeError(f"cannot read {path}: " + (f"no {BUNDLE_FILE} inside" if path.is_dir() else (exc.strerror or str(exc)))) from exc
     except OSError as exc:
         raise InterchangeError(f"cannot read {path}: {exc.strerror or exc}") from exc
     canonical = _canonical(ws)
@@ -552,6 +613,7 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         notes.append("no shots.json: clips without a shot could not be placed by their source range")
     # read the file
     claimed = ""
+    fingerprint = ""  # the sha256 of the stage file the editor's file was exported from, when it says
     if fmt == "fcpxml":
         keys = fcpxml_stages(text)
         known = [k for k in keys if k in names]
@@ -562,17 +624,20 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
             notes.append(f"the file has projects for {', '.join(keys)}; read the {pick or keys[0]} one" + ("" if stage else " (--stage reads another)"))
         edited, inotes = import_fcpxml(text, pick, bounds, src)
         claimed = pick if pick in names else ""
+        fingerprint = fcpxml_fingerprint(text, pick)
     elif fmt == "otio":
         try:
             doc = json.loads(text)
         except ValueError as exc:
             raise InterchangeError(f"invalid OTIO document: {exc}".splitlines()[0]) from exc
         edited, inotes = import_otio(doc, bounds, src)
+        fingerprint = otio_fingerprint(doc)
         claimed = edited.stage if edited.stage in names else _name_stage(edited.name, names)
         if edited.stage and edited.stage not in names:
             notes.append(f"the file says it was exported from stage {edited.stage}, which this workspace does not have")
     else:
         edited, inotes = import_edl(text, src.rate, src.path, bounds, src)
+        fingerprint = edl_fingerprint(text)
         claimed = edited.stage if edited.stage in names else _name_stage(edited.name, names)
         if edited.stage and edited.stage not in names:
             notes.append(f"the file says it was exported from stage {edited.stage}, which this workspace does not have")
@@ -590,6 +655,24 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         raise InterchangeError(f"no stage final in {ws}: name the stage the file was exported from (--stage)")
     canon = dict(canonical)[chosen]
     latest_name, latest = canonical[-1]
+    stage_files = dict(stage_timeline_paths(ws))
+    stage_path, latest_path = stage_files[chosen], stage_files[latest_name]
+    stage_hash = _sha256(stage_path)
+    base_snapshot: Optional[Path] = None
+    if fingerprint and claimed == chosen:  # (a stage chosen against the file's word has no fingerprint to check)
+        if fingerprint != stage_hash:  # the pipeline ran again since the export: diff against the stage as it was exported
+            base_snapshot = _find_snapshot(ws, path, chosen, fingerprint)
+            if base_snapshot is None:
+                raise InterchangeError(f"{path.name} was exported from an earlier {chosen} (sha {fingerprint[:12]}) and its snapshot "
+                                       f"exports/{SNAPSHOT_DIR}/{_snapshot_name(chosen, fingerprint)} is missing: re-export and redo the edit, or restore the snapshot")
+            try:
+                canon = Timeline.load(base_snapshot)
+            except Exception as exc:
+                raise InterchangeError(f"cannot read the snapshot {base_snapshot}: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from exc
+            notes.append(f"{path.name} was exported from an earlier {chosen}: the editor's changes were diffed against that version; "
+                         f"junction histories compare the human stage with the current {chosen}")
+    elif not fingerprint:
+        notes.append(f"{path.name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions")
     snapped, _ = export_timeline(canon, bounds, src)
     human, diff = _build(canon, snapped, edited, src.rate, latest)
     if diff.by_range:
@@ -601,15 +684,16 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     previous = stale_human(ws)
     if previous:
         notes.append(f"{previous}; this import replaces it")
-    stage_files = dict(stage_timeline_paths(ws))
-    stage_path, latest_path = stage_files[chosen], stage_files[latest_name]
     record = {
         "schema": IMPORT_SCHEMA, "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "source_file": str(path.resolve()),
-        "format": fmt, "stage": chosen, "stage_file": stage_path.name, "stage_sha256": _sha256(stage_path),
+        "format": fmt, "stage": chosen, "stage_file": stage_path.name, "stage_sha256": stage_hash,
         # the stage whose history the human history copies: a change to either file makes the human stage stale (junctions.stale_human)
         "latest_stage": latest_name, "latest_stage_file": latest_path.name, "latest_stage_sha256": _sha256(latest_path),
         "decisions": len(diff.decisions), "notes": notes,
     }
+    if base_snapshot is not None:  # the file was diffed against this earlier version of `stage`; stage_sha256 above is the CURRENT stage file
+        record["base_snapshot"] = str(base_snapshot)
+        record["base_snapshot_sha256"] = fingerprint
     human_path = ws / "human.json"
     _atomic_write(human_path, json.dumps(human.to_dict(), indent=2))
     _atomic_write(ws / "human_import.json", json.dumps(record, indent=2) + "\n")

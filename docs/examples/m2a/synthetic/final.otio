@@ -11,7 +11,8 @@
    "fade_in": 0.8,
    "fade_out": 0.3,
    "provenance_file": "provenance.json",
-   "matchcut_version": "dev"
+   "matchcut_version": "dev",
+   "stage_sha256": "91f151f8efa00133829b2f598bc8297a277cb77ded4de18417319ac26de7efdf"
   }
  },
  "name": "demo - final",
@@ -231,7 +232,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -289,7 +290,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -369,7 +370,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -449,7 +450,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -507,7 +508,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -578,7 +579,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -636,7 +637,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -716,7 +717,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -796,7 +797,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }
@@ -854,7 +855,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792405540366029893
+          "mtime_ns": 1792411958702411417
          }
         }
        }

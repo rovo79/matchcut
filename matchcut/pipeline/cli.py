@@ -92,7 +92,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     sp.add_argument("--resolve-script", action="store_true", help="also write open_in_resolve.py, a script for DaVinci Resolve Studio that imports the final OTIO and marks the junctions (never run by matchcut)")
     sp = sub.add_parser("import", help="read an editor's re-export back as the workspace's human stage")
     sp.add_argument("workspace")
-    sp.add_argument("file", help="the .otio, .fcpxml or .edl file the editor saved")
+    sp.add_argument("file", help="the .otio, .fcpxml (or .fcpxmld bundle) or .edl file the editor saved")
     sp.add_argument("--format", default=None, help="otio, fcpxml or edl (default: from the extension)")
     sp.add_argument("--stage", default=None, help="the stage the file was exported from (default: what the file says, else final)")
     return parser.parse_args(argv)

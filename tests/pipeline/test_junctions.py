@@ -128,7 +128,7 @@ def test_a_human_stage_is_listed_last_until_either_stage_file_it_was_built_from_
     kept = (tmp_path / "human.json").read_bytes()
     # the latest stage (the one whose history it copies) changes, the compared one does not
     tl("final", [clip("c001", 0, 0, 2.5), clip("c002", 1, 4, 6)]).save(tmp_path / "final.json")
-    assert stale_human(tmp_path) == "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    assert stale_human(tmp_path) == "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
     assert [s for s, _ in stage_timeline_paths(tmp_path)][-1] == "final" and [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
     assert (tmp_path / "human.json").read_bytes() == kept  # left out, never deleted
     # the compared stage changes
@@ -150,7 +150,7 @@ def test_a_human_json_without_a_readable_import_record_is_stale(tmp_path):
             (tmp_path / "human_import.json").unlink()
         else:
             (tmp_path / "human_import.json").write_text(text)
-        assert stale_human(tmp_path) == "human.json is stale: human_import.json is missing or unreadable (re-import the editor's file to see it)", text
+        assert stale_human(tmp_path) == "human.json is stale: human_import.json is missing or unreadable (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)", text
         assert [s for s, _ in load_stage_timelines(tmp_path)] == ["roughcut", "pacing", "final"]
 
 

@@ -78,11 +78,12 @@ def write_edited_files(wsx, ed: Timeline, tmp: Path, rename: bool = True) -> dic
             c.id = f"x{k + 1:03d}"
     jb = w.jb["final"]
     otio = tmp / "edited.otio"
-    otio.write_text(json.dumps(export_otio(ed, "final", w.src, jb)))
+    fp = sha(wsx.ws / "final.json")  # like every export of matchcut: the file says which version of the stage it was made from
+    otio.write_text(json.dumps(export_otio(ed, "final", w.src, jb, stage_sha256=fp)))
     fcp = tmp / "edited.fcpxml"
-    fcp.write_text(export_fcpxml([("final", ed, jb)], w.src))
+    fcp.write_text(export_fcpxml([("final", ed, jb)], w.src, stage_sha256={"final": fp}))
     edl = tmp / "edited.edl"
-    edl.write_text(export_edl(ed, "final", w.src, "demo - final"))
+    edl.write_text(export_edl(ed, "final", w.src, "demo - final", stage_sha256=fp))
     return {"otio": otio, "fcpxml": fcp, "edl": edl}
 
 
@@ -91,8 +92,8 @@ def test_export_of_the_mock_workspace_writes_every_file_and_report(wsx):
     res = export_workspace(wsx.ws, wsx.cfg)
     out = wsx.ws / "exports"
     names = sorted(p.name for p in out.iterdir())
-    assert names == ["fidelity.json", "fidelity.md", "final.edl", "final.otio", "matchcut.fcpxml", "provenance.json", "roughcut.edl", "roughcut.otio"]
-    assert isinstance(res, ExportResult) and sorted(p.name for p in res.files) == names and all(p.parent == out for p in res.files)
+    assert names == [".stages", "fidelity.json", "fidelity.md", "final.edl", "final.otio", "matchcut.fcpxml", "provenance.json", "roughcut.edl", "roughcut.otio"]
+    assert isinstance(res, ExportResult) and sorted(p.name for p in res.files) == [n for n in names if n != ".stages"] and all(p.parent == out for p in res.files)
     assert [(r.stage, r.fmt) for r in res.results] == [(s, f) for s in ("roughcut", "final") for f in ("otio", "fcpxml", "edl")]
     assert all(r.ok and r.preserved and r.approximated and r.lost for r in res.results)
     report = json.loads((out / "fidelity.json").read_text())
@@ -109,7 +110,7 @@ def test_export_of_the_mock_workspace_writes_every_file_and_report(wsx):
 def test_export_subsets_and_a_different_out_dir(wsx):
     out = wsx.tmp / "elsewhere"
     res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl", "otio"), out_dir=out)
-    assert sorted(p.name for p in out.iterdir()) == ["fidelity.json", "fidelity.md", "final.edl", "final.otio", "provenance.json"]
+    assert sorted(p.name for p in out.iterdir()) == [".stages", "fidelity.json", "fidelity.md", "final.edl", "final.otio", "provenance.json"]
     assert [(r.stage, r.fmt) for r in res.results] == [("final", "otio"), ("final", "edl")]
     assert not (wsx.ws / "exports").exists()
     # a pass stage and the frame snap: the snap is reported, not hidden
@@ -139,8 +140,8 @@ def test_the_human_stage_is_not_exportable(wsx):
 def test_a_failing_validation_writes_the_reports_then_raises(wsx, monkeypatch):
     real = workspace.fidelity.check
 
-    def broken(canonical, back, fmt, rate, exported=None):
-        r = real(canonical, back, fmt, rate, exported)
+    def broken(canonical, back, fmt, rate, exported=None, **kw):
+        r = real(canonical, back, fmt, rate, exported, **kw)
         if fmt == "edl" and r.stage == "final":
             r.errors.append("clip 2 (c002, shot 1): source in 1 != 2 frames")
         return r
@@ -451,7 +452,7 @@ def test_stale_human_stage_is_warned_by_export_and_import(wsx):
     final = json.loads((wsx.ws / "final.json").read_text())
     final["clips"][0]["source_out"] = round(final["clips"][0]["source_out"] - 0.04, 4)
     (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
-    msg = "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    msg = "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
     assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes
     keep = (wsx.ws / "human.json").read_bytes(), (wsx.ws / "human_import.json").read_bytes()
     assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",)).notes
@@ -594,7 +595,7 @@ def test_the_human_stage_is_stale_when_the_latest_stage_whose_history_it_copies_
     final["history"].append({"pass_name": "x", "action": "notes", "clip_ids": [], "detail": "a later run", "score": None, "data": {}})
     (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
     msg = stale_human(wsx.ws)
-    assert msg == "human.json is stale: final.json changed since the import (re-import the editor's file to see it)"
+    assert msg == "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
     assert [s for s, _ in stage_timeline_paths(wsx.ws)][-1] == "final" and [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "final"
     assert (wsx.ws / "human.json").read_bytes() == human_bytes  # never deleted nor rewritten
     assert msg in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("edl",)).notes
@@ -937,3 +938,357 @@ def test_simulate_editor_copes_with_a_cut_without_dissolves(wsx, capsys):
     edited = wsx.tmp / "edited.otio"
     assert load_simulator().main([str(wsx.ws / "exports" / "roughcut.otio"), str(edited)]) == 0
     assert "no transition to turn into a cut" in capsys.readouterr().out
+
+
+# -- the stage fingerprint and its snapshot: re-importing after the pipeline ran again --------------------------------
+def rerun_with_another_target(wsx, seconds: float = 12.0) -> None:
+    """The pipeline run again with another target length: the passes (and so final.json) change, the rough cut stays."""
+    before = sha(wsx.ws / "final.json")
+    cfg = copy.deepcopy(wsx.cfg)
+    cfg.target_duration = seconds
+    Pipeline(cfg).refine()
+    assert sha(wsx.ws / "final.json") != before
+
+
+def test_every_export_records_the_stage_fingerprint_and_a_snapshot_of_the_stage_file(wsx):
+    export_workspace(wsx.ws, wsx.cfg)
+    out = wsx.ws / "exports"
+    for stage in ("roughcut", "final"):
+        digest = sha(wsx.ws / f"{stage}.json")
+        snap = out / ".stages" / f"{stage}-{digest[:12]}.json"
+        assert snap.read_bytes() == (wsx.ws / f"{stage}.json").read_bytes()
+        assert json.loads((out / f"{stage}.otio").read_text())["metadata"]["matchcut"]["stage_sha256"] == digest
+        assert f"* MATCHCUT STAGE_SHA256 {digest}" in (out / f"{stage}.edl").read_text().splitlines()
+        seq = next(p for p in ET.fromstring((out / "matchcut.fcpxml").read_text()).iter("sequence") if f"{stage}" in {m.get("value") for m in p.iter("md")})
+        assert {m.get("key"): m.get("value") for m in seq.iter("md")}["com.matchcut.stage_sha256"] == digest
+    assert not list((out / ".stages").glob("*.tmp")) and len(list((out / ".stages").iterdir())) == 2
+    # a second export of the same stage files writes nothing new; a pipeline re-run adds a snapshot and never removes the old one
+    first = {p.name: p.stat().st_mtime_ns for p in (out / ".stages").iterdir()}
+    export_workspace(wsx.ws, wsx.cfg)
+    assert {p.name: p.stat().st_mtime_ns for p in (out / ".stages").iterdir()} == first
+    rerun_with_another_target(wsx)
+    export_workspace(wsx.ws, wsx.cfg)
+    assert set(first) < {p.name for p in (out / ".stages").iterdir()} and len(list((out / ".stages").iterdir())) == 3
+    # the snapshot is a stage file: it loads
+    assert Timeline.load(out / ".stages" / sorted(first)[0]).clips
+
+
+@pytest.mark.parametrize("fmt", ["otio", "fcpxml", "edl"])
+def test_a_reimport_after_a_pipeline_rerun_gives_exactly_the_editors_decisions(wsx, fmt):
+    final, snapped = final_of(wsx)
+    rate = wsx.world.src.rate
+    export_workspace(wsx.ws, wsx.cfg)
+    old_hash = sha(wsx.ws / "final.json")
+    files = write_edited_files(wsx, editor_timeline(snapped, rate), wsx.tmp)  # fingerprinted with the final.json that was exported
+    expected = expected_edit(snapped, rate)
+    assert summary(import_timeline(wsx.ws, wsx.cfg, files[fmt]).decisions) == expected  # before the re-run
+    rerun_with_another_target(wsx)
+    assert stale_human(wsx.ws) is not None  # the earlier import is stale now
+    res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+    assert summary(res.decisions) == expected, [d.detail for d in res.decisions]  # not one pipeline change among them
+    note = (f"{files[fmt].name} was exported from an earlier final: the editor's changes were diffed against that version; "
+            "junction histories compare the human stage with the current final")
+    assert note in res.notes and not any("fingerprint" in n for n in res.notes)
+    rec = json.loads((wsx.ws / "human_import.json").read_text())
+    assert rec["base_snapshot"] == str(wsx.ws / "exports" / ".stages" / f"final-{old_hash[:12]}.json") and rec["base_snapshot_sha256"] == old_hash
+    assert rec["stage_sha256"] == sha(wsx.ws / "final.json") and old_hash != rec["stage_sha256"] and note in rec["notes"]
+    # the human stage is not stale at once, is listed after the CURRENT final, and its history continues the current final's
+    assert stale_human(wsx.ws) is None and [s for s, _ in load_stage_timelines(wsx.ws)][-2:] == ["final", "human"]
+    now = Timeline.load(wsx.ws / "final.json")
+    human = Timeline.load(wsx.ws / "human.json")
+    assert [d.to_dict() for d in human.history[: len(now.history)]] == [d.to_dict() for d in now.history]
+    assert [d.action for d in human.history[len(now.history):]] == ["trim", "transition"]
+    # and the editor's file imported without the re-run being involved gives the same human decisions
+    assert [c.id for c in human.clips] == [c.id for c in final.clips]
+
+
+def test_the_reviewers_case_three_editor_changes_then_a_rerun_with_a_longer_target(wsx):
+    """The editor removed a clip, trimmed another and turned a dissolve into a cut; the pipeline then ran with another target."""
+    final, snapped = final_of(wsx)
+    rate = wsx.world.src.rate
+    export_workspace(wsx.ws, wsx.cfg)
+    ed = editor_timeline(snapped, rate)
+    ed.clips = ed.clips[:-1]  # the last clip removed
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    first = import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    assert sorted(d.action for d in first.decisions) == ["removed", "transition", "trim"]
+    rerun_with_another_target(wsx)
+    again = import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    assert summary(again.decisions) == summary(first.decisions)
+    assert not any(d.action == "trim" and d.clip_ids != ["c002"] for d in again.decisions)
+
+
+def test_a_fingerprint_without_its_snapshot_is_a_one_line_error_naming_the_fix(wsx):
+    final, snapped = final_of(wsx)
+    export_workspace(wsx.ws, wsx.cfg)
+    old_hash = sha(wsx.ws / "final.json")
+    files = write_edited_files(wsx, editor_timeline(snapped, wsx.world.src.rate), wsx.tmp)
+    rerun_with_another_target(wsx)
+    snap = wsx.ws / "exports" / ".stages" / f"final-{old_hash[:12]}.json"
+    snap.unlink()
+    before = {p.name: p.read_bytes() for p in wsx.ws.glob("human*.json")}
+    with pytest.raises(InterchangeError) as exc:
+        import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    assert str(exc.value) == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot "
+                              f"exports/.stages/final-{old_hash[:12]}.json is missing: re-export and redo the edit, or restore the snapshot")
+    assert {p.name: p.read_bytes() for p in wsx.ws.glob("human*.json")} == before  # nothing was written
+    # restored: it imports
+    snap.parent.mkdir(exist_ok=True)
+    snap.write_bytes(json.dumps({"x": 1}).encode())  # a copy that is not the exported stage is not used
+    with pytest.raises(InterchangeError, match="snapshot exports/.stages/final-"):
+        import_timeline(wsx.ws, wsx.cfg, files["otio"])
+
+
+def test_the_snapshot_is_found_next_to_the_imported_file_for_an_export_with_out(wsx):
+    final, snapped = final_of(wsx)
+    out = wsx.tmp / "elsewhere"
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",), out_dir=out)
+    doc = json.loads((out / "final.otio").read_text())
+    edited = out / "edited.otio"
+    doc["tracks"]["children"][0]["children"][0]["source_range"]["start_time"]["value"] += 0  # untouched
+    edited.write_text(json.dumps(doc))
+    rerun_with_another_target(wsx)
+    res = import_timeline(wsx.ws, wsx.cfg, edited)
+    assert res.decisions == [] and any("exported from an earlier final" in n for n in res.notes)
+    assert json.loads((wsx.ws / "human_import.json").read_text())["base_snapshot"].startswith(str(out / ".stages"))
+
+
+@pytest.mark.parametrize("fmt", ["otio", "fcpxml", "edl"])
+def test_a_file_without_a_fingerprint_is_read_against_the_current_stage_and_says_so(wsx, fmt):
+    final, snapped = final_of(wsx)
+    files = write_edited_files(wsx, snapped, wsx.tmp, rename=False)
+    text = files[fmt].read_text()
+    if fmt == "otio":
+        doc = json.loads(text)
+        del doc["metadata"]["matchcut"]["stage_sha256"]
+        text = json.dumps(doc)
+    else:
+        text = "".join(l for l in text.splitlines(keepends=True) if "stage_sha256" not in l and "STAGE_SHA256" not in l)
+    assert "stage_sha256" not in text.lower()
+    files[fmt].write_text(text)
+    res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+    assert (f"{files[fmt].name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human "
+            "decisions") in res.notes
+    assert res.decisions == [] and "base_snapshot" not in json.loads((wsx.ws / "human_import.json").read_text())
+    # after a re-run the pipeline's changes do show as decisions, which is what the note says
+    rerun_with_another_target(wsx)
+    assert import_timeline(wsx.ws, wsx.cfg, files[fmt]).decisions
+
+
+def test_a_file_exported_from_the_current_stage_has_no_fingerprint_note(wsx):
+    final, snapped = final_of(wsx)
+    files = write_edited_files(wsx, snapped, wsx.tmp, rename=False)
+    for fmt in files:
+        res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+        assert not any("fingerprint" in n or "earlier" in n for n in res.notes), res.notes
+        assert "base_snapshot" not in json.loads((wsx.ws / "human_import.json").read_text())
+
+
+def foreign_otio(wsx, extra_front=(), extra_back=()) -> Path:
+    """The exported final.otio as Resolve would write it: no matchcut metadata, the picture track only, other clips before and after."""
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((wsx.ws / "exports" / "final.otio").read_text())
+    doc["metadata"] = {"Resolve_OTIO": {}}
+    vt = doc["tracks"]["children"][0]
+    vt["markers"] = []
+    for k in vt["children"]:
+        k["metadata"] = {}
+    vt["children"] = list(extra_front) + vt["children"] + list(extra_back)
+    doc["tracks"]["children"] = [vt]
+    path = wsx.tmp / "foreign.otio"
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def test_a_broll_first_or_generator_clips_in_an_otio_without_matchcut_metadata_add_no_decisions(wsx):
+    from .test_otio import BROLL, GENERATOR, MISSING, external, media_clip
+
+    plain = import_timeline(wsx.ws, wsx.cfg, foreign_otio(wsx))
+    assert plain.decisions == []
+    res = import_timeline(wsx.ws, wsx.cfg, foreign_otio(wsx, [media_clip("broll.mov", external(BROLL))]))
+    assert res.decisions == [] and any("other media /Volumes/Media/broll.mov ignored" in n for n in res.notes)  # foreign/broll_first.otio
+    res = import_timeline(wsx.ws, wsx.cfg, foreign_otio(wsx, [media_clip("Solid Color", dict(GENERATOR))], [media_clip("offline.mov", dict(MISSING))]))
+    assert res.decisions == [], [d.detail for d in res.decisions]  # foreign/resolve_edited.otio's generator and offline clips
+    assert sum("generator/missing media ignored" in n for n in res.notes) == 2
+
+
+def dip_workspace(wsx) -> Timeline:
+    """The workspace copy whose final cut has a dip to black where it had a dissolve (the final review's "x" variant)."""
+    path = wsx.ws / "final.json"
+    doc = json.loads(path.read_text())
+    k = next(i for i, c in enumerate(doc["clips"]) if c["transition_in"]["duration"] > 0)
+    doc["clips"][k]["transition_in"]["kind"] = "dip_to_black"
+    path.write_text(json.dumps(doc, indent=2))
+    return Timeline.load(path)
+
+
+def stripped_files(wsx) -> dict:
+    """The exports of the final stage with every matchcut mark removed, as an application that keeps none would save them."""
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",))
+    doc = json.loads((out / "final.otio").read_text())
+
+    def strip(x):
+        if isinstance(x, dict):
+            x.pop("metadata", None)
+            for v in x.values():
+                strip(v)
+        elif isinstance(x, list):
+            for v in x:
+                strip(v)
+
+    strip(doc)
+    doc["tracks"]["children"] = doc["tracks"]["children"][:1]
+    (wsx.tmp / "s.otio").write_text(json.dumps(doc))
+    root = ET.fromstring((out / "matchcut.fcpxml").read_text())
+    for el in root.iter():
+        for md in el.findall("metadata"):
+            el.remove(md)
+    (wsx.tmp / "s.fcpxml").write_text(ET.tostring(root, encoding="unicode"))
+    (wsx.tmp / "s.edl").write_text("".join(l for l in (out / "final.edl").read_text().splitlines(keepends=True) if "MATCHCUT" not in l))
+    return {"otio": wsx.tmp / "s.otio", "fcpxml": wsx.tmp / "s.fcpxml", "edl": wsx.tmp / "s.edl"}
+
+
+def test_an_untouched_dip_to_black_reads_back_the_same_without_matchcut_metadata_except_in_an_edl(wsx):
+    """Final review M1: OTIO recognises a Custom_Transition called a dip like FCPXML does; an EDL cannot say it (documented)."""
+    tl = dip_workspace(wsx)
+    assert any(c.transition_in.kind == "dip_to_black" for c in tl.clips)
+    files = stripped_files(wsx)
+    assert "matchcut" not in files["otio"].read_text() and "Dip To Black" in files["otio"].read_text()
+    got = {fmt: import_timeline(wsx.ws, wsx.cfg, path, stage="final") for fmt, path in files.items()}
+    assert got["otio"].decisions == [] and got["fcpxml"].decisions == []
+    # an EDL has no way to say "dip": a dissolve, so the transition reads as changed (the documented exception)
+    (edl_decision,) = got["edl"].decisions
+    assert edl_decision.action == "transition" and re.fullmatch(r"human changed transition dip_to_black (\d+)f -> dissolve \1f", edl_decision.detail), edl_decision.detail
+    # with its MATCHCUT TRANSITION comment the same EDL says it
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",))
+    assert import_timeline(wsx.ws, wsx.cfg, wsx.ws / "exports" / "final.edl").decisions == []
+
+
+def test_the_edl_report_says_drop_frame_for_drop_frame_media_and_non_drop_otherwise(wsx, monkeypatch):
+    """Final review M3: the static NON-DROP entry was reported for the drop-frame media whose EDL says FCM: DROP FRAME."""
+    from dataclasses import replace
+
+    from matchcut.interchange.fidelity import EDL_DROP_FRAME, EDL_NON_DROP, KNOWN
+
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    assert EDL_NON_DROP in res.results[0].approximated and EDL_DROP_FRAME not in res.results[0].approximated
+    src = wsx.world.src
+    df = replace(src, rate=Fraction(30000, 1001), duration_frames=int(src.seconds * 29.97), start_tc_frames=107892, start_tc_drop=True)
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: df)
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio", "edl"), out_dir=wsx.tmp / "df")
+    by_fmt = {r.fmt: r for r in res.results}
+    assert "FCM: DROP FRAME" in (wsx.tmp / "df" / "final.edl").read_text()
+    assert EDL_DROP_FRAME in by_fmt["edl"].approximated and EDL_NON_DROP not in by_fmt["edl"].approximated
+    assert [e for e in by_fmt["edl"].approximated if "NON-DROP" in e] == []
+    assert not any("DROP FRAME" in e for e in by_fmt["otio"].approximated)
+    assert EDL_NON_DROP in KNOWN["edl"]["approximated"]  # the table keeps the default entry
+    assert EDL_DROP_FRAME in json.loads((wsx.tmp / "df" / "fidelity.json").read_text())["stages"]["final"]["edl"]["approximated"]
+
+
+def test_an_fcpxmld_bundle_is_read_through_its_info_fcpxml(wsx):
+    """Final Cut Pro's default export since 10.6 is a bundle (a directory ending in .fcpxmld) with Info.fcpxml inside (final review M4)."""
+    final, snapped = final_of(wsx)
+    files = write_edited_files(wsx, editor_timeline(snapped, wsx.world.src.rate), wsx.tmp)
+    bundle = wsx.tmp / "edited.fcpxmld"
+    bundle.mkdir()
+    (bundle / "Info.fcpxml").write_text(files["fcpxml"].read_text())
+    (bundle / "Info.plist").write_text("<plist/>")
+    expected = summary(import_timeline(wsx.ws, wsx.cfg, files["fcpxml"]).decisions)
+    for kwargs in ({}, {"fmt": "fcpxml"}):
+        res = import_timeline(wsx.ws, wsx.cfg, bundle, **kwargs)
+        assert res.fmt == "fcpxml" and summary(res.decisions) == expected
+    assert json.loads((wsx.ws / "human_import.json").read_text())["source_file"] == str(bundle.resolve())
+    # one-line errors: no Info.fcpxml inside, and a directory that is not an FCPXML bundle for another format
+    (bundle / "Info.fcpxml").unlink()
+    with pytest.raises(InterchangeError, match=r"^cannot read .*edited\.fcpxmld: no Info\.fcpxml inside$"):
+        import_timeline(wsx.ws, wsx.cfg, bundle)
+    with pytest.raises(InterchangeError, match=r"^cannot read .*edited\.fcpxmld: ") as exc:
+        import_timeline(wsx.ws, wsx.cfg, bundle, fmt="otio")
+    assert "\n" not in str(exc.value)
+
+
+# -- the gate checks where the clips sit on the record side (final review M2) ---------------------------------------------
+def shift_edl_event(text: str, number: str, frames: int, rate: Fraction) -> str:
+    from matchcut.interchange.edl import _frames, _tc
+
+    lines = text.splitlines()
+    for k, ln in enumerate(lines):
+        if ln.startswith(f"{number} "):
+            tcs = ln.split()[-4:]
+            ri, ro = (_frames(x, rate, False, 0) for x in tcs[2:])
+            lines[k] = ln.replace(tcs[2] + " " + tcs[3], _tc(ri + frames, rate) + " " + _tc(ro + frames, rate))
+    return "\n".join(lines) + "\n"
+
+
+def tamper_fcpxml(xml: str, how: str) -> str:
+    root = ET.fromstring(xml)
+    if how == "offset":
+        clip = [k for k in root.iter("asset-clip") if k.get("lane") is None][2]
+        clip.set("offset", "9999/25s")
+    elif how == "duration":
+        next(root.iter("sequence")).set("duration", "1/25s")
+    elif how == "transition":
+        next(root.iter("transition")).set("offset", "0s")
+    return ET.tostring(root, encoding="unicode")
+
+
+def tamper_otio(doc: dict, how: str) -> dict:
+    a1 = next(t for t in doc["tracks"]["children"] if t["name"] == "A1")
+    if how == "truncate":
+        a1["children"] = a1["children"][:-1]
+    else:  # a clip of the audio mirror one frame short
+        next(k for k in a1["children"] if k["OTIO_SCHEMA"].startswith("Clip"))["source_range"]["duration"]["value"] -= 1
+    return doc
+
+
+@pytest.mark.parametrize("fmt, tamper, match", [
+    ("edl", lambda t, rate: shift_edl_event(t, "003", 10, rate), r"final: .*gap of 10 frames before event 003|event 003: record frames"),
+    ("fcpxml", lambda t, rate: tamper_fcpxml(t, "offset"), r"clip 3 offset"),
+    ("fcpxml", lambda t, rate: tamper_fcpxml(t, "duration"), r"sequence duration"),
+    ("fcpxml", lambda t, rate: tamper_fcpxml(t, "transition"), r"transition into clip \d+ offset"),
+    ("otio", lambda t, rate: json.dumps(tamper_otio(json.loads(t), "truncate")), r"track A1 has \d+ clips for \d+"),
+    ("otio", lambda t, rate: json.dumps(tamper_otio(json.loads(t), "short")), r"track A1: clip 1 lasts"),
+])
+def test_a_misplaced_export_fails_the_gate_that_used_to_pass_it(wsx, monkeypatch, fmt, tamper, match):
+    """A shifted EDL record timecode, a moved spine offset, a 1-frame sequence duration, a truncated A1: all were written and passed."""
+    rate = wsx.world.src.rate
+    name = {"otio": "export_otio", "fcpxml": "export_fcpxml", "edl": "export_edl"}[fmt]
+    real = getattr(workspace, name)
+    monkeypatch.setattr(workspace, name, lambda *a, **kw: tamper(real(*a, **kw), rate) if fmt != "otio" else tamper_otio_doc(real(*a, **kw), tamper))
+    with pytest.raises(InterchangeError) as exc:
+        export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=(fmt,))
+    assert re.search(rf"^export of {fmt}/final does not match the canonical timeline: ", str(exc.value)) and "\n" not in str(exc.value)
+    report = json.loads((wsx.ws / "exports" / "fidelity.json").read_text())
+    errors = report["stages"]["final"][fmt]["errors"]
+    assert report["ok"] is False and any(re.search(match, e) for e in errors), errors
+
+
+def tamper_otio_doc(doc: dict, tamper) -> dict:
+    return json.loads(tamper(json.dumps(doc), None))
+
+
+def test_a_legitimate_export_records_that_its_placement_was_checked(wsx):
+    res = export_workspace(wsx.ws, wsx.cfg)
+    assert all(r.ok for r in res.results)
+    for r in res.results:
+        assert any(p.startswith("record placement of every clip and transition (") for p in r.preserved), (r.stage, r.fmt, r.preserved)
+
+
+def test_export_notes_a_frame_rate_the_pipeline_did_not_use(wsx, monkeypatch):
+    """Final review M6: the engine's avg_frame_rate and the exports' r_frame_rate differ for some streams (a raw H.264 stream: 25 and 50)."""
+    from dataclasses import replace
+
+    assert not any("frame rate" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)
+    wide = replace(wsx.world.src, rate=Fraction(50), duration_frames=int(wsx.world.src.seconds * 50))
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: wide)
+    res = export_workspace(wsx.ws, wsx.cfg, formats=("edl",), out_dir=wsx.tmp / "wide")
+    (note,) = [n for n in res.notes if "frame rate" in n]  # one line for both stages
+    assert note.startswith("frame rate: ffprobe reports 50 fps (r_frame_rate) but the pipeline cut at 25 fps (avg_frame_rate): the exports are written at 50 fps")
+    assert "\n" not in note
+    # 23.976 against 24000/1001 is the same rate
+    doc = json.loads((wsx.ws / "final.json").read_text())
+    doc["fps"] = 23.976
+    (wsx.ws / "final.json").write_text(json.dumps(doc))
+    monkeypatch.setattr(workspace, "_source", lambda ws, cfg: replace(wsx.world.src, rate=Fraction(24000, 1001)))
+    assert not any("frame rate" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",), out_dir=wsx.tmp / "ntsc").notes)

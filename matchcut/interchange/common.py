@@ -17,17 +17,20 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from matchcut.pipeline.junctions import Junction
 from matchcut.pipeline.media import MediaError, _require, run
 from matchcut.pipeline.timeline import Clip, Timeline, Transition, clip_origin
 
 from . import InterchangeError
+
+SHA256 = re.compile(r"[0-9a-f]{64}")  # a stage fingerprint: the sha256 of a stage file, as the exports write it
 
 # the rates a probe that only reports a float (or an approximate rational) is snapped to
 COMMON_RATES: Tuple[Fraction, ...] = (
@@ -202,6 +205,26 @@ def source_info(media_path: str, audio_only: bool = False) -> SourceInfo:
     return SourceInfo(path=str(p), url=p.as_uri(), rate=rate, duration_frames=frames, width=width, height=height,
                       has_audio=audio is not None, size=st.st_size, mtime_ns=st.st_mtime_ns,
                       start_tc_frames=start_tc, start_tc_drop=start_drop)
+
+
+def media_matcher(paths: Sequence[str], want: str) -> Tuple[Callable[[str], bool], bool]:
+    """(is_source, by_name) for deciding which of ``paths`` (the media paths an imported file refers to) is the footage ``want``.
+
+    The exact path (symbolic links resolved) is the footage.  Only when no path is exact is a file with the same name taken for it
+    (camera names such as ``C0001.MP4`` repeat across cards, so a name never outvotes an exact path); ``by_name`` says that happened.
+    """
+    real = os.path.realpath(want)
+    exact = lambda p: p == want or os.path.realpath(p) == real  # noqa: E731
+    name = Path(want).name
+    any_exact = any(exact(p) for p in paths)
+    by_name = not any_exact and any(Path(p).name == name for p in paths)
+    return (lambda p: exact(p) or (not any_exact and Path(p).name == name)), by_name
+
+
+# what names a dip to black in a file that carries no matchcut metadata (an FCPXML transition's or effect's name, an OTIO Custom_Transition's name)
+DIP_NAME = re.compile(r"dip|fade to (color|colour|black)", re.I)
+
+BY_NAME_NOTE = "no clip references {want}: the clips whose file name is the same were taken for the source footage"
 
 
 # -- what is exported ----------------------------------------------------------------------------

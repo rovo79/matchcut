@@ -22,7 +22,7 @@ from .timeline import Clip, Decision, Timeline
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
 WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades", "notes")
-STALE_HINT = "(re-import the editor's file to see it)"
+STALE_HINT = "(re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
 

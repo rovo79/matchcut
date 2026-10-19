@@ -23,6 +23,7 @@ as a transition pair on one track; the source's start timecode is subtracted.  A
 """
 from __future__ import annotations
 
+import os
 import re
 from fractions import Fraction
 from pathlib import Path
@@ -33,11 +34,12 @@ from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.timeline import Timeline
 
 from . import InterchangeError
-from .common import (SourceInfo, assemble, clip_key, is_drop_rate, is_valid_timecode, junction_ids, layout, nominal_base, timecode_frames)
+from .common import (BY_NAME_NOTE, SHA256, LaidClip, SourceInfo, assemble, clip_key, is_drop_rate, is_valid_timecode, junction_ids, layout, nominal_base,
+                     timecode_frames)
 
 MAX_EVENTS = 999
 _TC = re.compile(r"^(\d{1,3}):(\d{2}):(\d{2})([:;.,])(\d{2,3})$")
-_DOC_KEYS = {"STAGE", "SOURCE", "RATE", "FADE_IN", "FADE_OUT", "TIMECODE", "SOURCE_START_TC", "AUDIO"}
+_DOC_KEYS = {"STAGE", "STAGE_SHA256", "SOURCE", "RATE", "FADE_IN", "FADE_OUT", "TIMECODE", "SOURCE_START_TC", "AUDIO"}
 _ONE_LINE = re.compile(r"\s*[\r\n]+\s*")
 
 
@@ -78,8 +80,11 @@ def _event(num: int, track: str, kind: str, dur: int, tcs: Sequence[str]) -> str
     return f"{num:03d}  AX       {track:<5s} {head}{' '.join(tcs)}"
 
 
-def export_edl(tl: Timeline, stage: str, src: SourceInfo, title: str, music: Optional[MusicConfig] = None) -> str:
+def export_edl(tl: Timeline, stage: str, src: SourceInfo, title: str, music: Optional[MusicConfig] = None, stage_sha256: str = "") -> str:
     """CMX3600 text for ``tl`` (normally the frame-snapped copy from ``common.export_timeline``) on the source's exact rate.
+
+    ``stage_sha256`` (the sha256 of the stage file) is written as ``* MATCHCUT STAGE_SHA256 <hex>``: a later import finds out which
+    version of the stage the editor started from.
 
     ``music`` is only consulted for ``music.only``: the render then drops the source audio, so the events are ``V`` (the music itself
     is not carried by an EDL).
@@ -124,7 +129,8 @@ def export_edl(tl: Timeline, stage: str, src: SourceInfo, title: str, music: Opt
         if row.tr and row.kind == "dip_to_black":
             out.append("* MATCHCUT TRANSITION dip_to_black")
         out.append("")
-    out += [f"* MATCHCUT STAGE {_one(stage)}", f"* MATCHCUT SOURCE {_one(src.path)}", f"* MATCHCUT RATE {rate.numerator}/{rate.denominator}",
+    out += [f"* MATCHCUT STAGE {_one(stage)}"] + ([f"* MATCHCUT STAGE_SHA256 {stage_sha256}"] if stage_sha256 else [])
+    out += [f"* MATCHCUT SOURCE {_one(src.path)}", f"* MATCHCUT RATE {rate.numerator}/{rate.denominator}",
             f"* MATCHCUT FADE_IN {tl.fade_in}", f"* MATCHCUT FADE_OUT {tl.fade_out}"]
     if t0:
         out.append(f"* MATCHCUT SOURCE_START_TC {tc(t0)}: source timecodes are the media's own (its start timecode plus the frame)")
@@ -143,11 +149,20 @@ def _same_name(a: Optional[str], b: str) -> bool:
     return x == y or Path(x).stem == Path(y).stem or x == Path(y).stem
 
 
-def _same_path(a: str, b: str) -> bool:
-    """A ``FROM CLIP`` / ``SOURCE FILE`` value (path or file:// URL) names the source footage?"""
-    a = a.strip()
-    pa = unquote(urlparse(a).path) if a.startswith("file:") else a
-    return pa == b or Path(pa).name.lower() == Path(b).name.lower()
+def _path_of(value: str) -> str:
+    value = value.strip()
+    return unquote(urlparse(value).path) if value.startswith("file:") else value
+
+
+def _exact_path(a: str, b: str) -> bool:
+    pa = _path_of(a)
+    return pa == b or os.path.realpath(pa) == os.path.realpath(b)
+
+
+def _same_path(a: str, b: str, exact_only: bool = False) -> bool:
+    """A ``FROM CLIP`` / ``SOURCE FILE`` value (path or file:// URL) names the source footage?  By its exact path, else (unless ``exact_only``)
+    by file name."""
+    return _exact_path(a, b) or (not exact_only and Path(_path_of(a)).name.lower() == Path(b).name.lower())
 
 
 _SHOT_NAME = re.compile(r"shot_?\d+\s*$", re.I)
@@ -156,15 +171,16 @@ _SHOT_NAME = re.compile(r"shot_?\d+\s*$", re.I)
 _FILE_LIKE = re.compile(r"\.[A-Za-z][A-Za-z0-9]{0,4}\s*$")  # an extension starts with a letter: "Sc 12.3" and "v1.2" are names
 
 
-def _is_source(g: Dict[str, Any], reel: str, src_path: str) -> bool:
+def _is_source(g: Dict[str, Any], reel: str, src_path: str, exact_only: bool = False) -> bool:
     """Whether the event of ``g`` is the source footage.  A different file needs positive evidence.  In order:
     a path comment (``FROM CLIP`` / ``SOURCE FILE``) decides; else the clip name: matchcut's own (``... shot<N>``) is the source and a
     file name (it has an extension) must be the source's; else, with no name or one that is no file name, a reel that is (the start of)
-    the source's name (reels name the roll, not the clip, so this is never allowed to outvote a file name); else the name, if any."""
+    the source's name (reels name the roll, not the clip, so this is never allowed to outvote a file name); else the name, if any.
+    ``exact_only``: some event names the source by its exact path, so a path of the same file name in another folder is another file."""
     pick = lambda d: d.get("TO") or d.get("FROM") or d.get("SOURCE")  # noqa: E731
     path = pick(g["paths"])
     if path:
-        return _same_path(path, src_path)
+        return _same_path(path, src_path, exact_only)
     name = g["names"].get("TO") or g["names"].get("FROM")
     if name and _SHOT_NAME.search(name):
         return True
@@ -173,6 +189,28 @@ def _is_source(g: Dict[str, Any], reel: str, src_path: str) -> bool:
     if len(reel) >= 3 and Path(src_path).stem.lower().startswith(reel.lower()):  # the reel may be truncated to 8 characters
         return True
     return _same_name(name, src_path)
+
+
+def placement_errors(text: str, rows: Sequence[LaidClip], rate: Fraction) -> List[str]:
+    """Where the record column of matchcut's own EDL puts each event against the layout: event ``i`` must start at the clip's record start
+    and end where its (dissolve-shortened) media ends.  Resolve places events by their record timecodes."""
+    _, _, groups = _parse(text, rate, [])
+    events = [g["lines"][-1] for g in groups if "V" in g["lines"][-1]["track"]]
+    if len(events) != len(rows):
+        return [f"the EDL has {len(events)} video events for {len(rows)} clips"]
+    errs: List[str] = []
+    for i, (ev, row) in enumerate(zip(events, rows)):
+        nxt = rows[i + 1].tr if i + 1 < len(rows) else 0
+        want = (row.rec, row.rec + (row.out_f - row.in_f) - nxt)
+        if (ev["ri"], ev["ro"]) != want:
+            errs.append(f"event {ev['num']}: record frames {ev['ri']}-{ev['ro']} != {want[0]}-{want[1]}")
+    return errs
+
+
+def stage_fingerprint(text: str) -> str:
+    """The ``* MATCHCUT STAGE_SHA256`` comment of an EDL ("" when there is none or it is not a sha256)."""
+    found = re.findall(r"^\s*\*\s*MATCHCUT\s+STAGE_SHA256\s+(\S+)\s*$", str(text), re.M)
+    return found[-1] if found and SHA256.fullmatch(found[-1]) else ""
 
 
 def import_edl(text: str, rate: Fraction, src_path: str, bounds: Optional[Dict[int, Sequence[float]]] = None,
@@ -270,6 +308,9 @@ def _import(text: str, rate: Fraction, src_path: str, bounds: Optional[Dict[int,
     if not groups:
         raise InterchangeError("invalid EDL: no events")
     t0 = src.start_tc_frames if src is not None else 0  # the media's own start timecode: source frame 0
+    pick = lambda g: g["paths"].get("TO") or g["paths"].get("FROM") or g["paths"].get("SOURCE")  # noqa: E731
+    exact_only = any(pick(g) and _exact_path(pick(g), src_path) for g in groups)  # a path of the same name elsewhere is then another file
+    by_name = False
     kept: List[Dict[str, Any]] = []
     prev_out: Optional[int] = None  # record out of the previous video event, whatever became of it
     prev_kept = False
@@ -292,10 +333,11 @@ def _import(text: str, rate: Fraction, src_path: str, bounds: Optional[Dict[int,
             notes.append(f"event {num}: black (BL) ignored")
             continue
         name = g["names"].get("TO") or g["names"].get("FROM") or g["paths"].get("TO") or g["paths"].get("FROM") or g["paths"].get("SOURCE")
-        if not _is_source(g, main["reel"], src_path):
+        if not _is_source(g, main["reel"], src_path, exact_only):
             skipped_media += 1
             notes.append(f"event {num}: other media {name} ignored")
             continue
+        by_name = by_name or bool(pick(g) and not _exact_path(pick(g), src_path))
         kind, tr = main["kind"], 0
         if kind == "D" and main["dur"] > 0:
             tr = main["dur"]
@@ -318,6 +360,8 @@ def _import(text: str, rate: Fraction, src_path: str, bounds: Optional[Dict[int,
         prev_kept = True
     if not kept:
         raise InterchangeError(f"no event of the EDL references the source footage {src_path}" if skipped_media else "invalid EDL: no video events")
+    if by_name:
+        notes.append(BY_NAME_NOTE.format(want=src_path))
     items: List[Tuple[str, Dict[str, Any]]] = []
     for k, e in enumerate(kept):
         head = e["tr"] // 2

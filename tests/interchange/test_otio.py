@@ -475,3 +475,134 @@ def test_otio_documents_load_in_real_opentimelineio(world, music_file, tmp_path)
         assert again["metadata"]["matchcut"]["rate"] == [25, 1]
         back, _ = import_otio(again, world.bounds)  # what the library re-serialised still imports to the same cut
         check_equivalent(tl, back, world.src.rate)
+
+
+# -- the source footage: its exact path, never a generator or an offline clip (final review I2, T2-a) -----------------
+BROLL = "file:///Volumes/Media/broll.mov"
+
+
+def foreign_doc(src=None):
+    """matchcut's synthetic cut as a Resolve-style OTIO without any matchcut metadata."""
+    doc = export_otio(synthetic(), "final", src or fake_src(), [])
+    doc["metadata"] = {"Resolve_OTIO": {"Resolve OTIO Meta Version": "1.0"}}
+    doc["tracks"]["children"] = tracks(doc)[:1]  # the picture track only
+    for t in tracks(doc):
+        for k in t["children"]:
+            k["metadata"] = {"Resolve_OTIO": {}}
+    return doc
+
+
+def media_clip(name: str, ref: dict, start: int = 10, dur: int = 30) -> dict:
+    rt_ = lambda v: {"OTIO_SCHEMA": "RationalTime.1", "rate": 24.0, "value": float(v)}  # noqa: E731
+    return {"OTIO_SCHEMA": "Clip.2", "metadata": {}, "name": name, "effects": [], "markers": [], "enabled": True, "color": None,
+            "source_range": {"OTIO_SCHEMA": "TimeRange.1", "start_time": rt_(start), "duration": rt_(dur)},
+            "media_references": {"DEFAULT_MEDIA": ref}, "active_media_reference_key": "DEFAULT_MEDIA"}
+
+
+def external(url: str) -> dict:
+    return {"OTIO_SCHEMA": "ExternalReference.1", "metadata": {}, "name": "", "available_range": None, "available_image_bounds": None, "target_url": url}
+
+
+GENERATOR = {"OTIO_SCHEMA": "GeneratorReference.1", "metadata": {}, "name": "", "available_range": None, "available_image_bounds": None,
+             "generator_kind": "SolidColor", "parameters": {}}
+MISSING = {"OTIO_SCHEMA": "MissingReference.1", "metadata": {}, "name": "", "available_range": None, "available_image_bounds": None}
+
+
+def test_a_broll_first_in_a_foreign_file_is_not_the_source_when_the_workspace_has_one():
+    """Resolve-style OTIO, no matchcut metadata, first V1 clip is other footage: the workspace's footage decides."""
+    doc = foreign_doc()
+    tracks(doc)[0]["children"].insert(0, media_clip("broll.mov", external(BROLL)))
+    back, notes = import_otio(doc, None, fake_src())
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and back.source == "/x/media.mp4"
+    check_equivalent(synthetic(), back, Fraction(24))
+    assert notes == ["clip broll.mov: other media /Volumes/Media/broll.mov ignored"] and all(c.shot_index >= 0 for c in back.clips)
+    # no clip of it is the source: a one-line error naming the footage, however many other clips there are
+    for k in tracks(doc)[0]["children"]:
+        if k["OTIO_SCHEMA"].startswith("Clip"):
+            k["media_references"]["DEFAULT_MEDIA"]["target_url"] = BROLL
+    with pytest.raises(InterchangeError, match="^no clip of the OTIO video track references the source footage /x/media.mp4$"):
+        import_otio(doc, None, fake_src())
+
+
+def test_generator_missing_and_unreferenced_clips_are_noted_and_skipped_never_read_as_footage():
+    doc = foreign_doc()
+    kids = tracks(doc)[0]["children"]
+    kids.insert(0, media_clip("Solid Color", dict(GENERATOR)))
+    kids.append(media_clip("offline.mov", dict(MISSING)))
+    bare = media_clip("no media", external("x"))
+    bare["media_references"], bare["active_media_reference_key"] = {}, ""
+    kids.append(bare)
+    for src in (fake_src(), None):
+        back, notes = import_otio(copy.deepcopy(doc), None, src)
+        assert [c.shot_index for c in back.clips] == [0, 1, 2]  # not one invented clip (the old code added each as "human added h00n, shot 0")
+        assert sorted(notes) == sorted(f"clip {n}: generator/missing media ignored" for n in ("Solid Color", "no media", "offline.mov"))
+        check_equivalent(synthetic(), back, Fraction(24))
+    # a video track with nothing but generators has no footage in it
+    only = foreign_doc()
+    tracks(only)[0]["children"] = [media_clip("Solid Color", dict(GENERATOR)), media_clip("offline.mov", dict(MISSING))]
+    with pytest.raises(InterchangeError, match="^no clip of the OTIO video track references the source footage /x/media.mp4$"):
+        import_otio(only, None, fake_src())
+    with pytest.raises(InterchangeError, match="^OTIO video track has no clip with a media file$"):
+        import_otio(only)
+
+
+def test_the_exact_path_beats_the_same_file_name_in_another_folder():
+    """Camera names repeat across cards: with the source's exact path in the file, a clip of the same name elsewhere is other media."""
+    doc = foreign_doc()
+    kids = tracks(doc)[0]["children"]
+    clips = [k for k in kids if k["OTIO_SCHEMA"].startswith("Clip")]
+    other = copy.deepcopy(clips[0])
+    other["media_references"]["DEFAULT_MEDIA"]["target_url"] = "file:///card2/media.mp4"
+    other["source_range"]["start_time"]["value"] = 500
+    kids.insert(0, other)
+    back, notes = import_otio(doc, None, fake_src())
+    assert [c.shot_index for c in back.clips] == [0, 1, 2]
+    assert notes == ["clip c001 shot0: other media /card2/media.mp4 ignored"] and not any("file name" in n for n in notes)
+    # without the file's own source declared the first clip's path is not trusted over the workspace's, same result
+    # nothing has the exact path: the same file name is taken for the source, and the note says so
+    doc = foreign_doc()
+    for k in tracks(doc)[0]["children"]:
+        if k["OTIO_SCHEMA"].startswith("Clip"):
+            k["media_references"]["DEFAULT_MEDIA"]["target_url"] = "file:///moved/media.mp4"
+    back, notes = import_otio(doc, None, fake_src())
+    assert len(back.clips) == 3 and notes == ["no clip references /x/media.mp4: the clips whose file name is the same were taken for the source footage"]
+
+
+def on_base(doc: dict, base: float) -> dict:
+    """Every RationalTime of ``doc`` re-expressed on another time base (the same seconds)."""
+    def walk(x):
+        if isinstance(x, dict):
+            if x.get("OTIO_SCHEMA", "").startswith("RationalTime"):
+                x["value"], x["rate"] = x["value"] * base / x["rate"], base
+            else:
+                for v in x.values():
+                    walk(v)
+        elif isinstance(x, list):
+            for v in x:
+                walk(v)
+    doc = copy.deepcopy(doc)
+    walk(doc)
+    return doc
+
+
+def test_an_otio_on_a_48000_time_base_reads_at_the_media_rate_without_false_outside_the_media_notes():
+    """Resolve writes some timelines on a 48000 base (final review M5): with the media known, frames are the media's."""
+    src = fake_src()
+    doc = foreign_doc(src)
+    tl = synthetic()
+    wide = on_base(doc, 48000.0)
+    back, notes = import_otio(wide, None, src)
+    assert notes == [] and not any("outside the media" in n for n in notes)
+    check_equivalent(tl, back, Fraction(24))
+    assert [(c.source_in, c.source_out) for c in back.clips] == [(c.source_in, c.source_out) for c in tl.clips]
+
+
+def test_a_timeline_rate_that_differs_from_the_media_rate_is_noted_and_converted():
+    src25 = fake_src(Fraction(25))
+    doc = export_otio(synthetic(), "final", src25, [])
+    base, base_notes = import_otio(copy.deepcopy(doc), None, src25)
+    assert base_notes == []
+    doc["metadata"]["matchcut"]["rate"] = [24, 1]  # a timeline of 24 fps holding 25 fps media; the times are still seconds on the media's base
+    back, notes = import_otio(doc, None, src25)
+    assert notes == ["the timeline runs at 24 fps and the media at 25 fps: times were converted at the media's rate"]
+    assert [(c.source_in, c.source_out, c.transition_in.duration) for c in back.clips] == [(c.source_in, c.source_out, c.transition_in.duration) for c in base.clips]

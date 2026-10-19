@@ -1,12 +1,13 @@
 """The interoperability docs agree with the code: the fidelity tables are the KNOWN table, no format is called lossless, and the human gates read PENDING."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 import pytest
 
-from matchcut.interchange.fidelity import KNOWN
+from matchcut.interchange.fidelity import EDL_DROP_FRAME, KNOWN
 from matchcut.interchange.workspace import export_workspace
 
 DOCS = Path(__file__).resolve().parents[2] / "docs"
@@ -22,6 +23,7 @@ def test_the_fidelity_tables_list_every_known_entry_verbatim(doc):
     text = doc.read_text(encoding="utf-8")
     missing = [f"{fmt}/{kind}: {entry}" for fmt, by_kind in KNOWN.items() for kind, entries in by_kind.items() for entry in entries if f"- {entry}" not in text]
     assert not missing, missing
+    assert f"- {EDL_DROP_FRAME}" in text  # the variant of the NON-DROP entry for drop-frame media
 
 
 @pytest.mark.parametrize("doc", NEW_DOCS, ids=lambda p: p.name)
@@ -55,20 +57,44 @@ def test_the_path_check_catches_home_and_tmp_paths():
 
 def _normalise(text: str, footage: Path, exports: Path) -> str:
     """What differs legitimately between the committed examples and a fresh run: where the footage and the exports directory are, the
-    footage's modification time, the uids and hashes derived from paths and file contents, and the installed matchcut version."""
+    footage's modification time and size, the uids and hashes derived from paths and file contents, and the installed matchcut version."""
     text = text.replace(str(exports), PLACEHOLDER + "/exports").replace(str(footage.parent), PLACEHOLDER)
     text = text.replace(footage.parent.as_uri(), "file://" + PLACEHOLDER)
     text = re.sub(r'"mtime_ns": \d+', '"mtime_ns": 0', text)
     text = re.sub(r'(com\.matchcut\.source_mtime_ns" value=)"\d+"', r'\1"0"', text)
-    text = re.sub(r'"canonical_sha256": "[0-9a-f]*"', '"canonical_sha256": "-"', text)
+    text = re.sub(r'"(canonical_sha256|stage_sha256)": "[0-9a-f]*"', r'"\1": "-"', text)
+    text = re.sub(r'(com\.matchcut\.stage_sha256" value=)"[0-9a-f]*"', r'\1"-"', text)
+    text = re.sub(r"(\* MATCHCUT STAGE_SHA256 )[0-9a-f]+", r"\1-", text)
+    text = re.sub(r'"size": \d+', '"size": 0', text)  # the footage's size on disk: its encode differs between ffmpeg builds
+    text = re.sub(r'(com\.matchcut\.source_size" value=)"\d+"', r'\1"0"', text)
     text = re.sub(r'(uid="com\.matchcut\.source\.)[0-9a-f]+"', r'\1-"', text)
     text = re.sub(r'("matchcut_version": )"[^"]*"', r'\1"-"', text)
     return re.sub(r'(com\.matchcut\.matchcut_version" value=)"[^"]*"', r'\1"-"', text)
 
 
+FINGERPRINT = re.compile(r"^Fixture footage \(fingerprint\): (.+)$", re.M)
+
+
+def footage_fingerprint(wsx) -> str:
+    """What identifies the fixture footage as the examples were made from: its length in frames and its shot boundaries (shot detection runs
+    on the encoded video, so another ffmpeg build can find other boundaries)."""
+    shots = json.loads((wsx.ws / "shots.json").read_text())
+    shots = shots["shots"] if isinstance(shots, dict) else shots
+    return f"{wsx.world.src.duration_frames} frames at {float(wsx.world.src.rate):g} fps; shots (s): " + " ".join(f"{s['start']:.2f}-{s['end']:.2f}" for s in shots)
+
+
 def test_the_committed_examples_are_what_the_code_writes_now(wsx):
     """Regenerates the examples on the fixture workspace and compares them with docs/examples/m2a/synthetic/ after normalising the paths,
-    the footage's mtime, the path-derived uids, the stage-file hashes and the matchcut version (see ``_normalise``)."""
+    the footage's mtime and size, the path-derived uids, the stage-file hashes and the matchcut version (see ``_normalise``).
+
+    The examples were made from footage whose encode and shot boundaries depend on the local ffmpeg: the README records them
+    (``Fixture footage (fingerprint)``) and the test is skipped, with the difference, when this machine's footage is another."""
+    recorded = FINGERPRINT.search((EXAMPLES / "README.md").read_text(encoding="utf-8"))
+    assert recorded, "docs/examples/m2a/synthetic/README.md lost its 'Fixture footage (fingerprint)' line"
+    here = footage_fingerprint(wsx)
+    if recorded.group(1).strip() != here:
+        pytest.skip(f"the fixture footage differs from the one the committed examples were made from (this ffmpeg build encodes it differently): "
+                    f"here {here!r}, committed {recorded.group(1).strip()!r}; see docs/examples/m2a/synthetic/README.md")
     export_workspace(wsx.ws, wsx.cfg, resolve_script=True)
     out = wsx.ws / "exports"
     footage = Path(wsx.world.video)

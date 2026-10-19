@@ -485,3 +485,21 @@ FCM: NON-DROP FRAME
     back, notes = import_edl(text, RATE24, "/x/media.mp4")
     assert [(c.source_in, c.source_out) for c in back.clips] == [(1.0, 3.0), (5.0, 7.0)]
     assert notes == ["event 001: audio event (track A) ignored"]
+
+
+# -- the source footage: its exact path first, the same file name only when no event has it (final review T2-a) -------------
+def test_the_exact_path_beats_an_event_of_the_same_file_name_in_another_folder():
+    def edl(first: str, second: str) -> str:
+        return ("TITLE: t\n"
+                "001  AX       V     C        00:00:01:00 00:00:03:00 00:00:00:00 00:00:02:00\n" + first + "\n"
+                "002  AX       V     C        00:00:05:00 00:00:07:00 00:00:02:00 00:00:04:00\n" + second + "\n")
+
+    back, notes = import_edl(edl("* SOURCE FILE: /card2/media.mp4", "* SOURCE FILE: /x/media.mp4"), RATE24, "/x/media.mp4")
+    assert [c.source_in for c in back.clips] == [5.0] and notes == ["event 001: other media /card2/media.mp4 ignored"]
+    # no exact path in the file: the same name is the source, said once
+    back, notes = import_edl(edl("* SOURCE FILE: /card2/media.mp4", "* FROM CLIP: file:///moved/media.mp4"), RATE24, "/x/media.mp4")
+    assert [c.source_in for c in back.clips] == [1.0, 5.0]
+    assert notes == ["no clip references /x/media.mp4: the clips whose file name is the same were taken for the source footage"]
+    # an event with only a name is as before
+    back, notes = import_edl(edl("* FROM CLIP NAME: media.mp4", "* FROM CLIP NAME: media.mp4"), RATE24, "/x/media.mp4")
+    assert len(back.clips) == 2 and notes == []
