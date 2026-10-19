@@ -15,9 +15,10 @@ markers, reads every timeline back, moves the playhead, and exports each timelin
 runs/<UTC time>/ directory (resolve_probe.json and exports/), so no run replaces another's. It interprets nothing:
 `python -m matchcut.resolve report` does that, offline.
 
-Safety: it refuses to start unless the open project is an empty "Untitled Project" (no timeline, no clip, no media pool folder) or
-an earlier matchcut-probe-* project, and it asks before switching (type yes). It never deletes, renames, saves or exports any
-other project, and checks that the open project is its own before each part and before it saves. It writes files only inside
+Safety: it refuses to start unless the open project is verifiably empty, whatever its name (no timeline, and no clip in any media
+pool folder; empty folders are fine), or an earlier matchcut-probe-* project. It asks before switching (type yes) and looks again
+right before it does. It never deletes, renames, saves or exports any other project, and makes every write only after checking
+that the open project is still its own. It writes files only inside
 this bundle (and --out). It calls only what the Resolve 21.0.4 scripting README documents, plus the calls the installed catalogue
 documents for their class (CALLS below). It never starts or connects to Resolve's MCP server; it only looks whether the file is there.
 Standard library plus Resolve's own DaVinciResolveScript module; Python 3.6+. It never imports matchcut.
@@ -37,7 +38,6 @@ PROBE_VERSION = 1
 SCHEMA = "matchcut.resolve_probe/1"
 EXPECTED = None  # @EXPECTED@ (filled in by matchcut: the canonical cut in frames, the files, the source)
 BUNDLE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_PROJECT = "Untitled Project"
 PROJECT_PREFIX = "matchcut-probe-"
 FOLDER = "matchcut-probe"
 TIMELINE_PREFIX = "matchcut-probe "
@@ -115,6 +115,13 @@ GATED_CALLS = {
 # looked up in the catalogue and recorded, never called by this probe
 LOOKED_UP = ("SetFades", "GetFades", "GetSourceStartTime", "GetSourceEndTime")
 NOT_CALLED = "not documented on this install: not called"
+# the calls that change something in Resolve: once the probe's project is open, each is made only while it is still the open project
+WRITES = ("MediaPool.ImportMedia", "MediaPool.ImportTimelineFromFile", "MediaPool.CreateEmptyTimeline", "MediaPool.AppendToTimeline",
+          "Timeline.AddMarker", "Timeline.UpdateMarkerCustomData", "TimelineItem.AddTransition", "Project.SetCurrentTimeline",
+          "Timeline.SetCurrentTimecode", "Resolve.OpenPage", "Timeline.Export", "Project.SetSetting", "ProjectManager.SaveProject",
+          "ProjectManager.CreateFolder", "ProjectManager.OpenFolder", "ProjectManager.GotoRootFolder", "ProjectManager.CreateProject")
+MAX_DEPTH = 3  # the media pool folders the emptiness check walks: the root and three levels of bins below it
+MAX_FOLDERS = 50
 TRANSITION_KEYS = ("type", "transitionType", "category", "position", "alignment", "duration")
 TRANSITION_TYPES = ("Cross Dissolve",)
 TRANSITION_ALIGN = ("center", "centre", "middle")
@@ -139,9 +146,7 @@ MCP_PATHS = {
 MCP_DOCUMENTED = ("reported by third parties for Resolve Studio 21.1: a ResolveMCP binary, stdio transport, about 14 tools (mostly run_script); "
                   "this probe never starts or connects to it")
 CATALOGUE_FILES = ("README.md", "DaVinciResolveScript.pyi", "README.txt", "CHANGELOG.md")
-SETUP_HELP = """Resolve's scripting module (DaVinciResolveScript) was not found. Set these, then run the probe again:
-
-macOS (Terminal):
+SETUP_LINES = """macOS (Terminal):
   export RESOLVE_SCRIPT_API="/Library/Application Support/Blackmagic Design/DaVinci Resolve/Developer/Scripting"
   export RESOLVE_SCRIPT_LIB="/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Fusion/fusionscript.so"
   export PYTHONPATH="$PYTHONPATH:$RESOLVE_SCRIPT_API/Modules/"
@@ -158,14 +163,17 @@ Linux:
   (on some Linux installs the folder is /home/resolve instead of /opt/resolve)
 
 Use a 64-bit Python 3.6 or later."""
+SETUP_HELP = "Resolve's scripting module (DaVinciResolveScript) was not found. Set these, then run the probe again:\n\n" + SETUP_LINES
+SETUP_ELSEWHERE = "If Resolve is installed elsewhere than its default folders, set these and run the probe again:\n\n" + SETUP_LINES
 CONNECT_HELP = ("Resolve's scripting module loaded but Resolve did not answer (scriptapp(\"Resolve\") returned None). Start DaVinci Resolve Studio, "
                 "set Preferences > System > General > External scripting using = Local, restart Resolve, and run the probe again. "
                 "External scripting needs the Studio edition.")
-REFUSAL = ("The open Resolve project is %r%s. The probe only starts from an empty %r project (no timeline, no clip, no media pool folder) or an "
-           "earlier matchcut-probe-* project, because creating its own project switches projects and the API cannot tell whether the open one "
-           "has unsaved changes. Save your work, then open a new, empty project (or quit and reopen Resolve) and run the probe again.")
-CONFIRM = ("The probe will switch Resolve from the open project %r to a new project %s in the Project Manager folder %r "
-           "(created if missing), and work only there. Type yes to continue: ")
+REFUSAL = ("The open Resolve project is %r%s. The probe only starts from an empty project (no timeline, and no clip in any media pool "
+           "folder; empty folders are fine), whatever its name, or from an earlier matchcut-probe-* project, because creating its own project "
+           "switches projects and the API cannot tell whether the open one has unsaved changes. Save your work, then open a new, empty project "
+           "(or quit and reopen Resolve) and run the probe again.")
+CONFIRM = ("The probe will switch Resolve from the open project %r to a new project %s (or with a -2 suffix if that name is taken) in the "
+           "Project Manager folder %r (created if missing), and work only there. Type yes to continue: ")
 VERSION_NOTE = ("GetStart(subframe_precision), GetSourceStartFrame and GetSourceEndFrame are documented in the 20.2 and 21.0.4 READMEs, not in "
                 "the 18.5 README (which has GetStart() only): on Resolve %s these reads may fail")
 
@@ -192,11 +200,28 @@ def is_ok(call, value):
     return True
 
 
+class Stopped(BaseException):
+    """The open project is no longer the probe's: no further write is made (raised past the probe's own "except Exception")."""
+
+
 class Recorder(object):
-    """Makes every call to Resolve: checks it is documented, records it, never lets an exception escape."""
+    """Makes every call to Resolve: checks it is documented, records it, never lets an exception escape. Once the probe's project
+    exists (``watch``), every call in WRITES is made only after checking that the open project is still the probe's."""
 
     def __init__(self, doc, gated):
         self.doc, self.gated = doc, gated  # gated: "Class.Method" -> True when the installed catalogue documents it for that class
+        self.watch = None  # (project manager, the probe's project name), set once the probe's project is open
+
+    def check_open(self, name):
+        pm, ours = self.watch
+        current = self.call(None, "check", pm, "ProjectManager.GetCurrentProject")
+        now = self.call(None, "check", current, "Project.GetName") if current else None
+        if now != ours:
+            self.doc["stopped"] = True
+            self.doc["notes"].append("before %s the open project is %r, not the probe's %r: stopped, nothing more written" % (name, now, ours))
+            self.doc["failures"].append({"where": "check", "call": name, "called": False, "ok": False,
+                                         "error": "not called: the open project is %r, not the probe's" % (now,)})
+            raise Stopped(name)
 
     def documented_in(self, name):
         if name in README_CALLS:
@@ -208,6 +233,8 @@ class Recorder(object):
     def call(self, steps, where, obj, name, *args):
         """obj.<method>(*args) for name "Class.Method"; appends a step to ``steps`` (a list, or None for a quiet read) and returns the value."""
         doc_in = self.documented_in(name)
+        if doc_in is not None and name in WRITES and self.watch is not None:
+            self.check_open(name)
         step = {"call": name, "args": summary(list(args)), "documented_in": doc_in}
         if doc_in is None:
             step.update(called=False, ok=False, error=NOT_CALLED)
@@ -763,39 +790,82 @@ def count_of(value):
     return len(value) if isinstance(value, (list, tuple, dict)) else None
 
 
-def guard(rec, doc, pm):
-    """The safety check: the open project's name and contents (documented reads only), and whether the probe may switch away from it.
-    An "Untitled Project" must be empty: no timeline, no clip and no folder in its media pool's root folder. An earlier matchcut-probe-*
-    project is allowed as it is (its contents are recorded)."""
-    steps = doc["steps"]
+def pool_contents(rec, steps, project):
+    """Clips in every folder of the project's media pool, walked from the root with GetSubFolderList down to MAX_DEPTH levels and at
+    most MAX_FOLDERS folders: {"clips", "folders", "depth", "complete"}. ``complete`` is False when a read failed (None or raised) or
+    the tree goes past the cap, so emptiness could not be confirmed."""
+    out = {"clips": 0, "folders": 0, "depth": 0, "complete": True, "why": None}
+    pool = rec.call(steps, "safety", project, "Project.GetMediaPool")
+    root = rec.call(steps, "safety", pool, "MediaPool.GetRootFolder") if pool else None
+    if not root:
+        out.update(complete=False, why="the media pool's root folder could not be read")
+        return out
+    todo = [(root, 0)]
+    while todo:
+        folder, depth = todo.pop(0)
+        out["folders"] += 1
+        out["depth"] = max(out["depth"], depth)
+        clips = rec.call(steps, "safety", folder, "Folder.GetClipList")
+        subs = rec.call(steps, "safety", folder, "Folder.GetSubFolderList")
+        if not isinstance(clips, (list, tuple)) or not isinstance(subs, (list, tuple)):
+            out.update(complete=False, why="a media pool folder could not be read")
+            return out
+        out["clips"] += len(clips)
+        if subs and depth >= MAX_DEPTH:
+            out.update(complete=False, why="the media pool has folders more than %d levels deep" % MAX_DEPTH)
+            return out
+        if out["folders"] + len(todo) + len(subs) > MAX_FOLDERS:
+            out.update(complete=False, why="the media pool has more than %d folders" % MAX_FOLDERS)
+            return out
+        todo.extend((f, depth + 1) for f in subs)
+    out["folders"] -= 1  # the root is not a folder anyone made
+    return out
+
+
+def inspect(rec, steps, pm):
+    """The open project: its name and contents (documented reads only), and whether the probe may switch away from it."""
     current = rec.call(steps, "safety", pm, "ProjectManager.GetCurrentProject")
     name = rec.call(steps, "safety", current, "Project.GetName") if current else None
-    doc["project"]["user_current_project"] = name
-    counts = {"timelines": None, "clips": None, "subfolders": None}
+    counts = {"timelines": None, "clips": None, "folders": None, "depth": None}
+    pool, why = {"complete": False}, "Resolve reports no open project"
     if current:
         counts["timelines"] = count_of(rec.call(steps, "safety", current, "Project.GetTimelineCount"))
-        pool = rec.call(steps, "safety", current, "Project.GetMediaPool")
-        root = rec.call(steps, "safety", pool, "MediaPool.GetRootFolder") if pool else None
-        if root:
-            counts["clips"] = count_of(rec.call(steps, "safety", root, "Folder.GetClipList"))
-            counts["subfolders"] = count_of(rec.call(steps, "safety", root, "Folder.GetSubFolderList"))
-    empty = all(v == 0 for v in counts.values())
+        pool = pool_contents(rec, steps, current)
+        counts.update(clips=pool["clips"], folders=pool["folders"], depth=pool["depth"])
+        why = pool["why"] if not pool["complete"] else ("the timeline count could not be read" if counts["timelines"] is None else None)
+    confirmed_empty = bool(current) and why is None
+    empty = confirmed_empty and counts["timelines"] == 0 and counts["clips"] == 0
     earlier = isinstance(name, str) and name.startswith(PROJECT_PREFIX)
-    allowed = (name == DEFAULT_PROJECT and empty) or earlier
-    doc["safety"] = {"current_project": name, "counts": counts, "empty": empty, "earlier_probe_project": earlier, "allowed": bool(allowed),
-                     "rule": "start only from an empty %r project or an earlier %s* project" % (DEFAULT_PROJECT, PROJECT_PREFIX)}
+    allowed = empty or earlier
+    safety = {"current_project": name, "counts": counts, "empty": empty, "earlier_probe_project": earlier, "allowed": bool(allowed),
+              "rule": "start only from an empty project (no timeline, no clip in any media pool folder) or an earlier %s* project" % PROJECT_PREFIX}
     if not allowed:
-        if not name:
-            why = ""
-        elif name == DEFAULT_PROJECT and None in counts.values():
-            why = " (the probe could not confirm that it is empty)"
-        elif name == DEFAULT_PROJECT:
-            why = " (it has %d timelines, %d clips and %d folders in its media pool)" % (counts["timelines"], counts["clips"], counts["subfolders"])
+        if not confirmed_empty:
+            detail = " (the probe could not confirm that it is empty: %s)" % why
         else:
-            why = ""
-        doc["safety"]["message"] = REFUSAL % (name, why, DEFAULT_PROJECT) if name else (
-            "Resolve reports no open project. Open a new, empty project (or quit and reopen Resolve) and run the probe again.")
-    return bool(allowed)
+            detail = " (it has %d timelines, and %d clips in %d media pool folders)" % (counts["timelines"], counts["clips"], counts["folders"] + 1)
+        safety["message"] = REFUSAL % (name, detail)
+    return safety
+
+
+def guard(rec, doc, pm):
+    doc["safety"] = inspect(rec, doc["steps"], pm)
+    doc["project"]["user_current_project"] = doc["safety"]["current_project"]
+    return doc["safety"]["allowed"]
+
+
+def recheck(rec, doc, pm):
+    """The guard again, right before the switch: the person may have opened another project while the probe waited for the answer."""
+    again = inspect(rec, doc["steps"], pm)
+    doc["safety_after_confirm"] = again
+    before = doc["safety"]
+    same = again["current_project"] == before["current_project"] and again["counts"] == before["counts"]
+    if again["allowed"] and same:
+        return None
+    if not same:
+        return ("The open project changed while the probe waited for your answer: it was %r %s, it is now %r %s. Nothing was created; "
+                "run the probe again." % (before["current_project"], before["counts"], again["current_project"], again["counts"]))
+    return again.get("message")
 
 
 def confirm(args, doc, planned):
@@ -809,16 +879,6 @@ def confirm(args, doc, planned):
         answer = ""
     doc["safety"]["confirmed"] = answer.strip().lower() == "yes"
     return doc["safety"]["confirmed"]
-
-
-def still_ours(rec, doc, pm, where):
-    """True while the open project is the probe's own (checked before each part that acts on it)."""
-    current = rec.call(doc["steps"], where, pm, "ProjectManager.GetCurrentProject")
-    name = rec.call(doc["steps"], where, current, "Project.GetName") if current else None
-    if name != doc["project"]["name"]:
-        doc["notes"].append("%s: the open project is %r, not the probe's %r: stopped here" % (where, name, doc["project"]["name"]))
-        return False
-    return True
 
 
 def make_project(rec, doc, pm, stamp):
@@ -847,6 +907,7 @@ def make_project(rec, doc, pm, stamp):
     if now != name:
         doc["notes"].append("after CreateProject the current project is %r, not %r: stopped before touching anything" % (now, name))
         return None
+    rec.watch = (pm, name)  # from here on, every write is made only while this is the open project
     doc["project"]["frame_rate_requested"] = rate_setting()
     rec.call(steps, "project", project, "Project.SetSetting", "timelineFrameRate", rate_setting())
     doc["project"]["frame_rate_setting"] = summary(rec.call(steps, "project", project, "Project.GetSetting", "timelineFrameRate"))
@@ -854,7 +915,8 @@ def make_project(rec, doc, pm, stamp):
 
 
 def run_routes(rec, doc, resolve, pm, project, out, run_dir):
-    """Every route, then read-back and markers, navigation and exports; stops when the open project is no longer the probe's."""
+    """Every route, then read-back and markers, navigation and exports. Every write is checked (Recorder.call): when the open project
+    is no longer the probe's, Stopped ends the run before that write."""
     pool = rec.call(doc["steps"], "project", project, "Project.GetMediaPool")
     if not pool:
         doc["notes"].append("no media pool: no route tried")
@@ -862,9 +924,6 @@ def run_routes(rec, doc, resolve, pm, project, out, run_dir):
     timelines = []
     built_items = {}
     for route in ROUTES:
-        if not still_ours(rec, doc, pm, route):
-            doc["stopped"] = True
-            break
         entry = {"name": TIMELINE_PREFIX + route, "route": route, "created": False, "steps": [], "readback": None, "markers": None,
                  "navigation": None, "exports": None}
         doc["timelines"][route] = entry
@@ -894,9 +953,6 @@ def run_routes(rec, doc, resolve, pm, project, out, run_dir):
             timelines.append((route, tl))
         write(doc_for_disk(doc), out)
     for route, tl in timelines:
-        if doc.get("stopped") or not still_ours(rec, doc, pm, route + ": readback"):
-            doc["stopped"] = True
-            break
         entry = doc["timelines"][route]
         for part in ("readback", "markers"):
             try:
@@ -906,12 +962,9 @@ def run_routes(rec, doc, resolve, pm, project, out, run_dir):
                     entry["markers"] = marker_experiment(rec, route, tl, route in MARKER_ROUTES)
             except Exception as exc:
                 rec.fail(route + ": " + part, {"call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc)})
-    if timelines and not doc.get("stopped"):
+    if timelines:
         doc["edit_page"] = summary(rec.call(doc["steps"], "navigation", resolve, "Resolve.OpenPage", "edit"))
     for route, tl in timelines:
-        if doc.get("stopped") or not still_ours(rec, doc, pm, route + ": navigation"):
-            doc["stopped"] = True
-            break
         entry = doc["timelines"][route]
         try:
             entry["navigation"] = navigation(rec, route, project, tl, entry["readback"] or {}, entry["markers"])
@@ -989,7 +1042,9 @@ def probe(args, doc, out, run_dir, stamp):
         doc["notes"].append("DaVinciResolveScript could not be imported; nothing was asked of Resolve")
         hint = ["(a module that is found but fails to import usually means a Python that does not match Resolve's (64-bit, 3.6 or later) "
                 "or a RESOLVE_SCRIPT_LIB that does not point at fusionscript)"] if failed else []
-        return finish(doc, out, "module failed to import" if failed else "module not found", failed + hint + ([""] if failed else []) + [SETUP_HELP], 2)
+        if failed:
+            return finish(doc, out, "module failed to import", failed + hint + ["", SETUP_ELSEWHERE], 2)
+        return finish(doc, out, "module not found", [SETUP_HELP], 2)
     resolve = rec.call(doc["steps"], "connect", dvr, "DaVinciResolveScript.scriptapp", "Resolve")
     doc["scripting"]["connected"] = bool(resolve)
     if not resolve:
@@ -1014,15 +1069,21 @@ def probe(args, doc, out, run_dir, stamp):
     planned = PROJECT_PREFIX + stamp
     if not confirm(args, doc, planned):
         return finish(doc, out, "not confirmed", ["Not confirmed: nothing was created and the open project was not switched."], 5)
-    project = make_project(rec, doc, pm, stamp)
-    if project is None:
-        return finish(doc, out, "aborted", ["the probe could not make its own project, or Resolve did not switch to it; nothing else was done"], 4)
-    print("created project %s in the Project Manager folder %s" % (doc["project"]["name"], FOLDER))
-    run_routes(rec, doc, resolve, pm, project, out, run_dir)
-    if still_ours(rec, doc, pm, "save"):  # only ever the probe's own project
+    changed = recheck(rec, doc, pm)  # the answer can take any time: look again right before the switch
+    if changed:
+        doc["safety"]["allowed_after_confirm"] = False
+        return finish(doc, out, "refused", [changed], 3)
+    try:
+        project = make_project(rec, doc, pm, stamp)
+        if project is None:
+            return finish(doc, out, "aborted", ["the probe could not make its own project, or Resolve did not switch to it; nothing else was done"], 4)
+        print("created project %s in the Project Manager folder %s" % (doc["project"]["name"], FOLDER))
+        run_routes(rec, doc, resolve, pm, project, out, run_dir)
+        # SaveProject is a write: Recorder.call makes it only while the probe's own project is the open one
         doc["project"]["saved"] = bool(rec.call(doc["steps"], "save", pm, "ProjectManager.SaveProject"))
-    else:
-        doc["notes"].append("not saved: the open project is no longer the probe's")
+    except Stopped as stop:
+        doc["stopped"] = True
+        doc["notes"].append("not saved: the open project is no longer the probe's (noticed before %s)" % stop)
     made = [r for r in ROUTES if doc["timelines"].get(r, {}).get("created")]
     status = "aborted" if doc.get("stopped") else "complete"
     return finish(doc, out, status, [

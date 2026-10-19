@@ -54,7 +54,8 @@ class RouteResult:
     dissolves: str = "not measured"  # kept | lost | changed | uncertain | none in the cut | not measured
     dissolves_from: str = ""  # the read-back, or which exports
     markers: str = "-"
-    markers_by_id: str = "untested"  # yes | no | untested
+    markers_by_id: str = "untested"  # yes | no | untested (the file's markers or the probe's own)
+    own_markers: str = "untested"  # yes | no | untested: the markers the probe added itself (build, import-otio)
     navigation: str = "-"
     navigation_ok: Optional[bool] = None
     transition_items: int = 0
@@ -94,18 +95,35 @@ def _offsets(deltas: List[int]) -> str:
     return ", ".join(f"{d:+d} frame{'s' if abs(d) != 1 else ''} ({n})" for d, n in sorted(counts.items(), key=lambda x: (-x[1], x[0])))
 
 
-def resolve_input(path: Path) -> Path:
-    """A run's resolve_probe.json from what the person gives: the file, a run directory, or the bundle (its latest run by name)."""
+def _status(path: Path) -> Tuple[str, bool]:
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return str(doc.get("status")), bool(doc.get("timelines"))
+    except (OSError, ValueError, AttributeError):
+        return "unreadable", False
+
+
+def resolve_input(path: Path) -> Tuple[Path, Optional[str]]:
+    """A run's resolve_probe.json from what the person gives: the file, a run directory, or the bundle. For the bundle: the newest run
+    that is complete or recorded timelines; else the newest run that is not a dry run (else the newest dry run), with a note saying so."""
     path = Path(path)
-    if path.is_dir():
-        if (path / RESULT).is_file():
-            return path / RESULT
-        runs = sorted(p for p in (path / RUNS).glob(f"*/{RESULT}")) if (path / RUNS).is_dir() else []
-        real = [p for p in runs if "dry-run" not in p.parent.name]  # a dry run only when there is nothing else
-        if real or runs:
-            return (real or runs)[-1]
+    if not path.is_dir():
+        return path, None
+    if (path / RESULT).is_file():
+        return path / RESULT, None
+    runs = sorted((path / RUNS).glob(f"*/{RESULT}"), key=lambda p: p.parent.name) if (path / RUNS).is_dir() else []
+    if not runs:
         raise ProbeError(f"no run in {path}: run resolve_probe.py first (each run writes {RUNS}/<UTC time>/{RESULT})")
-    return path
+    real = [p for p in runs if "dry-run" not in p.parent.name]
+    useful = [p for p in real if _status(p)[0] == "complete" or _status(p)[1]]
+    pick = (useful or real or runs)[-1]
+    newest = runs[-1]
+    if pick == newest:
+        return pick, None
+    why = f"the latest run, {newest.parent.name}, was {'a dry run' if 'dry-run' in newest.parent.name else _status(newest)[0]}: reporting {pick.parent.name}"
+    if not useful:
+        why += f" ({_status(pick)[0]}; no run is complete)"
+    return pick, why
 
 
 def _bundle_of(json_path: Path, doc: Dict[str, Any]) -> Optional[Path]:
@@ -237,11 +255,36 @@ def _dissolves(r: RouteResult, rb: Dict[str, Any], exp: Dict[str, Any], back: Ba
     start = rb.get("start_frame")
     if transitions or install_lists:  # the read-back shows transitions on this install: judge from it
         r.dissolves_from = "the read-back (transition items)"
-        found = {(t.get("start") - start, t.get("duration")) for t in transitions if _num(t.get("start")) and _num(start)}
+        items = sorted((t.get("start") - start, t.get("duration")) for t in transitions if _num(t.get("start")) and _num(start) and _num(t.get("duration")))
+        found = set(items)
         hit = sum(1 for w in wanted if w in found)
+        cuts = sorted(c["rec_in"] for c in exp["clips"][1:] if c["transition_in"]["frames"])
+        same_lengths = len(items) == total and [d for _, d in items] == [f for _, f in sorted(wanted)]
+        starts = {s - c for (s, _), c in zip(items, cuts)}  # where each item starts against its cut
+        ends = {s + d - c for (s, d), c in zip(items, cuts)}
+        shifts = {s - w for (s, _), (w, _) in zip(items, sorted(wanted))}  # against a dissolve centred as matchcut writes it
         if hit == total and len(transitions) == total:
             r.dissolves = "kept"
             r.preserved.append(f"dissolves: {total} of {total} read back as transition items at the expected frames and length")
+        elif same_lengths and (starts == {0} or ends == {0} or (total > 1 and (len(starts) == 1 or len(ends) == 1 or len(shifts) == 1))):
+            # (one dissolve alone cannot show a convention, except starting or ending exactly at the cut)
+            # the right number and lengths, all placed alike against the cut: where this install puts a transition, not a loss
+            if starts == {0}:
+                where = "start at the cut (they sit after it)"
+            elif ends == {0}:
+                where = "end at the cut (they sit before it)"
+            elif len(starts) == 1:
+                k = starts.pop()
+                where = f"start {abs(k)} frames {'after' if k > 0 else 'before'} the cut"
+            elif len(ends) == 1:
+                k = ends.pop()
+                where = f"end {abs(k)} frames {'after' if k > 0 else 'before'} the cut"
+            else:
+                k = shifts.pop()
+                where = f"sit {abs(k)} frames {'after' if k > 0 else 'before'} a dissolve centred on the cut"
+            r.dissolves = "kept"
+            r.approximated.append(f"dissolves: {total} of {total} read back as transition items of the expected length; the transition items {where} "
+                                  "on this install (matchcut centres them)")
         elif not transitions:
             r.dissolves = "lost"
             r.lost.append(f"dissolves: {total} of {total} have no transition item in the read-back{suffix}")
@@ -294,6 +337,7 @@ def _markers(r: RouteResult, m: Optional[Dict[str, Any]], exp: Dict[str, Any]) -
             r.lost.append(f"junction markers added by the probe: {own} of {n} found by id (AddMarker returned True {yes} times)")
         parts.append(f"own {own}/{n}")
         states.append(own == n)
+        r.own_markers = "yes" if own == n else "no"
         frameless = sum(1 for v in (m.get("found_after") or {}).values() if v and v.get("frame") is None)
         if frameless:
             r.notes.append(f"GetMarkerByCustomData answered without a frame for {frameless} of {n} junctions: it returned the marker's information only")
@@ -424,7 +468,11 @@ def _pick(routes: Dict[str, RouteResult], order: Tuple[str, ...], verdicts: Tupl
     cands = [n for n in order if routes[n].verdict in verdicts]
     if not cands:
         return None
-    rank = lambda n: (routes[n].navigation_ok is True) * 2 + (routes[n].markers_by_id == "yes")  # noqa: E731
+    # the probe's own markers count where it added them; a route where it did not (untested) is neutral: it scores as the install does
+    # (as working when the probe's markers were found by id on some route, else not), so the plan's order decides between them
+    works = any(r.own_markers == "yes" for r in routes.values())
+    marks = lambda n: routes[n].own_markers == "yes" or (routes[n].own_markers == "untested" and works)  # noqa: E731
+    rank = lambda n: (routes[n].navigation_ok is True) * 2 + marks(n)  # noqa: E731
     best = max(rank(n) for n in cands)
     return next(n for n in cands if rank(n) == best)
 
@@ -547,7 +595,7 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
     """Read a run's JSON (``json_path``: the file, its run directory, or the bundle for its latest run) and the bundle, compare, write
     ``probe_report.md`` next to the JSON; a one-line ``ProbeError`` on bad input."""
     ws = Path(ws)
-    json_path = resolve_input(Path(json_path))
+    json_path, picked = resolve_input(Path(json_path))
     doc = _load(json_path)
     if doc.get("schema") != SCHEMA:
         raise ProbeError(f"{json_path} is not a matchcut resolve_probe.json (schema {doc.get('schema')!r})")
@@ -555,7 +603,7 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
     if bundle is None:
         raise ProbeError(f"no expected.json next to {json_path} or in its bundle: give a resolve_probe.json from inside its probe bundle")
     exp = _load(bundle / EXPECTED)
-    notes: List[str] = []
+    notes: List[str] = [picked] if picked else []
     stage = exp["stage"]
     stage_file = dict(stage_timeline_paths(ws)).get(stage)
     if stage_file is None or not stage_file.is_file():
@@ -585,7 +633,14 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
     asked, got = (doc.get("project") or {}).get("frame_rate_requested"), (doc.get("project") or {}).get("frame_rate_setting")
     if asked and got is not None and str(got) != str(asked):
         notes.append(f"the probe's project frame rate setting is {got!r}, the cut's is {asked!r} (Project.GetSetting('timelineFrameRate'))")
-    recommended, recommendation = _recommend(routes) if timelines else (None, "No route was tried, so there is nothing to recommend.")
+    stopped = doc.get("stopped") or doc.get("status") == "aborted"
+    if stopped:
+        reason = next((n for n in reversed(doc.get("notes") or []) if "open project" in n or "stopped" in n), doc.get("status"))
+        recommended, recommendation = None, f"The run was stopped ({reason}); nothing to judge."
+    elif timelines:
+        recommended, recommendation = _recommend(routes)
+    else:
+        recommended, recommendation = None, "No route was tried, so there is nothing to recommend."
     text = _render(doc, exp, json_path, routes, recommendation, notes)
     out = json_path.parent / REPORT
     try:

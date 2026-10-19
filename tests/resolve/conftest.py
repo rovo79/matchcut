@@ -51,7 +51,7 @@ def run_probe(bundle, monkeypatch, variant: Optional[Variant] = None, args: Sequ
               inject: bool = True, catalogue_dir: Optional[Path] = None, answer: Optional[str] = None):
     """Run ``resolve_probe.py`` in this process against the fake: (exit code, the JSON it wrote or None, the fake world).
 
-    ``answer`` is what the person types at the confirmation (None: the run gets ``--yes``; EOFError: stdin is closed)."""
+    ``answer`` is what the person types at the confirmation (None: the run gets ``--yes``; EOFError: stdin is closed; a function: input itself)."""
     expected = json.loads(bundle.expected.read_text())
     if world is None:
         world = World(variant or VARIANTS["keeps everything"], source_info(expected["source"]["path"]))
@@ -66,6 +66,8 @@ def run_probe(bundle, monkeypatch, variant: Optional[Variant] = None, args: Sequ
     args = list(args)
     if answer is None:
         args.append("--yes")
+    elif callable(answer) and answer is not EOFError:  # a test's own input(): it can act on the fake while the question waits
+        monkeypatch.setattr(builtins, "input", answer)
     else:
         def ask(prompt=""):
             world.log.append(("input", prompt))

@@ -71,12 +71,15 @@ class Variant:
     raise_on: Tuple[str, ...] = ()  # "Class.Method" names that raise a RuntimeError
     user_timelines: int = 0  # what the open project already holds (an Untitled Project with work in it)
     user_clips: int = 0
-    user_subfolders: int = 0
+    user_subfolders: int = 0  # empty bins under the root
+    user_bins: Tuple[Any, ...] = ()  # a bin tree under the root: ((name, clips, (children...)), ...)
+    root_folder_none: bool = False  # MediaPool.GetRootFolder returns None
     create_does_not_switch: bool = False  # CreateProject makes the project but leaves the open one open
     switch_away_on: str = ""  # "Class.Method": when the probe calls it, the open project becomes the user's again
     src_end_inclusive: bool = False  # GetSourceEndFrame reads the last source frame (one less than matchcut's exclusive end)
     end_frame_inclusive: bool = False  # AppendToTimeline takes endFrame as the last frame (the built clip is one frame longer)
     transition_items: bool = False  # GetItemListInTrack lists transitions as items whose GetType() is "transition"
+    transition_at_cut: bool = False  # ... and puts each one starting at the cut instead of centred on it
     marker_info_plain: bool = False  # GetMarkerByCustomData returns the marker's information without its frame
     version: Tuple[Any, ...] = (21, 1, 0, 0, "")
 
@@ -89,15 +92,24 @@ VARIANTS = {
     "AddTransition not documented": Variant(name="AddTransition not documented", documents_add_transition=False),
     "AppendToTimeline returns [None]": Variant(name="AppendToTimeline returns [None]", append_none=True),
     "scripting not connected": Variant(name="scripting not connected", connected=False),
-    "a user project is open": Variant(name="a user project is open", current_project="Client job v3"),
+    "a user project is open": Variant(name="a user project is open", current_project="Client job v3", user_timelines=2, user_clips=3),
     "untitled with a timeline": Variant(name="untitled with a timeline", user_timelines=1),
     "untitled with a pool clip": Variant(name="untitled with a pool clip", user_clips=1),
     "untitled with a pool folder": Variant(name="untitled with a pool folder", user_subfolders=1),
+    "an empty named project": Variant(name="an empty named project", current_project="Nouveau projet"),
+    "empty nested bins": Variant(name="empty nested bins", current_project="Untitled Project",
+                                 user_bins=(("Bin 1", 0, (("Inner", 0, ()),)), ("Bin 2", 0, ()))),
+    "a clip in a nested bin": Variant(name="a clip in a nested bin", user_bins=(("Bin 1", 0, (("Inner", 1, ()),)),)),
+    "bins past the depth cap": Variant(name="bins past the depth cap", user_bins=(("A", 0, (("B", 0, (("C", 0, (("D", 0, ()),)),)),)),)),
+    "bins past the count cap": Variant(name="bins past the count cap", user_bins=tuple((f"Bin {k}", 0, ()) for k in range(60))),
+    "timeline count unreadable": Variant(name="timeline count unreadable", raise_on=("Project.GetTimelineCount",)),
+    "root folder unreadable": Variant(name="root folder unreadable", root_folder_none=True),
     "CreateProject does not switch": Variant(name="CreateProject does not switch", create_does_not_switch=True),
     "the open project changes mid-run": Variant(name="the open project changes mid-run", switch_away_on="MediaPool.CreateEmptyTimeline"),
     "GetSourceEndFrame inclusive": Variant(name="GetSourceEndFrame inclusive", src_end_inclusive=True),
     "endFrame inclusive": Variant(name="endFrame inclusive", end_frame_inclusive=True),
     "transition items": Variant(name="transition items", transition_items=True),
+    "transition items at the cut": Variant(name="transition items at the cut", transition_items=True, transition_at_cut=True),
     "marker info without frame": Variant(name="marker info without frame", marker_info_plain=True),
     "Resolve 18.5": Variant(name="Resolve 18.5", version=(18, 5, 0, 0, ""), raise_on=("TimelineItem.GetSourceStartFrame", "TimelineItem.GetSourceEndFrame")),
 }
@@ -138,6 +150,17 @@ class TimelineModel:
 
 
 @dataclass
+class Bin:
+    name: str
+    clips: List[Media] = field(default_factory=list)
+    children: List["Bin"] = field(default_factory=list)
+
+
+def _bins(spec: Tuple[Any, ...], src: Optional[SourceInfo]) -> List[Bin]:
+    return [Bin(name, [Media(src.path, Path(src.path).name, src) for _ in range(n)] if src else [], _bins(kids, src)) for name, n, kids in spec]
+
+
+@dataclass
 class ProjectModel:
     name: str
     folder: Tuple[str, ...]
@@ -145,7 +168,7 @@ class ProjectModel:
     pool: List[Media] = field(default_factory=list)
     timelines: List[TimelineModel] = field(default_factory=list)
     current_timeline: Optional[TimelineModel] = None
-    subfolders: List[str] = field(default_factory=list)  # media pool folders under the root
+    bins: List["Bin"] = field(default_factory=list)  # media pool folders under the root
     touched: bool = False  # anything changed by the API
 
 
@@ -161,13 +184,14 @@ class World:
         user.timelines = [TimelineModel(f"Timeline {k + 1}", 86400, "01:00:00:00", Fraction(24)) for k in range(variant.user_timelines)]
         if src is not None:
             user.pool = [Media(src.path, Path(src.path).name, src) for _ in range(variant.user_clips)]
-        user.subfolders = [f"Bin {k + 1}" for k in range(variant.user_subfolders)]
+        user.bins = [Bin(f"Bin {k + 1}") for k in range(variant.user_subfolders)] + _bins(variant.user_bins, src)
         self.user = user
         self.projects[()][user.name] = user
         other = ProjectModel("Client job v2", ("Client work",))
         self.projects[("Client work",)][other.name] = other
         self.current = user
         self.log: List[Tuple[Any, ...]] = []
+        self.trace: List[str] = []  # every documented method the probe looked up, in order (it calls what it looks up)
         self.rejected: List[str] = []
         self.saved: List[str] = []
         self.page = "edit"
@@ -221,6 +245,7 @@ class _Api:
             except AttributeError:
                 world.rejected.append(f"{cls}.{name} (documented, not modelled by the fake)")
                 raise
+            world.trace.append(f"{cls}.{name}")
             if f"{cls}.{name}" == world.variant.switch_away_on:
                 world.current = world.user  # (someone opens another project while the probe runs)
             if f"{cls}.{name}" in world.variant.raise_on:
@@ -334,7 +359,8 @@ class FakeTimeline(_Api):
         for k, i in enumerate(items):
             if trackType == "video" and self._world.variant.transition_items and k in self.tl.transitions:
                 frames, head = self.tl.transitions[k]
-                out.append(FakeTimelineItem(self._world, self.tl, Item(i.media, i.start - head, frames, 0, "transition")))
+                at = i.start if self._world.variant.transition_at_cut else i.start - head
+                out.append(FakeTimelineItem(self._world, self.tl, Item(i.media, at, frames, 0, "transition")))
             out.append(FakeTimelineItem(self._world, self.tl, i))
         return out
 
@@ -431,16 +457,22 @@ class FakeFolder(_Api):
         return [FakeMediaPoolItem(self._world, m) for m in self.project.pool]
 
     def GetSubFolderList(self):
-        return [FakeSubFolder(self._world, self.project, n) for n in self.project.subfolders]
+        return [FakeSubFolder(self._world, self.project, b) for b in self.project.bins]
 
 
 class FakeSubFolder(FakeFolder):
-    def __init__(self, world: World, project: ProjectModel, name: str):
+    def __init__(self, world: World, project: ProjectModel, bin_: Bin):
         super().__init__(world, project)
-        self.name = name
+        self.bin = bin_
 
     def GetName(self):
-        return self.name
+        return self.bin.name
+
+    def GetClipList(self):
+        return [FakeMediaPoolItem(self._world, m) for m in self.bin.clips]
+
+    def GetSubFolderList(self):
+        return [FakeSubFolder(self._world, self.project, b) for b in self.bin.children]
 
 
 class FakeMediaPool(_Api):
@@ -451,7 +483,7 @@ class FakeMediaPool(_Api):
         self.project = project
 
     def GetRootFolder(self):
-        return FakeFolder(self._world, self.project)
+        return None if self._world.variant.root_folder_none else FakeFolder(self._world, self.project)
 
     def _media(self, path: str) -> Optional[Media]:
         return next((m for m in self.project.pool if m.path == path), None)

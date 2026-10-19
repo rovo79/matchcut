@@ -16,7 +16,11 @@ import pytest
 from matchcut.resolve import _probe_script as template
 
 from .conftest import run_probe, tree
-from .fake_resolve import DOCUMENTED, GATED, VARIANTS, Variant, World
+from fractions import Fraction
+
+from matchcut.interchange.common import source_info
+
+from .fake_resolve import DOCUMENTED, GATED, VARIANTS, Media, ProjectModel, TimelineModel, Variant, World
 
 ROUTES = ["import-otio", "import-fcpxml", "import-edl", "build", "build+transitions"]
 TOP_KEYS = {"schema", "probe_version", "created_utc", "status", "dry_run", "bundle", "resolve", "platform", "scripting", "catalogue", "mcp",
@@ -43,7 +47,7 @@ def test_the_probe_runs_every_route_in_a_project_of_its_own(bundle, monkeypatch,
     exp = expected_of(bundle)
     assert code == 0 and doc["status"] == "complete" and world.rejected == []
     assert {c[0] for c in world.log} <= set(template.README_CALLS) | set(template.GATED_CALLS)  # every call the fake logged is allow-listed
-    assert set(doc) == TOP_KEYS | {"edit_page"}
+    assert set(doc) == TOP_KEYS | {"edit_page", "safety_after_confirm"}
     # its own project, in its own folder, saved; nothing else touched
     name = doc["project"]["name"]
     assert re.fullmatch(r"matchcut-probe-\d{8}T\d{6}Z", name) and doc["project"]["folder"] == "matchcut-probe"
@@ -52,7 +56,8 @@ def test_the_probe_runs_every_route_in_a_project_of_its_own(bundle, monkeypatch,
     assert not user.touched and not user.timelines and not user.pool and user.settings == {"timelineFrameRate": "24"}
     assert not world.projects[("Client work",)]["Client job v2"].touched
     assert doc["project"]["user_current_project"] == "Untitled Project" and doc["safety"]["allowed"] is True
-    assert doc["safety"]["counts"] == {"timelines": 0, "clips": 0, "subfolders": 0} and doc["safety"]["empty"] is True
+    assert doc["safety"]["counts"] == {"timelines": 0, "clips": 0, "folders": 0, "depth": 0} and doc["safety"]["empty"] is True
+    assert doc["safety_after_confirm"]["counts"] == doc["safety"]["counts"]  # looked again right before the switch
     assert doc["safety"]["confirmed"] == "--yes" and doc["version_notes"] == []
     assert doc["project"]["frame_rate_requested"] == "25" and doc["project"]["frame_rate_setting"] == "25"
     # every route made its own timeline and was read back
@@ -329,17 +334,54 @@ def test_the_catalogue_definition_and_its_options_type_are_excerpted(tmp_path, m
 
 
 # -- the review's safety and catalogue fixes -----------------------------------------------------------------------------------
-@pytest.mark.parametrize("variant, counts", [("untitled with a timeline", {"timelines": 1, "clips": 0, "subfolders": 0}),
-                                             ("untitled with a pool clip", {"timelines": 0, "clips": 1, "subfolders": 0}),
-                                             ("untitled with a pool folder", {"timelines": 0, "clips": 0, "subfolders": 1})])
-def test_an_untitled_project_with_anything_in_it_is_refused(bundle, monkeypatch, capsys, variant, counts):
+@pytest.mark.parametrize("variant, counts", [("untitled with a timeline", {"timelines": 1, "clips": 0, "folders": 0, "depth": 0}),
+                                             ("untitled with a pool clip", {"timelines": 0, "clips": 1, "folders": 0, "depth": 0}),
+                                             ("a clip in a nested bin", {"timelines": 0, "clips": 1, "folders": 2, "depth": 2})])
+def test_a_project_with_anything_in_it_is_refused(bundle, monkeypatch, capsys, variant, counts):
     code, doc, world = run_probe(bundle, monkeypatch, VARIANTS[variant])
     out = capsys.readouterr().out
     assert code == 3 and doc["status"] == "refused" and doc["safety"]["allowed"] is False and doc["safety"]["empty"] is False
     assert doc["safety"]["counts"] == counts and doc["safety"]["current_project"] == "Untitled Project"
     assert made(world) == [] and world.saved == [] and world.current is world.user and world.rejected == []
-    assert f"(it has {counts['timelines']} timelines, {counts['clips']} clips and {counts['subfolders']} folders in its media pool)" in out
-    assert "open a new, empty project (or quit and reopen Resolve)" in out
+    assert f"(it has {counts['timelines']} timelines, and {counts['clips']} clips in {counts['folders'] + 1} media pool folders)" in out
+    assert "Save your work, then open a new, empty project (or quit and reopen Resolve) and run the probe again" in out
+
+
+@pytest.mark.parametrize("variant, why", [("timeline count unreadable", "the timeline count could not be read"),
+                                          ("root folder unreadable", "the media pool's root folder could not be read"),
+                                          ("bins past the depth cap", "the media pool has folders more than 3 levels deep"),
+                                          ("bins past the count cap", "the media pool has more than 50 folders")])
+def test_a_project_whose_emptiness_cannot_be_confirmed_is_refused(bundle, monkeypatch, capsys, variant, why):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS[variant])
+    out = capsys.readouterr().out
+    assert code == 3 and doc["status"] == "refused" and made(world) == [] and world.current is world.user
+    assert f"(the probe could not confirm that it is empty: {why})" in out
+
+
+@pytest.mark.parametrize("variant, folders", [("an empty named project", 0), ("empty nested bins", 3), ("untitled with a pool folder", 1)])
+def test_an_empty_project_is_allowed_whatever_its_name_and_empty_bins_are_fine(bundle, monkeypatch, variant, folders):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS[variant])
+    assert code == 0 and doc["status"] == "complete" and doc["safety"]["empty"] is True and doc["safety"]["counts"]["folders"] == folders
+    assert doc["safety"]["current_project"] == VARIANTS[variant].current_project and not world.user.touched
+
+
+def test_a_project_opened_while_the_prompt_waits_is_refused_after_the_yes(bundle, monkeypatch, capsys):
+    """N-C1: the guard runs again after the answer; the person opened a client project meanwhile and then typed yes."""
+    world = World(VARIANTS["keeps everything"], source_info(expected_of(bundle)["source"]["path"]))
+    client = world.projects[("Client work",)]["Client job v2"]
+    client.timelines.append(TimelineModel("Edit", 86400, "01:00:00:00", Fraction(24)))
+
+    def ask(prompt=""):
+        world.log.append(("input", prompt))
+        world.current = client  # the client project is opened in Resolve while the question waits
+        return "yes"
+
+    code, doc, world = run_probe(bundle, monkeypatch, world=world, answer=ask)
+    out = capsys.readouterr().out
+    assert code == 3 and doc["status"] == "refused" and doc["safety"]["confirmed"] is True
+    assert doc["safety_after_confirm"]["current_project"] == "Client job v2" and doc["safety_after_confirm"]["counts"]["timelines"] == 1
+    assert "The open project changed while the probe waited for your answer" in out and "Nothing was created" in out
+    assert made(world) == [] and world.current is client and not client.touched and world.saved == []
 
 
 @pytest.mark.parametrize("answer", ["no", "", "y", EOFError])
@@ -350,6 +392,7 @@ def test_without_a_yes_nothing_is_switched_or_created(bundle, monkeypatch, capsy
     assert made(world) == [] and world.current is world.user and doc["timelines"] == {}
     (prompt,) = [c[1] for c in world.calls("input")]
     assert "'Untitled Project'" in prompt and "matchcut-probe-" in prompt and "'matchcut-probe'" in prompt and prompt.endswith("Type yes to continue: ")
+    assert "(or with a -2 suffix if that name is taken)" in prompt
     assert "nothing was created and the open project was not switched" in out
 
 
@@ -380,6 +423,7 @@ def test_a_module_that_is_found_but_fails_to_import_is_named(bundle, monkeypatch
                                                   "error": "ImportError: cannot load fusionscript: wrong architecture"}]
     assert f"found {path} but it failed to import: ImportError: cannot load fusionscript: wrong architecture" in out
     assert "a Python that does not match Resolve's" in out and "export RESOLVE_SCRIPT_API=" in out
+    assert "was not found" not in out and "If Resolve is installed elsewhere than its default folders, set these" in out
     monkeypatch.setattr(sys, "argv", [str(bundle.script), "--check-module"])
     import runpy
     with pytest.raises(SystemExit) as exc:
@@ -395,13 +439,17 @@ def test_create_project_that_does_not_switch_stops_before_anything_else(bundle, 
     assert any("stopped before touching anything" in n for n in doc["notes"]) and not world.user.touched
 
 
-def test_a_project_switch_mid_run_stops_the_probe_and_nothing_is_saved(bundle, monkeypatch):
+def test_a_project_switch_mid_run_stops_before_the_next_write_and_nothing_is_saved(bundle, monkeypatch):
+    """N-I1: the switch happens between two calls of one part (after CreateEmptyTimeline, before SetCurrentTimeline/AppendToTimeline)."""
     code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["the open project changes mid-run"])
-    assert code == 4 and doc["status"] == "aborted" and doc["project"]["saved"] is False
+    assert code == 4 and doc["status"] == "aborted" and doc["project"]["saved"] is False and doc["stopped"] is True
     assert world.calls("ProjectManager.SaveProject") == [] and not world.user.touched
+    switch = world.trace.index("MediaPool.CreateEmptyTimeline")
+    after = world.trace[switch + 1:]
+    assert not [c for c in after if c in template.WRITES], after  # no further write lands
+    assert any(n.startswith("before Project.SetCurrentTimeline the open project is 'Untitled Project', not the probe's") for n in doc["notes"])
     assert any(n.startswith("not saved: the open project is no longer the probe's") for n in doc["notes"])
-    assert any("build+transitions: the open project is 'Untitled Project', not the probe's" in n for n in doc["notes"])
-    assert "build+transitions" not in doc["timelines"]
+    assert doc["failures"][-1]["error"] == "not called: the open project is 'Untitled Project', not the probe's"
 
 
 PYI_NEIGHBOUR = '''class Timeline:
@@ -465,3 +513,23 @@ def test_an_older_resolve_gets_the_version_note(bundle, monkeypatch):
 
 def test_the_linux_lib_defaults_follow_the_readme():
     assert template.LIB_DEFAULTS["linux"] == ["/opt/resolve/libs/Fusion/fusionscript.so", "/home/resolve/libs/Fusion/fusionscript.so"]
+
+
+@pytest.mark.parametrize("change", ["another empty project", "a clip added to the open project"])
+def test_any_change_while_the_prompt_waits_is_refused_even_if_the_new_state_would_pass(bundle, monkeypatch, capsys, change):
+    """The re-check compares with what the person saw when they answered, not only with the rule."""
+    world = World(VARIANTS["keeps everything"], source_info(expected_of(bundle)["source"]["path"]))
+    other = ProjectModel("Other empty project", ())
+    world.projects[()][other.name] = other
+
+    def ask(prompt=""):
+        world.log.append(("input", prompt))
+        if change == "another empty project":
+            world.current = other  # also empty: it would pass the guard on its own
+        else:
+            world.user.pool.append(Media(world.src.path, "late.mp4", world.src))
+        return "yes"
+
+    code, doc, world = run_probe(bundle, monkeypatch, world=world, answer=ask)
+    assert code == 3 and doc["status"] == "refused" and made(world) == []
+    assert "The open project changed while the probe waited for your answer" in capsys.readouterr().out

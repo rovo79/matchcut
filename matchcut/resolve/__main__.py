@@ -58,11 +58,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"note: {n}")
             print(NOT_LIVE)
             print("run it with DaVinci Resolve Studio open (Preferences > System > General > External scripting using = Local) and an empty")
-            print("Untitled Project as the open project; try --dry-run first. It asks before it switches projects (--yes skips the question):")
+            print("project open (no timeline, no clip); try --dry-run first. It asks before it switches projects (--yes skips the question):")
             print(f"  {command(b.script)} --dry-run")
             print(f"  {command(b.script)}")
             print(f"each run writes {b.dir / RUNS}/<UTC time>/ (resolve_probe.json and exports/): send back that folder, or read it here:")
-            print(f'  python -m matchcut.resolve report "{ws}" "{b.dir}"     # the latest run; or give a run\'s resolve_probe.json')
+            print(f'  python -m matchcut.resolve report "{ws}" "{b.dir}"     # the newest run that measured something; or give a run\'s resolve_probe.json')
             if args.run:
                 return run_script(b.script)
             return 0

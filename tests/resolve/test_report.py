@@ -93,23 +93,28 @@ def test_a_fake_that_drops_markers(wsp, bundle, monkeypatch):
 def test_the_recommendation_prefers_a_route_where_markers_are_found_and_navigation_lands():
     from matchcut.resolve.report import RouteResult, _recommend
 
-    def route(name, nav, markers, verdict="usable"):
-        r = RouteResult(name, verdict=verdict)
-        r.navigation_ok, r.markers_by_id = nav, markers
-        return r
+    def routes(**spec):
+        out = {}
+        for name in ROUTES:
+            nav, own, verdict = spec.get(name.replace("+", "_").replace("-", "_"), (True, "untested", "not usable"))
+            r = RouteResult(name, verdict=verdict)
+            r.navigation_ok, r.own_markers, r.markers_by_id = nav, own, own
+            out[name] = r
+        return out
 
-    routes = {"import-otio": route("import-otio", False, "no"), "import-fcpxml": route("import-fcpxml", True, "no"),
-              "import-edl": route("import-edl", True, "yes"), "build": route("build", True, "yes", "usable, dissolves lost"),
-              "build+transitions": route("build+transitions", True, "untested", "not usable")}
-    name, text = _recommend(routes)
-    assert name == "import-edl" and "**import-edl**" in text  # the only usable route where both navigation and markers work
-    routes["import-edl"].verdict = "not usable"
-    name, text = _recommend(routes)
-    assert name == "import-fcpxml"  # navigation lands there; no usable route finds markers by id
-    assert "it needs markers re-added by id: none was found by id on it (they are on import-edl, build)" in text
-    routes["import-fcpxml"].navigation_ok = False
-    name, text = _recommend(routes)
-    assert name == "import-otio" and "navigation by timecode did not land on the incoming clip every time" in text
+    # the probe's own markers fail on import-otio but work on build: import-fcpxml (untested, so scored like the install) comes first
+    name, text = _recommend(routes(import_otio=(True, "no", "usable"), import_fcpxml=(True, "untested", "usable"), build=(True, "yes", "usable")))
+    assert name == "import-fcpxml" and "junction markers were not tested on this route (they are found by id on build)" in text
+    # markers work nowhere: untested is no better than failed, and the plan's order decides
+    name, text = _recommend(routes(import_otio=(True, "no", "usable"), import_fcpxml=(True, "untested", "usable"), build=(True, "no", "usable")))
+    assert name == "import-otio" and "it needs markers re-added by id: none was found by id on it, nor on any other route" in text
+    # navigation that does not land counts more than markers
+    name, text = _recommend(routes(import_otio=(False, "yes", "usable"), import_fcpxml=(True, "untested", "usable")))
+    assert name == "import-fcpxml"
+    # a cut without dissolves (every route usable, markers work where tested): the plan's import-first order
+    name, _ = _recommend(routes(import_otio=(True, "yes", "usable"), import_fcpxml=(True, "untested", "usable"), import_edl=(True, "untested", "usable"),
+                                build=(True, "yes", "usable"), build_transitions=(True, "untested", "usable")))
+    assert name == "import-otio"
 
 
 def test_add_transition_not_documented(wsp, bundle, monkeypatch):
@@ -192,11 +197,44 @@ def test_an_older_resolve_gets_the_version_note_in_the_report(wsp, bundle, monke
 
 
 def test_the_report_takes_the_bundle_or_a_run_directory(wsp, bundle, monkeypatch):
-    run_probe(bundle, monkeypatch, args=["--dry-run"])
     code, doc, _ = run_probe(bundle, monkeypatch)
     run = bundle.dir / doc["run_dir"]
-    assert build_report(wsp.ws, wsp.cfg, bundle.dir).path == run / "probe_report.md"  # the latest real run, not the dry run
+    run_probe(bundle, monkeypatch, args=["--dry-run"])  # newer, but a dry run: skipped
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    assert rep.path == run / "probe_report.md" and any(n.startswith("the latest run, ") and "was a dry run: reporting" in n for n in rep.notes)
     assert build_report(wsp.ws, wsp.cfg, run).path == run / "probe_report.md"
+
+
+def test_the_report_skips_runs_that_did_nothing(wsp, bundle, monkeypatch):
+    code, done, _ = run_probe(bundle, monkeypatch)
+    run_probe(bundle, monkeypatch, VARIANTS["a user project is open"])  # refused
+    code, unconfirmed, _ = run_probe(bundle, monkeypatch, answer="no")  # not confirmed, the newest
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    assert rep.path == bundle.dir / done["run_dir"] / "probe_report.md"
+    assert f"the latest run, {Path(unconfirmed['run_dir']).name}, was not confirmed: reporting {Path(done['run_dir']).name}" in rep.notes
+
+
+def test_without_a_complete_run_the_newest_real_run_is_reported_and_named(wsp, bundle, monkeypatch):
+    code, refused, _ = run_probe(bundle, monkeypatch, VARIANTS["a user project is open"])
+    run_probe(bundle, monkeypatch, args=["--dry-run"])
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    assert rep.path == bundle.dir / refused["run_dir"] / "probe_report.md"
+    assert any(n.endswith("(refused; no run is complete)") for n in rep.notes)
+
+
+def test_a_stopped_run_has_nothing_to_judge(wsp, bundle, monkeypatch):
+    rep, doc = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["the open project changes mid-run"])
+    assert rep.recommended is None and "The run was stopped (" in rep.text and "); nothing to judge." in rep.text
+    assert "None of the routes is usable" not in rep.text
+
+
+def test_transition_items_offset_alike_are_a_position_convention(wsp, bundle, monkeypatch):
+    rep, _ = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["transition items at the cut"])
+    n, j, d = counts(bundle)
+    otio = rep.routes["import-otio"]
+    assert otio.verdict == "usable" and otio.dissolves == "kept"
+    assert (f"dissolves: {d} of {d} read back as transition items of the expected length; the transition items start at the cut "
+            "(they sit after it) on this install (matchcut centres them)") in otio.approximated
 
 
 def test_the_report_names_a_changed_bundle_or_stage(wsp, bundle, monkeypatch):
