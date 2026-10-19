@@ -24,15 +24,32 @@ from .conftest import exported
 # every method name the generated script may call: scripting calls documented in the Resolve 21.0.4 README, plus Python builtins
 DOCUMENTED = {
     "scriptapp", "GetProjectManager", "GetCurrentProject", "GetMediaPool", "ImportTimelineFromFile", "SetCurrentTimeline", "OpenPage",
-    "AddMarker", "SetCurrentTimecode", "GetTimelineCount", "GetTimelineByIndex", "GetName",
+    "AddMarker", "UpdateMarkerCustomData", "SetCurrentTimecode", "GetTimelineCount", "GetTimelineByIndex", "GetName",
 }
 MARKER_COLORS = {"Blue", "Cyan", "Green", "Yellow", "Red", "Pink", "Purple", "Fuchsia", "Rose", "Lavender", "Sky", "Mint", "Lemon", "Sand", "Cocoa", "Cream"}
 
 
 # -- a fake of the documented scripting API -----------------------------------------------------------
+class Behaviour:
+    """What the fake Resolve does: the happy path by default, each field switches one thing to its failure."""
+
+    def __init__(self, **kw):
+        self.no_resolve = False  # scriptapp returns None
+        self.no_project = False  # GetCurrentProject returns None
+        self.import_none = False  # ImportTimelineFromFile returns None (and creates nothing)
+        self.existing = []  # names of timelines the project already holds
+        self.markers_on = []  # frames that already carry a marker (the OTIO import brought them): AddMarker is False there
+        self.update_fails = False  # UpdateMarkerCustomData returns False
+        self.timecode_fails = False  # SetCurrentTimecode returns False
+        self.set_timeline_fails = False
+        self.page_fails = False
+        self.__dict__.update(kw)
+
+
 class FakeTimeline:
-    def __init__(self, log: list, name: str):
-        self.log, self.name = log, name
+    def __init__(self, log: list, name: str, how: Behaviour):
+        self.log, self.name, self.how = log, name, how
+        self.markers = {f: None for f in how.markers_on}  # frame -> customData
 
     def GetName(self):
         self.log.append(("Timeline.GetName",))
@@ -40,12 +57,24 @@ class FakeTimeline:
 
     def AddMarker(self, frameId, color, name, note, duration, customData):
         assert color in MARKER_COLORS and isinstance(frameId, int) and isinstance(customData, str) and isinstance(duration, int)
+        if frameId in self.markers:
+            self.log.append(("AddMarker", frameId, color, name, note, duration, customData, False))
+            return False
+        self.markers[frameId] = customData
         self.log.append(("AddMarker", frameId, color, name, note, duration, customData))
+        return True
+
+    def UpdateMarkerCustomData(self, frameId, customData):
+        assert isinstance(frameId, int) and isinstance(customData, str)
+        self.log.append(("UpdateMarkerCustomData", frameId, customData))
+        if self.how.update_fails or frameId not in self.markers:
+            return False
+        self.markers[frameId] = customData
         return True
 
     def SetCurrentTimecode(self, timecode):
         self.log.append(("SetCurrentTimecode", timecode))
-        return True
+        return not self.how.timecode_fails
 
 
 class FakeMediaPool:
@@ -55,14 +84,17 @@ class FakeMediaPool:
     def ImportTimelineFromFile(self, filePath, importOptions=None):
         assert set(importOptions or {}) <= {"timelineName", "importSourceClips", "sourceClipsPath", "sourceClipsFolders"}
         self.log.append(("ImportTimelineFromFile", filePath, dict(importOptions)))
-        tl = FakeTimeline(self.log, importOptions["timelineName"])
+        if self.project.how.import_none:
+            return None
+        tl = FakeTimeline(self.log, importOptions["timelineName"], self.project.how)
         self.project.timelines.append(tl)
         return tl
 
 
 class FakeProject:
-    def __init__(self, log: list):
-        self.log, self.timelines, self.current = log, [], None
+    def __init__(self, log: list, how: Behaviour):
+        self.log, self.how, self.current = log, how, None
+        self.timelines = [FakeTimeline(log, n, how) for n in how.existing]
 
     def GetMediaPool(self):
         self.log.append(("GetMediaPool",))
@@ -70,7 +102,7 @@ class FakeProject:
 
     def SetCurrentTimeline(self, timeline):
         self.log.append(("SetCurrentTimeline", timeline.name))
-        return True
+        return not self.how.set_timeline_fails
 
     def GetTimelineCount(self):
         return len(self.timelines)
@@ -80,36 +112,48 @@ class FakeProject:
 
 
 class FakeProjectManager:
-    def __init__(self, log: list):
-        self.log = log
+    def __init__(self, log: list, how: Behaviour):
+        self.log, self.how = log, how
 
     def GetCurrentProject(self):
         self.log.append(("GetCurrentProject",))
-        return FakeProject(self.log)
+        return None if self.how.no_project else FakeProject(self.log, self.how)
 
 
 class FakeResolve:
-    def __init__(self, log: list):
-        self.log = log
+    def __init__(self, log: list, how: Behaviour = None):
+        self.log, self.how = log, how or Behaviour()
 
     def GetProjectManager(self):
         self.log.append(("GetProjectManager",))
-        return FakeProjectManager(self.log)
+        return FakeProjectManager(self.log, self.how)
 
     def OpenPage(self, pageName):
         assert pageName in {"media", "photo", "cut", "edit", "fusion", "color", "fairlight", "deliver"}
         self.log.append(("OpenPage", pageName))
-        return True
+        return not self.how.page_fails
 
 
-def run_against_fake(script, monkeypatch, scripting=None):
-    """Run ``script`` (a path) with a fake DaVinciResolveScript module in place; return the call log."""
+def run_script(script, monkeypatch, how: Behaviour = None):
+    """Run ``script`` (a path) with a fake DaVinciResolveScript module in place; return (SystemExit argument or None, the call log)."""
     log: list = []
+    how = how or Behaviour()
     fake = types.ModuleType("DaVinciResolveScript")
-    fake.scriptapp = scripting or (lambda name: (log.append(("scriptapp", name)) or FakeResolve(log)))
+    fake.scriptapp = lambda name: (log.append(("scriptapp", name)) or (None if how.no_resolve else FakeResolve(log, how)))
     monkeypatch.setitem(sys.modules, "DaVinciResolveScript", fake)
-    runpy.run_path(str(script), run_name="__main__")
-    return [c for c in log if c[0] != "Timeline.GetName"]
+    code = None
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as exc:
+        code = exc.code if exc.code is not None else 0
+    return code, [c for c in log if c[0] != "Timeline.GetName"]
+
+
+def run_against_fake(script, monkeypatch, how: Behaviour = None):
+    """Run a script that is expected to succeed; return the call log."""
+    code, calls = run_script(script, monkeypatch, how)
+    assert code is None, code
+    return calls
 
 
 def final_inputs(world):
@@ -200,6 +244,94 @@ def test_odd_names_stay_one_literal_each(tmp_path, monkeypatch):
     calls = run_against_fake(script, monkeypatch)
     assert calls[4][1:] == (path, {"timelineName": name, "importSourceClips": True})
     assert [c for c in calls if c[0] == "AddMarker"][0][3:5] == note
+
+
+def write_script(tmp_path, world, **kw):
+    frames, notes, ids, _ = final_inputs(world)
+    path = tmp_path / "s.py"
+    path.write_text(resolve.resolve_script("/x/final.otio", "matchcut final", frames, ids[1], rate=world.src.rate, notes=notes, **kw))
+    return path, frames, ids
+
+
+def test_the_happy_path_prints_what_it_did_and_exits_cleanly(world, tmp_path, monkeypatch, capsys):
+    script, frames, ids = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch)
+    out = capsys.readouterr().out.splitlines()
+    assert code is None and f"{len(ids)} of {len(ids)} junctions carry their id as marker customData" in out
+    assert out[-1] == f"playhead at {_tc(frames[ids[1]], world.src.rate)} (junction {ids[1]})"
+    assert not any(c[0] == "UpdateMarkerCustomData" for c in calls)
+
+
+def test_no_resolve_or_no_project_exits_with_one_line(world, tmp_path, monkeypatch):
+    script, _, _ = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(no_resolve=True))
+    assert code == "cannot reach Resolve (is it running, Studio, external scripting = Local?)" and [c[0] for c in calls] == ["scriptapp"]
+    code, calls = run_script(script, monkeypatch, Behaviour(no_project=True))
+    assert code == "no project is open in Resolve" and calls[-1] == ("GetCurrentProject",)
+
+
+def test_a_failed_import_with_no_timeline_of_that_name_exits(world, tmp_path, monkeypatch):
+    script, _, _ = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(import_none=True, existing=["something else"]))
+    assert code == "timeline import failed: /x/final.otio" and not any(c[0] in ("AddMarker", "SetCurrentTimeline") for c in calls)
+
+
+def test_a_failed_import_falls_back_to_the_existing_timeline_and_says_so(world, tmp_path, monkeypatch, capsys):
+    script, frames, ids = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(import_none=True, existing=["matchcut final"]))
+    out = capsys.readouterr().out.splitlines()
+    assert code is None and calls[5] == ("SetCurrentTimeline", "matchcut final")
+    assert out[0] == "timeline matchcut final already existed: markers added to it; delete it and re-run to import the new export"
+    assert [c[6] for c in calls if c[0] == "AddMarker"] == ids
+    # a successful import never prints that line
+    run_script(script, monkeypatch)
+    assert "already existed" not in capsys.readouterr().out
+
+
+def test_markers_that_came_with_the_import_get_the_junction_id_through_update_marker_custom_data(world, tmp_path, monkeypatch, capsys):
+    script, frames, ids = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(markers_on=list(frames.values())))
+    assert code is None
+    assert [(c[1], c[2]) for c in calls if c[0] == "UpdateMarkerCustomData"] == [(frames[j], j) for j in ids]
+    assert f"{len(ids)} of {len(ids)} junctions carry their id as marker customData" in capsys.readouterr().out
+    # only the frames that were taken are updated
+    taken = [frames[ids[0]]]
+    code, calls = run_script(script, monkeypatch, Behaviour(markers_on=taken))
+    assert code is None and [c[1] for c in calls if c[0] == "UpdateMarkerCustomData"] == taken
+
+
+def test_a_junction_that_ends_up_without_its_id_is_counted_and_the_exit_is_non_zero(world, tmp_path, monkeypatch, capsys):
+    script, frames, ids = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(markers_on=list(frames.values()), update_fails=True))
+    out = capsys.readouterr().out
+    assert code.startswith(f"{len(ids)} junctions have no marker with their id")
+    assert f"0 of {len(ids)} junctions carry their id as marker customData; without it: {', '.join(ids)}" in out
+    # one of them only
+    code, calls = run_script(script, monkeypatch, Behaviour(markers_on=[frames[ids[0]]], update_fails=True))
+    assert code == "1 junctions have no marker with their id"
+    assert f"{len(ids) - 1} of {len(ids)} junctions carry their id as marker customData; without it: {ids[0]}" in capsys.readouterr().out
+
+
+def test_a_failed_playhead_prints_the_start_timecode_hint_and_exits(world, tmp_path, monkeypatch, capsys):
+    script, frames, ids = write_script(tmp_path, world, start_tc="01:00:00:00")
+    code, calls = run_script(script, monkeypatch, Behaviour(timecode_fails=True))
+    out = capsys.readouterr().out
+    assert code == "playhead not set" and "playhead at" not in out
+    assert "could not set the playhead to " in out and "the imported timeline may not start at 01:00:00:00: set START_TC" in out
+    assert calls[-1][0] == "SetCurrentTimecode"
+
+
+def test_the_timeline_that_cannot_be_made_current_exits_and_a_failed_page_only_warns(world, tmp_path, monkeypatch, capsys):
+    script, _, _ = write_script(tmp_path, world)
+    code, calls = run_script(script, monkeypatch, Behaviour(set_timeline_fails=True))
+    assert code == "cannot make the timeline matchcut final current" and not any(c[0] == "AddMarker" for c in calls)
+    code, calls = run_script(script, monkeypatch, Behaviour(page_fails=True))
+    assert code is None and "warning: could not open the Edit page" in capsys.readouterr().out
+
+
+def test_the_script_no_longer_calls_the_markers_harmless():
+    text = resolve.resolve_script("/x/a.otio", "t", {"a-b": 1}, "a-b")
+    assert "harmless" not in text and "UpdateMarkerCustomData" in text
 
 
 @pytest.mark.parametrize("kwargs, message", [

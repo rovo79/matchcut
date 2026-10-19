@@ -756,10 +756,78 @@ def test_a_stage_exported_again_in_one_format_leaves_only_the_other_formats_stal
     (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
     res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
     note = next(n for n in res.notes if "stale" in n)
-    assert note.endswith(": matchcut.fcpxml (project roughcut), roughcut.edl") and "roughcut.otio" not in note  # the otio file is current
+    assert "stale in fidelity.json: matchcut.fcpxml (project roughcut), roughcut.edl;" in note and "roughcut.otio" not in note  # the otio file is current
+    assert note.endswith("provenance.json now describes the new export of roughcut") and "stale in provenance.json" not in note
     fid = json.loads((out / "fidelity.json").read_text())["stages"]["roughcut"]
     assert "stale" not in fid["otio"] and fid["edl"]["stale"] is True and fid["fcpxml"]["stale"] is True
     assert "stale" not in json.loads((out / "provenance.json").read_text())["stages"]["roughcut"]
+
+
+def test_a_fully_stale_stage_names_each_json_file_and_the_whole_stage_in_provenance(wsx):
+    export_workspace(wsx.ws, wsx.cfg)
+    rough = json.loads((wsx.ws / "roughcut.json").read_text())
+    rough["name"] = "re-run"
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    note = next(n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes if "stale" in n)
+    assert ("stale in fidelity.json: roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl; "
+            "stale in provenance.json: roughcut (roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl)") in note
+    assert "now describes the new export" not in note
+
+
+def read_target(path: Path) -> str:
+    return re.search(r"^TIMELINE_FILE = '.*/(\w+)\.otio'$", path.read_text(), re.M).group(1)
+
+
+def test_an_existing_resolve_script_is_regenerated_when_its_otio_is_exported_again_flag_or_not(wsx):
+    out = wsx.ws / "exports"
+    script = out / "open_in_resolve.py"
+    export_workspace(wsx.ws, wsx.cfg, resolve_script=True)
+    assert read_target(script) == "final" and "regenerated" not in " ".join(n for n in export_workspace(wsx.ws, wsx.cfg, resolve_script=True).notes)
+    final = json.loads((wsx.ws / "final.json").read_text())
+    final["clips"][0]["source_out"] = round(final["clips"][0]["source_out"] - 0.2, 4)  # moves every later cut
+    (wsx.ws / "final.json").write_text(json.dumps(final))
+    old = script.read_text()
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio", "edl"))  # no flag
+    assert script.read_text() != old and script in res.files
+    assert "open_in_resolve.py regenerated for the new final.otio" in res.notes
+    assert not any("open_in_resolve.py was made" in n for n in res.notes)
+    # the regenerated script is what the flag would have written
+    fresh = script.read_text()
+    export_workspace(wsx.ws, wsx.cfg, resolve_script=True)
+    assert script.read_text() == fresh
+    # a script for another stage than final follows its own stage
+    export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",), resolve_script=True)
+    assert read_target(script) == "roughcut"
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))
+    assert read_target(script) == "roughcut" and "regenerated" not in " ".join(res.notes)
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut", "final"), formats=("edl",))
+    assert "regenerated" not in " ".join(res.notes)  # the OTIO was not exported again
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut", "final"), formats=("otio",))
+    assert "open_in_resolve.py regenerated for the new roughcut.otio" in res.notes
+
+
+def test_no_script_is_written_without_the_flag_or_an_earlier_script(wsx):
+    export_workspace(wsx.ws, wsx.cfg)
+    assert not (wsx.ws / "exports" / "open_in_resolve.py").exists()
+    (wsx.ws / "exports" / "open_in_resolve.py").write_text("print('mine')\n")  # a file of the user's that is not ours: left alone
+    export_workspace(wsx.ws, wsx.cfg)
+    assert (wsx.ws / "exports" / "open_in_resolve.py").read_text() == "print('mine')\n"
+
+
+def test_a_script_for_an_otio_that_was_not_exported_again_is_named_in_the_stale_note(wsx):
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg, resolve_script=True)
+    final = json.loads((wsx.ws / "final.json").read_text())
+    final["name"] = "re-run"
+    (wsx.ws / "final.json").write_text(json.dumps(final))
+    old = (out / "open_in_resolve.py").read_text()
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
+    note = next(n for n in res.notes if "stale" in n)
+    assert note.endswith("open_in_resolve.py was made for the old final.otio") and "final.otio" in note
+    assert (out / "open_in_resolve.py").read_text() == old
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))  # regenerates it
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
+    assert not any("open_in_resolve.py was made" in n for n in res.notes)
 
 
 def test_a_stale_record_whose_files_are_gone_is_dropped(wsx):
@@ -833,3 +901,39 @@ def test_an_fcpxml_edited_by_hand_in_its_text(wsx):
     path.write_text(ET.tostring(root, encoding="unicode"))
     res = import_timeline(wsx.ws, wsx.cfg, path)
     assert summary(res.decisions) == [("trim", ["c005"], {"in_frames": 5, "out_frames": 0})], (res.decisions, res.notes)
+
+
+# -- the documented example script ------------------------------------------------------------------------
+def load_simulator():
+    import importlib.util
+    path = Path(__file__).resolve().parents[2] / "docs" / "examples" / "m2a" / "simulate_editor.py"
+    spec = importlib.util.spec_from_file_location("simulate_editor", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.mark.parametrize("strip", [False, True])
+def test_simulate_editor_edits_only_the_mirrored_tracks_of_a_workspace_with_music(wsx, music_file, capsys, strip):
+    """The music track A2 has one clip: the example script leaves it alone, and its edits still import as the three decisions."""
+    cfg = copy.deepcopy(wsx.cfg)
+    cfg.music = MusicConfig(path=str(music_file), start=1.0, gain_db=-6.0)
+    export_workspace(wsx.ws, cfg, stages=("final",), formats=("otio",))
+    src = wsx.ws / "exports" / "final.otio"
+    before = json.loads(src.read_text())
+    assert [t["name"] for t in before["tracks"]["children"]] == ["V1", "A1", "A2"]
+    edited = wsx.tmp / "edited.otio"
+    code = load_simulator().main([str(src), str(edited)] + (["--strip-metadata"] if strip else []))
+    out = capsys.readouterr().out
+    assert code == 0 and "A2: left alone" in out and "A1: trimmed the head" in out
+    after = json.loads(edited.read_text())
+    assert after["tracks"]["children"][2]["children"] == before["tracks"]["children"][2]["children"]
+    res = import_timeline(wsx.ws, cfg, edited)
+    assert [d.action for d in res.decisions] == ["removed", "trim", "transition"]
+
+
+def test_simulate_editor_copes_with_a_cut_without_dissolves(wsx, capsys):
+    export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
+    edited = wsx.tmp / "edited.otio"
+    assert load_simulator().main([str(wsx.ws / "exports" / "roughcut.otio"), str(edited)]) == 0
+    assert "no transition to turn into a cut" in capsys.readouterr().out

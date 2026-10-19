@@ -110,10 +110,16 @@ by FCP or Resolve accepts arbitrary rationals and renumbered ids.
 `interchange/resolve.py` generates a Python script that uses only scripting calls
 documented in the Resolve 21.0.4 README (scriptapp, GetProjectManager,
 GetCurrentProject, GetMediaPool, ImportTimelineFromFile, SetCurrentTimeline,
-OpenPage, Timeline.AddMarker with customData = junction id, SetCurrentTimecode,
-GetTimelineCount/GetTimelineByIndex/GetName). It needs Resolve Studio with external
+OpenPage, Timeline.AddMarker with customData = junction id, Timeline.UpdateMarkerCustomData
+when a marker already sits on the frame, SetCurrentTimecode,
+GetTimelineCount/GetTimelineByIndex/GetName). The script checks every return value: a
+junction that ends up without its id as marker customData is counted and makes it exit
+non-zero, a failed playhead prints the start-timecode hint and exits non-zero, and a
+timeline that already existed under that name is said so. It needs Resolve Studio with external
 scripting = Local; it is never run by matchcut. Assumptions it cannot verify (the
-imported timeline's start timecode) are stated in the script and the docs.
+imported timeline's start timecode) are stated in the script and the docs. `open_in_resolve.py`
+is derived output: an export that writes the OTIO of the stage it targets regenerates it, flag or not,
+and a stale record names it.
 
 ## CLI
 

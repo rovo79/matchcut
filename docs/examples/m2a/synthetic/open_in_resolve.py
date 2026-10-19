@@ -3,8 +3,8 @@
 
 Opens the exported OTIO timeline in the open Resolve project and adds one marker per matchcut junction (customData = junction id).
 Uses only scripting calls listed in the Resolve 21.0.4 README: scriptapp, GetProjectManager, GetCurrentProject, GetMediaPool,
-ImportTimelineFromFile, SetCurrentTimeline, OpenPage, Timeline.AddMarker, Timeline.SetCurrentTimecode, GetTimelineCount,
-GetTimelineByIndex, GetName. No transitions, fades or metadata are written by this script.
+ImportTimelineFromFile, SetCurrentTimeline, OpenPage, Timeline.AddMarker, Timeline.UpdateMarkerCustomData, Timeline.SetCurrentTimecode,
+GetTimelineCount, GetTimelineByIndex, GetName. No transitions, fades or metadata are written by this script.
 
 Needs DaVinci Resolve Studio running, with Preferences > System > General > External scripting using = Local.
 Not run against a live Resolve by matchcut's authors (human gate, see docs/M2A-ACCEPTANCE.md). Assumptions this script cannot check, all UNVERIFIED:
@@ -14,7 +14,9 @@ Not run against a live Resolve by matchcut's authors (human gate, see docs/M2A-A
     markers or the playhead land elsewhere, set the timeline's start timecode to START_TC (Timeline Settings) or edit START_TC and NAVIGATE_TC.
   * media conform: the files carry source times in the media's embedded start timecode. It is assumed that Resolve relinks the
     camera media by path and conforms it from that timecode.
-  * AddMarker returns False when a marker already sits on that frame (the OTIO import may have brought one): that is harmless.
+  * AddMarker returns False when a marker already sits on that frame (Resolve may bring matchcut's own OTIO markers along). The script
+    then sets the junction id on that marker with Timeline.UpdateMarkerCustomData; a junction whose marker ends up without the id is
+    counted and the script exits non-zero. Every other call's return value is checked too.
 """
 import os
 import sys
@@ -50,19 +52,37 @@ def main():
         sys.exit("no project is open in Resolve")
     pool = project.GetMediaPool()
     timeline = pool.ImportTimelineFromFile(TIMELINE_FILE, {"timelineName": TIMELINE_NAME, "importSourceClips": True})
-    if not timeline:  # fall back to a lookup by name
+    if not timeline:  # the import failed or returned nothing: look for a timeline of that name
         for i in range(1, project.GetTimelineCount() + 1):
             if project.GetTimelineByIndex(i).GetName() == TIMELINE_NAME:
                 timeline = project.GetTimelineByIndex(i)
+        if timeline:
+            print("timeline %s already existed: markers added to it; delete it and re-run to import the new export" % TIMELINE_NAME)
     if not timeline:
         sys.exit("timeline import failed: " + TIMELINE_FILE)
-    project.SetCurrentTimeline(timeline)
-    resolve.OpenPage("edit")
+    if not project.SetCurrentTimeline(timeline):
+        sys.exit("cannot make the timeline %s current" % TIMELINE_NAME)
+    if not resolve.OpenPage("edit"):
+        print("warning: could not open the Edit page")
+    missing = []
     for jid, frame in JUNCTIONS.items():
         name, note = NOTES.get(jid, (jid, ""))
-        timeline.AddMarker(frame, "Green", name, note, 1, jid)  # customData = junction id
-    timeline.SetCurrentTimecode(NAVIGATE_TC)
-    print("playhead at %s (%s)" % (NAVIGATE_TC, ("junction " + NAVIGATE_TO) if NAVIGATE_TO else "start of the timeline"))
+        if timeline.AddMarker(frame, "Green", name, note, 1, jid):  # customData = junction id
+            continue
+        # AddMarker is False when a marker already sits on that frame (Resolve may bring matchcut's own OTIO markers along):
+        # give that marker the junction id instead
+        if not timeline.UpdateMarkerCustomData(frame, jid):
+            missing.append(jid)
+    print("%d of %d junctions carry their id as marker customData" % (len(JUNCTIONS) - len(missing), len(JUNCTIONS))
+          + ("; without it: " + ", ".join(missing) if missing else ""))
+    problems = ["%d junctions have no marker with their id" % len(missing)] if missing else []
+    if timeline.SetCurrentTimecode(NAVIGATE_TC):
+        print("playhead at %s (%s)" % (NAVIGATE_TC, ("junction " + NAVIGATE_TO) if NAVIGATE_TO else "start of the timeline"))
+    else:
+        print("could not set the playhead to %s: the imported timeline may not start at %s: set START_TC" % (NAVIGATE_TC, START_TC))
+        problems.append("playhead not set")
+    if problems:
+        sys.exit("; ".join(problems))
 
 
 if __name__ == "__main__":

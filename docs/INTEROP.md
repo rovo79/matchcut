@@ -30,7 +30,7 @@ python -m matchcut.pipeline.cli junctions WORKSPACE                    # the hum
 `polish`, `final`); `--format` is `otio`, `fcpxml` or `edl`. Both commands print one
 line per file or decision and exit 1 with a one-line message on stderr for any
 failure (`no stage X in WS`, `unknown format aaf: use otio, fcpxml or edl`,
-`source footage not found: ...`). A sample run is in
+`source footage not found: ...`). Example outputs are in
 [examples/m2a/synthetic/](examples/m2a/synthetic/README.md).
 
 | File (in `WORKSPACE/exports/`) | What |
@@ -43,7 +43,7 @@ failure (`no stage X in WS`, `unknown format aaf: use otio, fcpxml or edl`,
 | `open_in_resolve.py` | only with `--resolve-script` |
 
 The `final.edl` that `run` writes in the workspace root is the older delivery EDL
-(`render.py`: source times from frame 0, no media timecode, no ids). For an editor
+(`Timeline.to_edl`, written by `pipeline.py` at the end of the run: source times from frame 0, no media timecode, no ids). For an editor
 use `exports/final.edl`.
 
 ## What each format carries
@@ -63,7 +63,7 @@ for frame) at export time; it says nothing about what an editor does with the fi
 | Source audio | follows the picture (track `A1` mirrors the clips) | the asset's own audio | `AA/V` events |
 | Music file, start, gain | track `A2` + metadata | connected clip on lane -1 with a volume adjustment | not carried |
 | Ducking, loudness normalisation | lost | lost | lost |
-| Junction id (`s<out>-s<in>`) | marker name and metadata | marker value, keyword `mc:<id>`, `md` key | `* MATCHCUT JUNCTION` comment |
+| Junction id (`s<out>-s<in>`) | marker metadata (the marker's name is `J<n> s<out>->s<in>`) | marker value (`s0-s1 (s0 -> s1)`), keyword `mc:<id>`, `md` key on the dissolve | `* MATCHCUT JUNCTION` comment |
 | Why line | marker metadata (full) and marker `comment` (cut to 240 characters) | marker `note`, cut to 240 characters | not carried |
 | History, pin state | marker metadata | not carried | not carried |
 | Scores, per-pass states, decisions | `provenance.json` only | `provenance.json` only | `provenance.json` only |
@@ -165,10 +165,12 @@ Interchange files carry ids; the decisions live in `provenance.json`.
   The earlier records of other stages stay while their stage file is unchanged (and, for
   FCPXML, while `matchcut.fcpxml` still has that stage's project). If a stage file
   **changed** since (a re-run of the pipeline), the old record is not dropped while its
-  exported files are still in the directory: it is kept and flagged `"stale": true` in both `provenance.json`
-  and `fidelity.json` (`fidelity.md` marks the row **STALE**), and the export prints one note naming the files whose record is stale
-  (`roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl`). Export that stage again to
-  replace it; if the stage file goes back to what was exported, the flag clears.
+  exported files are still in the directory: it is kept and flagged `"stale": true` in `provenance.json` (the stage as a whole)
+  and in `fidelity.json` (per format; `fidelity.md` marks the row **STALE**), and the export prints one note naming the files whose record is stale, per JSON file
+  (`stale in fidelity.json: roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl; stale in provenance.json: roughcut (...)`). A fidelity entry is
+  stale per format: if you export that stage again in one format only, `provenance.json` describes the new export, that format's entry is current, and
+  the note says `provenance.json now describes the new export of roughcut` while the other formats' entries stay flagged. Export that stage again to
+  replace the rest; if the stage file goes back to what was exported, the flag clears.
   A stale entry never fails an export and does not count in `fidelity.json`'s `ok`.
 - If an editor drops every id, import falls back to the clip's name (`... shot<N>`), then to its
   source range against the shot bounds (`shots.json`), and says how many clips needed that.
@@ -248,7 +250,7 @@ checklist in M2A-ACCEPTANCE.md is done.
    It uses only scripting calls documented in the Resolve 21.0.4 README: `scriptapp`,
    `GetProjectManager`, `GetCurrentProject`, `GetMediaPool`, `ImportTimelineFromFile`,
    `SetCurrentTimeline`, `OpenPage`, `Timeline.AddMarker` (customData = the junction id),
-   `SetCurrentTimecode`, `GetTimelineCount`, `GetTimelineByIndex`, `GetName`. It imports
+   `Timeline.UpdateMarkerCustomData`, `SetCurrentTimecode`, `GetTimelineCount`, `GetTimelineByIndex`, `GetName`. It imports
    `final.otio` (else the last exported stage's), adds a marker per junction at the cut frame with the same name as the OTIO marker and
    the why line as its note, and parks the playhead on the first junction with a transition. It does not add
    transitions or fades, and sets no metadata. It needs **Resolve Studio** running with
@@ -259,8 +261,13 @@ checklist in M2A-ACCEPTANCE.md is done.
    (above). Its `START_TC` is the record start matchcut writes (00:00:00:00); marker frame ids are record
    frames from the timeline start and the playhead timecode is `START_TC` plus the junction's frame. If Resolve starts the
    timeline elsewhere (its default is often 01:00:00:00), set the timeline's start timecode to `START_TC` in Timeline
-   Settings or edit `START_TC` and `NAVIGATE_TC`. `AddMarker` returns False when a marker already sits on
-   that frame (the OTIO import may have brought one); that is harmless. `TIMELINE_FILE` is the absolute path of the OTIO file at export time: edit it if you move the directory.
+   Settings or edit `START_TC` and `NAVIGATE_TC`. The script checks what Resolve returns. `AddMarker` is False when a marker already
+   sits on that frame (Resolve may bring matchcut's own OTIO markers along): the script then gives that marker the junction id with
+   `UpdateMarkerCustomData`, prints how many junctions carry their id and exits non-zero if any does not. If `SetCurrentTimecode` fails it
+   prints the start-timecode hint and exits non-zero. If the import returns nothing and a timeline of that name already exists, it says
+   `timeline X already existed: markers added to it; delete it and re-run to import the new export` and uses that timeline. `TIMELINE_FILE` is the absolute path of the OTIO file at export time: edit it if you move the directory.
+   `open_in_resolve.py` is derived output: any export that writes the OTIO of the stage the script targets regenerates it (flag or not) and says so; if
+   that OTIO was not exported again and the stage file changed, the stale note names the script too.
 3. **Resolve's native MCP server (21.1) is not used.** It has about 14 tools, mostly `run_script`
    around the same scripting API (third-party measurements; Blackmagic's own pages could not be read), and no
    verified frame-accurate editing tools. Anything it could do for matchcut a documented script does,
@@ -277,7 +284,7 @@ Import `matchcut.fcpxml` (File > Import > XML). The file is valid against Apple'
 DTD (`xmllint --dtdvalid`, an optional automated check). UNVERIFIED in the application: that FCP opens it without
 warnings, that the dissolves are Cross Dissolves (the effect id is taken from real exports, secondary evidence), whether the
 markers, keywords and `md` keys survive, and a dip to black ("Fade To Color" id from secondary sources). FCP
-has no scripting API; the markers (`J<n>`/junction id and the why line as the note) and the keywords `mc:<id>` are
+has no scripting API; the markers (value `s0-s1 (s0 -> s1)`, the why line as the note) and the keywords `mc:<id>` are
 the navigation aids. After editing, export XML again and `import` it: FCP renumbers resource ids and changes time
 bases, which the reader accepts.
 

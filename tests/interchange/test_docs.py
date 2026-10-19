@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from matchcut.interchange.fidelity import KNOWN
+from matchcut.interchange.workspace import export_workspace
 
 DOCS = Path(__file__).resolve().parents[2] / "docs"
 INTEROP = DOCS / "INTEROP.md"
@@ -30,10 +31,51 @@ def test_no_format_is_called_lossless_and_no_model_is_named(doc):
     assert not MODEL_IDS.search(text), MODEL_IDS.search(text).group(0)
 
 
-def test_the_example_exports_carry_no_machine_specific_paths():
-    for path in (DOCS / "examples" / "m2a" / "synthetic").iterdir():
-        text = path.read_text(encoding="utf-8")
-        assert "scratchpad" not in text and "/tmp/" not in text and "/root/" not in text, path.name
+EXAMPLES = DOCS / "examples" / "m2a" / "synthetic"
+PLACEHOLDER = "/ABSOLUTE/PATH/TO"
+_PATH = re.compile(r"(?:^|[\s\"'=(>]|file://)(/[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]*)+)", re.M)
+_INSTALL_PATHS = ("/Library/Application", "/opt/resolve/Developer/Scripting")  # where Resolve keeps its scripting modules (in open_in_resolve.py)
+
+
+def example_files():
+    return sorted(p for p in EXAMPLES.iterdir() if p.is_file() and p.suffix in (".json", ".otio", ".fcpxml", ".edl", ".md", ".py"))
+
+
+def test_the_example_exports_carry_no_absolute_path_but_the_placeholder():
+    assert len(example_files()) == 7
+    for path in example_files():
+        for found in _PATH.findall(path.read_text(encoding="utf-8")):
+            assert found.startswith((PLACEHOLDER,) + _INSTALL_PATHS), (path.name, found)
+
+
+def test_the_path_check_catches_home_and_tmp_paths():
+    assert _PATH.findall('"source": "/home/someone/demo.mp4", url file:///tmp/x/y.otio and /root/a/b') == ["/home/someone/demo.mp4", "/tmp/x/y.otio", "/root/a/b"]
+    assert _PATH.findall('TIMELINE_FILE = \'/ABSOLUTE/PATH/TO/exports/final.otio\' 106/25s AA/V') == ["/ABSOLUTE/PATH/TO/exports/final.otio"]
+
+
+def _normalise(text: str, footage: Path, exports: Path) -> str:
+    """What differs legitimately between the committed examples and a fresh run: where the footage and the exports directory are, the
+    footage's modification time, the uids and hashes derived from paths and file contents, and the installed matchcut version."""
+    text = text.replace(str(exports), PLACEHOLDER + "/exports").replace(str(footage.parent), PLACEHOLDER)
+    text = text.replace(footage.parent.as_uri(), "file://" + PLACEHOLDER)
+    text = re.sub(r'"mtime_ns": \d+', '"mtime_ns": 0', text)
+    text = re.sub(r'(com\.matchcut\.source_mtime_ns" value=)"\d+"', r'\1"0"', text)
+    text = re.sub(r'"canonical_sha256": "[0-9a-f]*"', '"canonical_sha256": "-"', text)
+    text = re.sub(r'(uid="com\.matchcut\.source\.)[0-9a-f]+"', r'\1-"', text)
+    text = re.sub(r'("matchcut_version": )"[^"]*"', r'\1"-"', text)
+    return re.sub(r'(com\.matchcut\.matchcut_version" value=)"[^"]*"', r'\1"-"', text)
+
+
+def test_the_committed_examples_are_what_the_code_writes_now(wsx):
+    """Regenerates the examples on the fixture workspace and compares them with docs/examples/m2a/synthetic/ after normalising the paths,
+    the footage's mtime, the path-derived uids, the stage-file hashes and the matchcut version (see ``_normalise``)."""
+    export_workspace(wsx.ws, wsx.cfg, resolve_script=True)
+    out = wsx.ws / "exports"
+    footage = Path(wsx.world.video)
+    for name in ("final.otio", "matchcut.fcpxml", "final.edl", "fidelity.md", "provenance.json", "open_in_resolve.py"):
+        fresh = _normalise((out / name).read_text(encoding="utf-8"), footage, out)
+        committed = _normalise((EXAMPLES / name).read_text(encoding="utf-8"), Path(PLACEHOLDER) / "x.mp4", Path(PLACEHOLDER) / "exports")
+        assert fresh == committed, f"{name} differs from the code's output: regenerate docs/examples/m2a/synthetic/ (see its README)"
 
 
 def test_the_acceptance_doc_keeps_every_human_gate_pending():

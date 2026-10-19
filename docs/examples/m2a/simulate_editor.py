@@ -3,7 +3,7 @@
 
     python docs/examples/m2a/simulate_editor.py EXPORTED.otio EDITED.otio [--strip-metadata]
 
-Three edits, applied to the video track and to the audio track that mirrors it:
+Three edits, applied to the first video track and to every audio track that mirrors it (same clip names; a music track is left alone):
   1. the second clip is trimmed by 5 frames at its head,
   2. the first dissolve is turned into a cut (the Transition item is deleted),
   3. the last clip is deleted (with its junction marker).
@@ -35,9 +35,13 @@ def edit_track(track: dict, strip: bool) -> list:
     trim["source_range"]["start_time"]["value"] += 5
     trim["source_range"]["duration"]["value"] -= 5
     done.append(f"trimmed the head of {trim['name']} by 5 frames")
-    first = min(i for i, k in enumerate(kids) if is_transition(k))  # 2. dissolve -> cut
-    done.append(f"deleted the transition before {kids[first + 1]['name']} ({kids[first]['name']})")
-    del kids[first]
+    firsts = [i for i, k in enumerate(kids) if is_transition(k)]  # 2. dissolve -> cut
+    if firsts:
+        first = firsts[0]
+        done.append(f"deleted the transition before {kids[first + 1]['name']} ({kids[first]['name']})")
+        del kids[first]
+    else:
+        done.append("no transition to turn into a cut")
     gone = [k for k in kids if is_clip(k)][-1]  # 3. delete the last clip
     done.append(f"deleted the clip {gone['name']}")
     kids.remove(gone)
@@ -60,7 +64,14 @@ def main(argv: list) -> int:
         return 2
     with open(args[0], encoding="utf-8") as fh:
         doc = json.load(fh)
-    for track in doc["tracks"]["children"]:
+    tracks = doc["tracks"]["children"]
+    video = next(t for t in tracks if t.get("kind") == "Video")
+    names = [k["name"] for k in video["children"] if is_clip(k)]
+    for track in tracks:
+        mirror = track is video or (track.get("kind") == "Audio" and [k["name"] for k in track["children"] if is_clip(k)] == names)
+        if not mirror or len(names) < 2:
+            print(f"{track['name']}: left alone")
+            continue
         for line in edit_track(track, "--strip-metadata" in argv):
             print(f"{track['name']}: {line}")
     if "--strip-metadata" in argv:

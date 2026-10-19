@@ -16,9 +16,11 @@ the stage that was imported against.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -192,6 +194,17 @@ def _carried_results(old: Optional[Dict[str, Any]], out: Path, hashes: Dict[str,
 
 
 # -- export ------------------------------------------------------------------------------------------
+def _script_target(out: Path) -> Optional[str]:
+    """The stage an existing ``open_in_resolve.py`` in ``out`` imports (the stem of its ``TIMELINE_FILE``), or None."""
+    try:
+        text = (out / RESOLVE_SCRIPT).read_text(encoding="utf-8")
+        found = re.search(r"^TIMELINE_FILE = (.+)$", text, re.M)
+        name = Path(ast.literal_eval(found.group(1))).name if found else ""
+    except (OSError, ValueError, SyntaxError):
+        return None
+    return name[: -len(".otio")] if name.endswith(".otio") and len(name) > len(".otio") else None
+
+
 def _resolve_script_text(out: Path, stage: str, tl: Timeline, junctions: Sequence[Junction], src: SourceInfo, name: str) -> str:
     """The Resolve script for ``<out>/<stage>.otio``: a marker per junction at the cut frame the OTIO file carries, the playhead at the first
     junction with a transition (else the first).  The timeline starts at 00:00:00:00, which is what every exporter writes."""
@@ -269,12 +282,18 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
             _atomic_write(path, export_edl(snapped[s], s, src, f"{stem} - {s}", music))
             files.append(path)
             texts[(s, "edl")] = path.read_text(encoding="utf-8")
-    if resolve_script:
-        pick = "final" if "final" in stages else stages[-1]
+    # open_in_resolve.py is derived output: with the flag it is written for the final stage (else the last exported); without it an existing
+    # script is regenerated whenever the OTIO of the stage it targets is exported again, so it never points at frames the file no longer has
+    target = _script_target(out)
+    pick = ("final" if "final" in stages else stages[-1]) if resolve_script else (target if target in stages and "otio" in formats else None)
+    if pick:
         path = out / RESOLVE_SCRIPT
         _atomic_write(path, _resolve_script_text(out, pick, snapped[pick], junctions[pick], src, stem))
         files.append(path)
-        notes.append(f"{RESOLVE_SCRIPT} imports {pick}.otio into Resolve Studio (external scripting = Local); matchcut does not run it")
+        if resolve_script:
+            notes.append(f"{RESOLVE_SCRIPT} imports {pick}.otio into Resolve Studio (external scripting = Local); matchcut does not run it")
+        else:
+            notes.append(f"{RESOLVE_SCRIPT} regenerated for the new {pick}.otio")
     prov = out / "provenance.json"
     hashes = {s: _sha256(stage_files[s]) for s in by_stage}
     old_prov, old_fidelity = _read_json(prov), _read_json(out / "fidelity.json")
@@ -311,12 +330,22 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
         notes.append("the earlier records of this directory are kept where their stage file is unchanged: "
                      + ", ".join([f"provenance {s}" for s in kept] + [f"fidelity {r.stage}/{r.fmt}" for r in current]))
     # a stage's provenance record is stale as a whole; a fidelity entry is stale for its own format's file only (the stage may have been
-    # exported again in another format since: that file is current)
-    stale_files = _unique([n for s in stale_prov for n in _record_files(out, s)]
-                          + [n for r in carried if r.stale for n in _record_files(out, r.stage, r.fmt)])
-    if stale_files:
-        notes.append("the stage file changed since these were exported, so their records in provenance.json and fidelity.json are kept but "
-                     "flagged stale (export the stage again to refresh them): " + ", ".join(stale_files))
+    # exported again in another format since: that file is current, and provenance.json describes the new export)
+    fid_files = _unique([n for r in carried if r.stale for n in _record_files(out, r.stage, r.fmt)])
+    prov_files = _unique([n for s in stale_prov for n in _record_files(out, s)])
+    script_stale = bool(target) and (out / RESOLVE_SCRIPT).exists() and any(r.stale and r.stage == target and r.fmt == "otio" for r in carried)
+    if fid_files or prov_files or script_stale:
+        parts = []
+        if fid_files:
+            parts.append("stale in fidelity.json: " + ", ".join(fid_files))
+        if prov_files:
+            parts.append("stale in provenance.json: " + ", ".join(_unique(stale_prov)) + f" ({', '.join(prov_files)})")
+        again = _unique([r.stage for r in carried if r.stale and r.stage in stages and r.stage not in stale_prov])
+        if again:
+            parts.append("provenance.json now describes the new export of " + ", ".join(again))
+        if script_stale:
+            parts.append(f"{RESOLVE_SCRIPT} was made for the old {target}.otio")
+        notes.append("the stage file changed since these were exported (export the stage again to refresh them); " + "; ".join(parts))
     stale = stale_human(ws)
     if stale:
         notes.append(stale)
