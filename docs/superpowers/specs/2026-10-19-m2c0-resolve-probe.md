@@ -31,32 +31,40 @@ fidelity differences.
   - prints the one command to run.
   - With `--run`, it runs the script directly when Resolve's scripting module can be imported, and
     says plainly when it cannot.
-- `python DIR/resolve_probe.py`, with Resolve Studio running and Preferences > System > General >
-  External scripting using = Local. The script finds Resolve's scripting module from the documented
-  environment variables and default install paths, and says exactly what to set when it cannot.
-- `python -m matchcut.resolve report WS DIR/resolve_probe.json`
+- `python DIR/resolve_probe.py [--dry-run] [--yes] [--out FILE]`, with Resolve Studio running and Preferences > System >
+  General > External scripting using = Local. The script finds Resolve's scripting module from the documented
+  environment variables and default install paths, and says exactly what to set when it cannot (and names a module
+  file that exists but fails to import). Every run writes its own `DIR/runs/<UTC time>/` (`resolve_probe.json`,
+  `exports/`), so no run replaces another's (review M6).
+- `python -m matchcut.resolve report WS DIR` (the latest run) or `... report WS DIR/runs/<UTC time>/resolve_probe.json`
   - prints, per route, what was preserved, approximated and lost, compared with `expected.json` and
     with the stage;
   - re-imports each OTIO/FCPXML/EDL the probe exported with M2a's `import_timeline` readers, in a
     scratch copy and never into the workspace;
   - recommends a default route for M2c-1, or says none is usable;
-  - writes `DIR/probe_report.md`.
+  - writes `probe_report.md` in the run's directory.
 
 ## Safety
 
 - **The probe never modifies an existing user project.**
-  - Before anything else it records the current project's name.
-  - It refuses to continue unless that project is Resolve's empty default ("Untitled Project") or an
-    earlier `matchcut-probe-*` project. The message tells you to save and close your project first.
-    `CreateProject` switches projects, and the API cannot tell whether the current one has unsaved
-    changes.
-  - It never calls `SaveProject` on a project it did not create.
+  - Before anything else it records the current project's name and contents, with documented reads:
+    `Project.GetTimelineCount()`, and the media pool root folder's `GetClipList()` and `GetSubFolderList()`.
+  - It refuses to continue unless that project is an **empty** "Untitled Project" (no timeline, no clip, no media pool
+    folder) or an earlier `matchcut-probe-*` project (allowed as it is; the docs say to save it if it was edited). The
+    message says to save your work, then open a new, empty project (or quit and reopen Resolve) and run again. The
+    README does not say what `CreateProject` does to the open project, and the API cannot tell whether it has unsaved
+    changes. The counts are recorded in `safety`.
+  - Before switching it prints the open project, the new project and its folder, and asks for confirmation: the user
+    types `yes`. `--yes` skips the prompt; `--dry-run` never prompts and never switches.
+  - After `CreateProject` it checks that its project is the open one, and checks again before each part of the run
+    and before `SaveProject`; otherwise it stops and saves nothing. It never calls `SaveProject` on a project it did not
+    create.
 - **Its own project:** it creates a fresh project, `matchcut-probe-<UTC timestamp>`, inside a project
   manager folder `matchcut-probe`, created if missing, and leaves it there for inspection. Re-running
   creates a new project. It never deletes, renames or exports any other project. Delete the probe
   projects by hand in the Project Manager. `docs/M2C-PROBE.md` says how.
 - **Media:** it imports only the bundle's source footage, by path, into its own project's media pool.
-- **Files:** it writes only inside the bundle directory.
+- **Files:** it writes only inside the bundle directory (one `runs/<UTC time>/` directory per run), or where `--out` says.
 - **Errors:** every step is wrapped. A failure is recorded, with the call, the exception text and its
   return value, and the probe moves on. It never leaves Resolve on a half-made user project, because
   it never touches one.
@@ -71,10 +79,13 @@ fidelity differences.
   (`Developer/Scripting/README.txt`, or since 21.1 `README.md` / `DaVinciResolveScript.pyi`). It
   records its path and version line, and which of the probe's calls it mentions.
 - **Newer calls are gated:** a call that is not in the 21.0.4 README, such as `TimelineItem.AddTransition`,
-  `SetFades` or `GetSourceStartFrame`, is made only if the installed catalogue mentions it. Otherwise
-  it is recorded as "not documented on this install: not called".
+  `GetType` or `SetFades`, is made only if the installed catalogue documents it for its class (a `def` inside the class in
+  a `.pyi`; the class's section, or `Class.Method`, in a text catalogue). Otherwise it is recorded as "not documented on
+  this install: not called". (`GetSourceStartFrame`/`GetSourceEndFrame` are in the 21.0.4 README, and in 20.2, so they
+  are not gated; they are not in 18.5, which the JSON and report note for Resolve below 20.)
 - **Option keys are recorded, not guessed:** for `AddTransition`, the probe records the option keys and
-  values exactly as tried, taken from the catalogue's docstring when present. Each attempt is recorded
+  values exactly as tried, taken only from AddTransition's own catalogue entry and the body of the Options type it names
+  (`duration` only when that text says frames). Each attempt is recorded
   separately: documented in the catalogue, called, returned.
 - **MCP:** never started or connected to. The probe records whether the `ResolveMCP` binary exists at
   the reported install paths, as the observed file presence only, next to what is documented or
@@ -116,7 +127,7 @@ fidelity differences.
 6. **Export round trip:** for each timeline,
    - `Timeline.Export(path, resolve.EXPORT_OTIO, resolve.EXPORT_NONE)`, plus FCPXML 1.10 and EDL with
      the documented subtype;
-   - files go into `DIR/exports/`;
+   - files go into the run's `DIR/runs/<UTC time>/exports/`;
    - the probe records success and file size. The offline report compares their content.
 
 ## `resolve_probe.json`
@@ -160,5 +171,5 @@ Every value is observed or recorded; nothing is inferred in the script. Interpre
   - The fake is matchcut's model of the documentation, not evidence about Resolve.
   - `docs/M2C-PROBE.md` and every output say "not run against a live Resolve" until a real
     `resolve_probe.json` comes back.
-  - Human gate PENDING: you run the probe in Resolve Studio and send back the bundle's
-    `resolve_probe.json` and `exports/`.
+  - Human gate PENDING: you run the probe in Resolve Studio and send back the run's folder
+    `runs/<UTC time>/` (its `resolve_probe.json` and `exports/`).
