@@ -214,6 +214,24 @@ def test_the_report_skips_runs_that_did_nothing(wsp, bundle, monkeypatch):
     assert f"the latest run, {Path(unconfirmed['run_dir']).name}, was not confirmed: reporting {Path(done['run_dir']).name}" in rep.notes
 
 
+def test_a_complete_run_wins_over_newer_stopped_unconfirmed_and_dry_runs(wsp, bundle, monkeypatch):
+    code, done, _ = run_probe(bundle, monkeypatch)
+    code, stopped, _ = run_probe(bundle, monkeypatch, VARIANTS["the open project changes mid-run"])  # aborted, but recorded timelines
+    assert stopped["status"] == "aborted" and stopped["timelines"]
+    run_probe(bundle, monkeypatch, answer="no")
+    run_probe(bundle, monkeypatch, args=["--dry-run"])
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    assert rep.path == bundle.dir / done["run_dir"] / "probe_report.md" and rep.routes["import-otio"].verdict == "usable"
+
+
+def test_without_a_complete_run_one_that_recorded_timelines_is_reported(wsp, bundle, monkeypatch):
+    code, stopped, _ = run_probe(bundle, monkeypatch, VARIANTS["the open project changes mid-run"])
+    run_probe(bundle, monkeypatch, answer="no")
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    assert rep.path == bundle.dir / stopped["run_dir"] / "probe_report.md"
+    assert any(n.endswith("(aborted; no run is complete)") for n in rep.notes) and "nothing to judge" in rep.text
+
+
 def test_without_a_complete_run_the_newest_real_run_is_reported_and_named(wsp, bundle, monkeypatch):
     code, refused, _ = run_probe(bundle, monkeypatch, VARIANTS["a user project is open"])
     run_probe(bundle, monkeypatch, args=["--dry-run"])

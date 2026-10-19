@@ -265,9 +265,12 @@ catalogue documents them.
 - refused: a user project with work, an untitled project with a timeline, with a pool clip, or with a clip in a nested bin;
 - refused because emptiness cannot be confirmed: the timeline count cannot be read, the root folder cannot be read, bins
   past the depth cap, bins past the count cap;
-- allowed: an empty project with another name, empty nested bins, a project opened while the prompt waits (refused after
-  the yes);
-- `CreateProject` does not switch, the open project changes between two calls of one part;
+- refused because emptiness cannot be confirmed: a bin whose clips or sub-folders cannot be read;
+- refused after the yes: a project opened, or a clip added, while the prompt waits; a project opened just before
+  `CreateProject`;
+- allowed: an empty project with another name, empty nested bins;
+- `CreateProject` does not switch, the open project changes between two calls of one part, or on the last export (no
+  save);
 - `GetSourceEndFrame` inclusive, `endFrame` inclusive;
 - transition items in the track (centred, or starting at the cut), `GetMarkerByCustomData` without a frame;
 - Resolve 18.5.

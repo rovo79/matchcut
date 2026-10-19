@@ -343,12 +343,16 @@ def test_a_project_with_anything_in_it_is_refused(bundle, monkeypatch, capsys, v
     assert code == 3 and doc["status"] == "refused" and doc["safety"]["allowed"] is False and doc["safety"]["empty"] is False
     assert doc["safety"]["counts"] == counts and doc["safety"]["current_project"] == "Untitled Project"
     assert made(world) == [] and world.saved == [] and world.current is world.user and world.rejected == []
-    assert f"(it has {counts['timelines']} timelines, and {counts['clips']} clips in {counts['folders'] + 1} media pool folders)" in out
+    plural = lambda n, w: f"{n} {w}{'' if n == 1 else 's'}"  # noqa: E731
+    assert (f"(it has {plural(counts['timelines'], 'timeline')}, and {plural(counts['clips'], 'clip')} in "
+            f"{plural(counts['folders'] + 1, 'media pool folder')})") in out
     assert "Save your work, then open a new, empty project (or quit and reopen Resolve) and run the probe again" in out
 
 
 @pytest.mark.parametrize("variant, why", [("timeline count unreadable", "the timeline count could not be read"),
                                           ("root folder unreadable", "the media pool's root folder could not be read"),
+                                          ("a bin whose clips cannot be read", "a media pool folder could not be read"),
+                                          ("a bin whose folders cannot be read", "a media pool folder could not be read"),
                                           ("bins past the depth cap", "the media pool has folders more than 3 levels deep"),
                                           ("bins past the count cap", "the media pool has more than 50 folders")])
 def test_a_project_whose_emptiness_cannot_be_confirmed_is_refused(bundle, monkeypatch, capsys, variant, why):
@@ -533,3 +537,30 @@ def test_any_change_while_the_prompt_waits_is_refused_even_if_the_new_state_woul
     code, doc, world = run_probe(bundle, monkeypatch, world=world, answer=ask)
     assert code == 3 and doc["status"] == "refused" and made(world) == []
     assert "The open project changed while the probe waited for your answer" in capsys.readouterr().out
+
+
+def test_every_call_that_changes_something_is_in_writes(bundle, monkeypatch):
+    """Every mutating call the fake logs, and every one this file counts as creating, is checked against the open project."""
+    expected = CREATING | {"Timeline.UpdateMarkerCustomData", "Project.SetCurrentTimeline", "Timeline.SetCurrentTimecode", "Resolve.OpenPage",
+                           "Project.SetSetting", "ProjectManager.SaveProject", "ProjectManager.CreateFolder", "ProjectManager.OpenFolder",
+                           "ProjectManager.GotoRootFolder", "ProjectManager.CreateProject"}
+    assert expected <= set(template.WRITES), expected - set(template.WRITES)
+    code, doc, world = run_probe(bundle, monkeypatch)
+    logged = {c[0] for c in world.log} - {"DaVinciResolveScript.scriptapp", "input"}
+    assert code == 0 and logged and logged <= set(template.WRITES), logged - set(template.WRITES)
+
+
+def test_a_switch_on_the_last_export_means_no_save(bundle, monkeypatch):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["the open project changes on the last export"])
+    assert world.trace.count("Timeline.Export") == 15  # the switch came with the last one
+    assert code == 4 and doc["status"] == "aborted" and doc["project"]["saved"] is False
+    assert world.calls("ProjectManager.SaveProject") == [] and world.saved == []
+    assert doc["failures"][-1]["call"] == "ProjectManager.SaveProject" and doc["failures"][-1]["called"] is False
+
+
+def test_a_switch_just_before_create_project_creates_nothing(bundle, monkeypatch, capsys):
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["the open project changes before CreateProject"])
+    out = capsys.readouterr().out
+    assert code == 3 and doc["status"] == "refused" and world.calls("ProjectManager.CreateProject") == []
+    assert world.projects.get(("matchcut-probe",), {}) == {} and world.current.name == "Client job v2"
+    assert "The open project changed just before the switch: it was 'Untitled Project', it is now 'Client job v2'. Nothing was created" in out

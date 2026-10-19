@@ -782,6 +782,14 @@ def exports(rec, route, resolve, tl, run_dir):
     return out
 
 
+def plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
+
+
+class Changed(Exception):
+    """The open project changed between the re-check and CreateProject: nothing is created."""
+
+
 def count_of(value):
     if isinstance(value, bool):
         return None
@@ -843,7 +851,8 @@ def inspect(rec, steps, pm):
         if not confirmed_empty:
             detail = " (the probe could not confirm that it is empty: %s)" % why
         else:
-            detail = " (it has %d timelines, and %d clips in %d media pool folders)" % (counts["timelines"], counts["clips"], counts["folders"] + 1)
+            detail = " (it has %s, and %s in %s)" % (plural(counts["timelines"], "timeline"), plural(counts["clips"], "clip"),
+                                                     plural(counts["folders"] + 1, "media pool folder"))
         safety["message"] = REFUSAL % (name, detail)
     return safety
 
@@ -897,6 +906,13 @@ def make_project(rec, doc, pm, stamp):
     while name in taken:
         k += 1
         name = "%s%s-%d" % (PROJECT_PREFIX, stamp, k)
+    # the last look before the switch: the open project must still be the one checked after the answer
+    current = rec.call(steps, "project", pm, "ProjectManager.GetCurrentProject")
+    now = rec.call(steps, "project", current, "Project.GetName") if current else None
+    checked = (doc.get("safety_after_confirm") or doc["safety"])["current_project"]
+    if now != checked:
+        raise Changed("The open project changed just before the switch: it was %r, it is now %r. Nothing was created; run the probe again."
+                      % (checked, now))
     project = rec.call(steps, "project", pm, "ProjectManager.CreateProject", name)
     if not project:
         doc["notes"].append("CreateProject(%r) returned nothing: no project created" % name)
@@ -1081,6 +1097,9 @@ def probe(args, doc, out, run_dir, stamp):
         run_routes(rec, doc, resolve, pm, project, out, run_dir)
         # SaveProject is a write: Recorder.call makes it only while the probe's own project is the open one
         doc["project"]["saved"] = bool(rec.call(doc["steps"], "save", pm, "ProjectManager.SaveProject"))
+    except Changed as change:
+        doc["safety"]["allowed_before_create"] = False
+        return finish(doc, out, "refused", [str(change)], 3)
     except Stopped as stop:
         doc["stopped"] = True
         doc["notes"].append("not saved: the open project is no longer the probe's (noticed before %s)" % stop)

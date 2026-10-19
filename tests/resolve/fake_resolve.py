@@ -76,6 +76,9 @@ class Variant:
     root_folder_none: bool = False  # MediaPool.GetRootFolder returns None
     create_does_not_switch: bool = False  # CreateProject makes the project but leaves the open one open
     switch_away_on: str = ""  # "Class.Method": when the probe calls it, the open project becomes the user's again
+    switch_on_call: int = 1  # ... on that call's n-th use (1: the first)
+    switch_to: str = ""  # ... or this project (by name) instead of the user's
+    unreadable_bin: str = ""  # "clips" or "folders": the first bin's GetClipList / GetSubFolderList returns None
     src_end_inclusive: bool = False  # GetSourceEndFrame reads the last source frame (one less than matchcut's exclusive end)
     end_frame_inclusive: bool = False  # AppendToTimeline takes endFrame as the last frame (the built clip is one frame longer)
     transition_items: bool = False  # GetItemListInTrack lists transitions as items whose GetType() is "transition"
@@ -102,6 +105,12 @@ VARIANTS = {
     "a clip in a nested bin": Variant(name="a clip in a nested bin", user_bins=(("Bin 1", 0, (("Inner", 1, ()),)),)),
     "bins past the depth cap": Variant(name="bins past the depth cap", user_bins=(("A", 0, (("B", 0, (("C", 0, (("D", 0, ()),)),)),)),)),
     "bins past the count cap": Variant(name="bins past the count cap", user_bins=tuple((f"Bin {k}", 0, ()) for k in range(60))),
+    "a bin whose clips cannot be read": Variant(name="a bin whose clips cannot be read", user_subfolders=1, unreadable_bin="clips"),
+    "a bin whose folders cannot be read": Variant(name="a bin whose folders cannot be read", user_subfolders=1, unreadable_bin="folders"),
+    "the open project changes on the last export": Variant(name="the open project changes on the last export", switch_away_on="Timeline.Export",
+                                                           switch_on_call=15),
+    "the open project changes before CreateProject": Variant(name="the open project changes before CreateProject",
+                                                             switch_away_on="ProjectManager.GotoRootFolder", switch_to="Client job v2"),
     "timeline count unreadable": Variant(name="timeline count unreadable", raise_on=("Project.GetTimelineCount",)),
     "root folder unreadable": Variant(name="root folder unreadable", root_folder_none=True),
     "CreateProject does not switch": Variant(name="CreateProject does not switch", create_does_not_switch=True),
@@ -246,8 +255,9 @@ class _Api:
                 world.rejected.append(f"{cls}.{name} (documented, not modelled by the fake)")
                 raise
             world.trace.append(f"{cls}.{name}")
-            if f"{cls}.{name}" == world.variant.switch_away_on:
-                world.current = world.user  # (someone opens another project while the probe runs)
+            if f"{cls}.{name}" == world.variant.switch_away_on and world.trace.count(f"{cls}.{name}") == world.variant.switch_on_call:
+                # (someone opens another project while the probe runs)
+                world.current = next((p for p in world.all_projects() if p.name == world.variant.switch_to), world.user)
             if f"{cls}.{name}" in world.variant.raise_on:
                 def boom(*a: Any, **k: Any) -> Any:
                     world.log.append((f"{cls}.{name}",) + a)
@@ -468,11 +478,14 @@ class FakeSubFolder(FakeFolder):
     def GetName(self):
         return self.bin.name
 
+    def _unreadable(self, what: str) -> bool:
+        return self._world.variant.unreadable_bin == what and self.project.bins[:1] == [self.bin]
+
     def GetClipList(self):
-        return [FakeMediaPoolItem(self._world, m) for m in self.bin.clips]
+        return None if self._unreadable("clips") else [FakeMediaPoolItem(self._world, m) for m in self.bin.clips]
 
     def GetSubFolderList(self):
-        return [FakeSubFolder(self._world, self.project, b) for b in self.bin.children]
+        return None if self._unreadable("folders") else [FakeSubFolder(self._world, self.project, b) for b in self.bin.children]
 
 
 class FakeMediaPool(_Api):

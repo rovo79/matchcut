@@ -104,8 +104,9 @@ def _status(path: Path) -> Tuple[str, bool]:
 
 
 def resolve_input(path: Path) -> Tuple[Path, Optional[str]]:
-    """A run's resolve_probe.json from what the person gives: the file, a run directory, or the bundle. For the bundle: the newest run
-    that is complete or recorded timelines; else the newest run that is not a dry run (else the newest dry run), with a note saying so."""
+    """A run's resolve_probe.json from what the person gives: the file, a run directory, or the bundle. For the bundle: the newest complete
+    run; else the newest run that recorded timelines; else the newest run that is not a dry run (else the newest dry run), with a note
+    saying so."""
     path = Path(path)
     if not path.is_dir():
         return path, None
@@ -115,13 +116,14 @@ def resolve_input(path: Path) -> Tuple[Path, Optional[str]]:
     if not runs:
         raise ProbeError(f"no run in {path}: run resolve_probe.py first (each run writes {RUNS}/<UTC time>/{RESULT})")
     real = [p for p in runs if "dry-run" not in p.parent.name]
-    useful = [p for p in real if _status(p)[0] == "complete" or _status(p)[1]]
+    complete = [p for p in real if _status(p)[0] == "complete"]
+    useful = complete or [p for p in real if _status(p)[1]]  # a complete run first, then one that at least recorded timelines
     pick = (useful or real or runs)[-1]
     newest = runs[-1]
     if pick == newest:
-        return pick, None
+        return pick, (None if complete else f"no run is complete: reporting the latest, {pick.parent.name} ({_status(pick)[0]})")
     why = f"the latest run, {newest.parent.name}, was {'a dry run' if 'dry-run' in newest.parent.name else _status(newest)[0]}: reporting {pick.parent.name}"
-    if not useful:
+    if not complete:
         why += f" ({_status(pick)[0]}; no run is complete)"
     return pick, why
 
