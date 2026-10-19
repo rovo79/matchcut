@@ -241,6 +241,25 @@ def test_music_is_offset_to_the_first_rendered_clip_without_touching_the_config(
     assert has_audio_stream(b.path)
 
 
+def video_size(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", str(path)], capture_output=True, text=True)
+    w, h = out.stdout.strip().split("x")
+    return int(w), int(h)
+
+
+def test_a_rendered_window_has_the_source_size_so_a_real_window_does_not_resize_on_a_toggle(demo_video, tmp_path):
+    ws = workspace(tmp_path, demo_video, roughcut=two_shots(), final=two_shots("dissolve", 0.5))
+    cfg = PipelineConfig()  # the defaults: review.width 0 means the source resolution
+    cfg.review.pre_seconds = cfg.review.post_seconds = 1.0
+    assert cfg.review.width == 0
+    pair = prepare_review(ws, cfg, "final", 0, ab=True)
+    assert pair.a.kind == "edl" and pair.b.kind == "render"
+    assert video_size(pair.b.path) == video_size(demo_video) == (320, 180)  # what the EDL (A) plays is the source itself
+    cfg.review.width = 160  # a non-zero width still scales
+    scaled = prepare_review(ws, cfg, "final", 0, ab=True).b
+    assert scaled.path != pair.b.path and video_size(scaled.path) == (160, 90)
+
+
 def test_the_key_depends_on_the_review_config_the_source_and_the_kind(tmp_path):
     src = tmp_path / "s.mp4"
     src.write_bytes(b"x" * 10)

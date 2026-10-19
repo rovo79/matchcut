@@ -27,7 +27,7 @@ CUTS = tl((0, 0.0, 3.0, "cut", 0), (1, 10.0, 13.0, "cut", 0), (2, 20.0, 23.0, "c
 
 def test_config_has_a_review_section_with_defaults():
     cfg = PipelineConfig()
-    assert cfg.review == ReviewConfig(pre_seconds=2.0, post_seconds=2.0, width=640, crf=23, mpv="mpv", always_render=False)
+    assert cfg.review == ReviewConfig(pre_seconds=2.0, post_seconds=2.0, width=0, crf=23, mpv="mpv", always_render=False)
     again = PipelineConfig.from_dict(cfg.to_dict())
     assert again.review == cfg.review
 

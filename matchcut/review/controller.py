@@ -57,6 +57,7 @@ class ReviewController:
         self._opener = opener
         self._lock = threading.Lock()
         self._session: Any = None
+        self._fixed_window: Any = None  # the session whose window has been told not to resize (see ``_play_in``)
         self._clock = clock
         self._failed_at: Optional[float] = None  # when starting mpv last failed, and with which binary
         self._failed_mpv = ""
@@ -148,6 +149,15 @@ class ReviewController:
         finally:
             try:
                 s.set("start", "none")
+            except MpvError:
+                pass
+        if self._fixed_window is not s:
+            # mpv resizes its window to each new file's video size (``auto-window-resize``, on by default); the EDL items play at
+            # the source size and the rendered ones at ``review.width``, so an A/B toggle would otherwise resize the window. Set
+            # after the first load, over IPC, so the first file still sizes the window; mpv without the option is fine.
+            self._fixed_window = s
+            try:
+                s.set("auto-window-resize", "no")
             except MpvError:
                 pass
         s.set("loop-file", "inf")

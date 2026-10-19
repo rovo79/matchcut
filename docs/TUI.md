@@ -94,8 +94,10 @@ it, but does not overwrite the selected junction's status line.
 How a window is played: a window of hard cuts plays straight from the source
 through an mpv EDL (exact source ranges, nothing rendered, instant). A window
 with a transition, a fade or music, or any window when `review.always_render`
-is set, is rendered by a short ffmpeg run (640 px wide by default) so that the
-transition, fades and music are exactly what ffmpeg makes; loudness
+is set, is rendered by a short ffmpeg run at the source resolution (`review.width`
+0, the default; a non-zero width scales it) so that the
+transition, fades and music are exactly what ffmpeg makes, and so that a rendered
+window has the same pixel size as an EDL window; loudness
 normalisation and ducking run on the excerpt. Files go to `workspace/review/`
 (`<stage>_s<out>-s<in>_<key>.edl` or `.mp4`); the key is a hash of what the
 window depends on, so a repeat is instant and an edit to the cut or the config
@@ -111,7 +113,11 @@ mpv control is not implemented on Windows (the same fallback applies there).
 How mpv is started: `--idle=yes --keep-open=yes --hr-seek=yes --no-resume-playback`
 plus the IPC socket, and nothing else is switched off, so your own `mpv.conf`,
 key bindings, scripts and OSC are honoured (a script that changes seeking or
-looping can change what you see). Every item is opened *at* its target position
+looping can change what you see). One exception, set over IPC after the first
+file has loaded: `auto-window-resize=no`, so the window keeps its size when you
+toggle between items (mpv would otherwise resize it to each file's video size;
+an older mpv without the option just ignores the request, and it overrides the
+same option in your `mpv.conf`). Every item is opened *at* its target position
 (`start` is set before the load and reset after it), so a toggle never flashes
 the start of the other window. If starting mpv fails (not installed, wrong
 `review.mpv`), the app falls back to the system player and tries mpv again after

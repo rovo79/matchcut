@@ -152,7 +152,7 @@ is created on first use and closed when the app exits.
 ## Configuration
 
 `PipelineConfig.review` (new section): `pre_seconds 2.0`, `post_seconds 2.0`,
-`width 640`, `crf 23`, `mpv "mpv"` (the binary), `always_render false`.
+`width 0` (the source resolution; non-zero scales rendered windows), `crf 23`, `mpv "mpv"` (the binary), `always_render false`.
 
 ## Verification
 
@@ -179,3 +179,4 @@ timing can be assessed — the question M1's verdict table left open.
 - Rendered windows are derived from the frame-snapped stage timeline, so `cut` and `offset` are frame-exact; EDL windows keep the unsnapped timeline. The cache key covers the snapped sub-timeline and whether the window ends the cut.
 - `workspace/review/.tmp/` files older than an hour are removed when a window is prepared.
 - The `s` key is labelled Pause. `python -m matchcut.review`: Enter after the window was closed plays the pair again; unexpected data errors print `review failed: <type>: <message>` and exit 1.
+- Rendered and EDL windows have the same pixel size: `review.width` defaults to 0 (the source resolution; renders use `RenderConfig(width=None)`), and the session sets mpv's `auto-window-resize` to `no` over IPC after its first file has loaded (once per session; an mpv without the option is tolerated). A real window therefore neither resizes on an A/B toggle nor shows a scaled render at a different size; measured under Xvfb with `--vo=x11` (scaled renders resized the window without the setting, never with it); a real desktop window stays on the human checklist.

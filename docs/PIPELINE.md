@@ -357,7 +357,7 @@ there; a pipeline command's `--set review.pre_seconds=3` writes it):
 |---|---|---|
 | `pre_seconds` | 2.0 | shown before the cut |
 | `post_seconds` | 2.0 | shown after the transition |
-| `width` | 640 | width of rendered windows |
+| `width` | 0 | width of rendered windows; 0 is the source resolution, so a rendered window has the same pixel size as an EDL window (a non-zero value scales it, and then the two differ in size; a `config.json` saved by an earlier version holds `640` and keeps it until set to 0) |
 | `crf` | 23 | quality of rendered windows |
 | `mpv` | `mpv` | the mpv binary |
 | `always_render` | false | render every window instead of playing hard cuts from an EDL |

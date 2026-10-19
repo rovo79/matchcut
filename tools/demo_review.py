@@ -125,7 +125,8 @@ class Capture:
         self.n_a = 0  # frames 1..n_a were displayed while A played
         self.n_b = 0  # frames n_a + 1 .. are B, from its target to the end of its window
         self.a_pos = 0.0
-        self.b_pos = 0.0
+        self.b_pos = 0.0  # time-pos read after the toggle (playback has resumed: a frame or two past the target)
+        self.target = 0.0  # where B was asked to open (A's offset from its cut, applied to B's cut and clamped like the controller does)
         self.status_a = ""
         self.status_b = ""
 
@@ -156,7 +157,8 @@ def _play_once(cfg: PipelineConfig, pair: Any, frames_dir: Path, a_seconds: floa
             raise ReviewError("toggle did nothing")
         cap.status_b = controller.status
         cap.b_pos = float(session[0].get("time-pos"))
-        target = pair.b.cut + (cap.a_pos - pair.a.cut)
+        target = min(max(pair.b.cut + (cap.a_pos - pair.a.cut), 0), max(pair.b.duration - 0.05, 0))
+        cap.target = target
         time.sleep(max(0.3, pair.b.duration - cap.b_pos - 0.15))  # to the end of B's window, short of the loop restart
         fps = float(session[0].get("container-fps") or 24)
         # frames past the end of B's window are the loop restarting (the sleep can overshoot by a frame): not part of the window
@@ -187,13 +189,13 @@ def demo_junction(ws: Path, cfg: PipelineConfig, index: int, stage: Optional[str
         raise ReviewError("mpv kept stopping under vo=image; no frames to show")
     print(f"  {cap.status_a}")
     offset = cap.a_pos - pair.a.cut
-    print(f"  toggled at A time-pos {cap.a_pos:.3f} s ({offset:+.3f} s from the cut); B then read time-pos {cap.b_pos:.3f} s ({cap.b_pos - pair.b.cut:+.3f} s from its cut): {cap.status_b}")
+    print(f"  toggled at A time-pos {cap.a_pos:.3f} s ({offset:+.3f} s from the cut); B was opened at {cap.target:.3f} s ({cap.target - pair.b.cut:+.3f} s from its cut); time-pos read right after resuming: {cap.b_pos:.3f} s: {cap.status_b}")
     drawtext = _has_drawtext()
     sheet = out_dir / f"review-j{index}.jpg"
     strip_a, strip_b = work / "a.png", work / "b.png"
     ta = build_strip(frames_dir, 1, cap.n_a, caption_text(pair.a, "A", cap.n_a, f"; played from the start to {offset:+.2f} s from the cut"), strip_a, work, drawtext)
     first_b = cap.n_a + 1
-    tb = build_strip(frames_dir, first_b, cap.n_b, caption_text(pair.b, "B", cap.n_b, f"; from {cap.b_pos - pair.b.cut:+.2f} s from the cut to the end of the window"), strip_b, work, drawtext)
+    tb = build_strip(frames_dir, first_b, cap.n_b, caption_text(pair.b, "B", cap.n_b, f"; requested start {cap.target - pair.b.cut:+.2f} s from the cut, to the end of the window"), strip_b, work, drawtext)
     _ffmpeg(["-i", str(strip_a), "-i", str(strip_b), "-filter_complex", "[0:v][1:v]vstack=inputs=2", "-q:v", "5", "-frames:v", "1", str(sheet)])
     summary = (
         f"  A: {pair.a.kind} {pair.a.transition}, {cap.n_a} frames ({ta} tiles); B: {pair.b.kind} {pair.b.transition}, {cap.n_b} frames ({tb} tiles), "

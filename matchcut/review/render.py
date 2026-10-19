@@ -123,7 +123,7 @@ def render_window(
             music = dataclasses.replace(music, fade_out=NO_FADE_SECONDS)
         music_duration = _audio_duration(cfg.music.path)  # as the full render: the music cannot run past its own end
     has_audio = media.has_audio or music is not None
-    rcfg = RenderConfig(enabled=True, width=cfg.review.width, crf=cfg.review.crf, preset="veryfast", audio_bitrate=cfg.render.audio_bitrate)
+    rcfg = RenderConfig(enabled=True, width=cfg.review.width or None, crf=cfg.review.crf, preset="veryfast", audio_bitrate=cfg.render.audio_bitrate)
     full, trimmed = _tmp(out_path.parent, ".full.mp4"), _tmp(out_path.parent, ".mp4")
     try:
         render(sub, media, rcfg, full, music=music, music_duration=music_duration)
