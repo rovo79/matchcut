@@ -412,7 +412,11 @@ class EditView(Vertical):
 
     def _review_request(self, ab: bool) -> None:
         if self._state is not None:
-            self.refresh_from_state(self._state)  # a cut rewritten outside the app (no run event behind it) is picked up before it is reviewed
+            # A cut rewritten outside the app (no run event behind it) is picked up before it is reviewed.  The selection follows its junction
+            # (the same restore a stage switch uses), not its index: the clips may have moved.
+            if self._data_fingerprint(self._state) != self._fingerprint:
+                self._keep = self._identity(self._state.timeline(self.current_stage()))
+            self.refresh_from_state(self._state)
         key, j, stage = self._review_key(), self.current_junction(), self.current_stage()
         if key is None or j is None or stage is None or self._state is None:
             self.app.notify("no junction selected", severity="warning")

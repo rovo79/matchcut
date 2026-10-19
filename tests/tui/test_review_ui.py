@@ -333,6 +333,32 @@ def test_a_cut_rewritten_outside_the_app_after_the_pair_was_prepared_is_not_togg
     run_async(body())
 
 
+def test_a_cut_reordered_outside_the_app_is_reviewed_at_the_junction_that_was_selected(mock_workspace, tmp_path, fakes):
+    import os
+    from matchcut.pipeline.timeline import Timeline
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            await pilot.press("right")
+            before = (view.current_junction().out_clip, view.current_junction().in_clip)
+            path = ws / "final.json"  # another process rotates the cut by one clip: the selected junction is now at index 0
+            tl = Timeline.load(path)
+            tl.clips = tl.clips[1:] + tl.clips[:1]
+            tl.save(path)
+            st = os.stat(path)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+            await pilot.press("p")
+            await wait_for(pilot, lambda: len(fakes.prepared) == 1)
+            j = view.current_junction()
+            assert (j.out_clip, j.in_clip) == before and view.selected == 0
+            assert fakes.prepared[0]["index"] == 0
+
+    run_async(body())
+
+
 def test_two_junctions_with_the_same_shot_pair_are_reviewed_separately(mock_workspace, tmp_path, fakes):
     from matchcut.pipeline.timeline import Timeline
     ws = own_copy(mock_workspace, tmp_path)
