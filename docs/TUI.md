@@ -35,6 +35,9 @@ junction with `←`/`→` or by clicking its glyph; `[` and `]` move the inspect
 stage between the rough cut and each pass. Junctions are followed across stages
 by lineage (same shot, overlapping source range), because passes renumber
 clips.
+After `python -m matchcut.pipeline.cli import WORKSPACE FILE` (an editor's re-export, see
+[INTEROP.md](INTEROP.md)) a `human` stage follows `final`, so `[`/`]` can inspect what the editor changed; if
+the pipeline has run again since, that stage no longer fits and is left out until the file is imported again.
 
 Below the beat strip are three frames: the outgoing frame (the last frame
 before the cut), the incoming frame, and a 50% overlay of the two, which is the

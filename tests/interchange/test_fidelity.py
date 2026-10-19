@@ -171,6 +171,17 @@ def test_report_records_errors_and_marks_a_failing_run(tmp_path):
     assert FidelityResult("otio", "final").to_dict()["ok"] is True
 
 
+def test_a_stale_entry_round_trips_is_marked_and_does_not_decide_ok(tmp_path):
+    old = FidelityResult("otio", "roughcut", errors=["record duration 99 != 100 frames"], canonical_sha256="abc", stale=True)
+    again = FidelityResult.from_dict(old.to_dict())
+    assert again.stale is True and old.to_dict()["stale"] is True and "stale" not in FidelityResult("otio", "final").to_dict()
+    jp, mp = write_report([old, FidelityResult("edl", "final")], tmp_path)
+    assert json.loads(jp.read_text())["ok"] is True  # a stale entry describes an earlier export
+    md = mp.read_text()
+    assert "OpenTimelineIO **STALE**" in md and "CMX3600 EDL |" in md and "Rows marked **STALE**" in md
+    assert "STALE" not in write_report([FidelityResult("edl", "final")], tmp_path)[1].read_text()
+
+
 def test_report_on_the_workspace_has_the_exact_snapping_measurement(world, tmp_path):
     """A rough cut over the workspace's real shots, entered 0.25 frame late and left 0.4 frame early: the snap moves each edge back."""
     rate = world.src.rate

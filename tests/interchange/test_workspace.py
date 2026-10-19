@@ -233,6 +233,21 @@ def test_otio_edited_like_an_editor_gives_exactly_the_expected_human_decisions(w
     assert human.fade_in == final.fade_in and human.fade_out == final.fade_out
 
 
+def test_junction_ids_of_an_edited_file_still_resolve_in_the_provenance_record(wsx):
+    """Ported from the feasibility proof: the ids the editor's file still carries, and the id of the marker it deleted, are all in provenance.json."""
+    full = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))
+    original = json.loads((wsx.ws / "exports" / "final.otio").read_text())["tracks"]["children"][0]["markers"]
+    prov_before = (wsx.ws / "exports" / "provenance.json").read_bytes()
+    edited = patched_otio(wsx)
+    left = json.loads(edited.read_text())["tracks"]["children"][0]["markers"]
+    surviving = [m["metadata"]["matchcut"]["junction_id"] for m in left]
+    gone = [m["metadata"]["matchcut"]["junction_id"] for m in original if m["metadata"]["matchcut"]["junction_id"] not in surviving]
+    import_timeline(wsx.ws, wsx.cfg, edited)
+    record = json.loads((wsx.ws / "exports" / "provenance.json").read_text())["stages"]["final"]["junctions"]
+    assert full.files and surviving and len(gone) == 1
+    assert all(j in record for j in surviving) and gone[0] in record and (wsx.ws / "exports" / "provenance.json").read_bytes() == prov_before
+
+
 def test_the_human_stage_is_listed_last_and_shows_in_the_junction_history(wsx):
     assert stage_timeline_paths(wsx.ws)[-1] == ("human", wsx.ws / "human.json") and stage_timeline_paths(wsx.ws)[-2][0] == "final"
     assert [s for s, _ in load_stage_timelines(wsx.ws)][-1] == "final"  # absent until an import
@@ -430,9 +445,9 @@ def test_human_import_json_records_the_import(wsx):
 
 def test_stale_human_stage_is_warned_by_export_and_import(wsx):
     edited = patched_otio(wsx)
-    assert not any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # no human stage yet
+    assert not any("human.json is stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # no human stage yet
     import_timeline(wsx.ws, wsx.cfg, edited)
-    assert not any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # fresh
+    assert not any("human.json is stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # fresh
     final = json.loads((wsx.ws / "final.json").read_text())
     final["clips"][0]["source_out"] = round(final["clips"][0]["source_out"] - 0.04, 4)
     (wsx.ws / "final.json").write_text(json.dumps(final, indent=2))
@@ -443,10 +458,10 @@ def test_stale_human_stage_is_warned_by_export_and_import(wsx):
     assert ((wsx.ws / "human.json").read_bytes(), (wsx.ws / "human_import.json").read_bytes()) == keep  # export never touches them
     again = import_timeline(wsx.ws, wsx.cfg, edited)
     assert any(n.startswith(msg) and n.endswith("this import replaces it") for n in again.notes), again.notes  # the replaced stage was stale
-    assert not any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # the new import is fresh
+    assert not any("human.json is stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)  # the new import is fresh
     # a missing stage file is stale too
     (wsx.ws / "final.json").unlink()
-    assert any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("edl",)).notes)
+    assert any("human.json is stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("edl",)).notes)
 
 
 # -- pins and the TUI with human as the last stage ----------------------------------------------------------
@@ -683,13 +698,96 @@ def test_a_narrower_export_keeps_the_records_of_the_earlier_ones_while_their_sta
     export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("fcpxml",))
     fid = json.loads((out / "fidelity.json").read_text())
     assert sorted(fid["stages"]["roughcut"]) == ["edl", "otio"] and sorted(fid["stages"]["final"]) == ["edl", "fcpxml", "otio"]
-    # a stage file that changed since is no longer recorded
+    # a stage file that changed since keeps its record, flagged stale (the exported files are still in the directory)
     rough = json.loads((wsx.ws / "roughcut.json").read_text())
     rough["name"] = "re-run"
     (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
     res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
-    assert list(json.loads((out / "provenance.json").read_text())["stages"]) == ["final"]
+    prov = json.loads((out / "provenance.json").read_text())
+    assert list(prov["stages"]) == ["roughcut", "final"] and prov["stages"]["roughcut"]["stale"] is True and "stale" not in prov["stages"]["final"]
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert sorted(fid["stages"]["roughcut"]) == ["edl", "otio"] and all(d["stale"] is True for d in fid["stages"]["roughcut"].values())
+    assert not any("stale" in d for d in fid["stages"]["final"].values()) and fid["ok"] is True
+    assert [(r.stage, r.fmt) for r in res.results] == [("final", "edl")]
+
+
+def test_a_changed_stage_file_keeps_its_old_record_flagged_stale_and_says_which_files(wsx):
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg)
+    original = (wsx.ws / "roughcut.json").read_text()
+    rough = json.loads(original)
+    rough["name"] = "re-run"
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    note = next(n for n in res.notes if "stale" in n)
+    assert "\n" not in note and note.startswith("the stage file changed since these were exported")
+    assert "roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl" in note and "final" not in note
+    prov = json.loads((out / "provenance.json").read_text())
+    assert prov["stage_order"] == ["roughcut", "final"] and prov["stages"]["roughcut"]["canonical_sha256"] != sha(wsx.ws / "roughcut.json")
+    assert prov["stages"]["roughcut"]["junctions"] and prov["stages"]["roughcut"]["clips"]  # the old record itself, not a stub
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert sorted(fid["stages"]["roughcut"]) == ["edl", "fcpxml", "otio"] and fid["ok"] is True
+    md = (out / "fidelity.md").read_text()
+    assert md.count("STALE") >= 3 and "Stage: roughcut" in md
+    # a stale record is not carried as if it held: a second narrow export still says so
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))
+    assert any("roughcut.otio, matchcut.fcpxml (project roughcut), roughcut.edl" in n for n in res.notes)
+    # a stage file that goes back to what was exported makes its record current again
+    (wsx.ws / "roughcut.json").write_text(original)
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    assert not any("stale" in n for n in res.notes)
+    assert "stale" not in json.loads((out / "provenance.json").read_text())["stages"]["roughcut"]
+    assert not any("stale" in d for by in json.loads((out / "fidelity.json").read_text())["stages"].values() for d in by.values())
+    # exporting the changed stage again replaces the stale record
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    assert any("stale" in n for n in export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",)).notes)
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio", "edl", "fcpxml"))
+    prov = json.loads((out / "provenance.json").read_text())
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert "stale" not in prov["stages"]["roughcut"] and not any("stale" in d for by in fid["stages"].values() for d in by.values())
+    assert not any("stale" in n for n in res.notes)
+
+
+def test_a_stage_exported_again_in_one_format_leaves_only_the_other_formats_stale(wsx):
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg)
+    rough = json.loads((wsx.ws / "roughcut.json").read_text())
+    rough["name"] = "re-run"
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
+    note = next(n for n in res.notes if "stale" in n)
+    assert note.endswith(": matchcut.fcpxml (project roughcut), roughcut.edl") and "roughcut.otio" not in note  # the otio file is current
+    fid = json.loads((out / "fidelity.json").read_text())["stages"]["roughcut"]
+    assert "stale" not in fid["otio"] and fid["edl"]["stale"] is True and fid["fcpxml"]["stale"] is True
+    assert "stale" not in json.loads((out / "provenance.json").read_text())["stages"]["roughcut"]
+
+
+def test_a_stale_record_whose_files_are_gone_is_dropped(wsx):
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg)
+    rough = json.loads((wsx.ws / "roughcut.json").read_text())
+    rough["name"] = "re-run"
+    (wsx.ws / "roughcut.json").write_text(json.dumps(rough))
+    (out / "roughcut.otio").unlink()
+    (out / "roughcut.edl").unlink()
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    fid = json.loads((out / "fidelity.json").read_text())
+    assert list(fid["stages"]["roughcut"]) == ["fcpxml"] and fid["stages"]["roughcut"]["fcpxml"]["stale"] is True
+    assert any("matchcut.fcpxml (project roughcut)" in n and "roughcut.otio" not in n for n in res.notes)
+    (out / "matchcut.fcpxml").write_text(export_fcpxml([("final", *exported(wsx.world, "final")[:1], wsx.world.jb["final"])], wsx.world.src))
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
     assert list(json.loads((out / "fidelity.json").read_text())["stages"]) == ["final"]
+    assert list(json.loads((out / "provenance.json").read_text())["stages"]) == ["final"] and not any("stale" in n for n in res.notes)
+
+
+def test_a_stale_record_of_a_stage_that_no_longer_exists_keeps_its_place(wsx):
+    out = wsx.ws / "exports"
+    export_workspace(wsx.ws, wsx.cfg)
+    (wsx.ws / "roughcut.json").unlink()
+    res = export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("edl",))
+    prov = json.loads((out / "provenance.json").read_text())
+    assert prov["stage_order"] == ["final", "roughcut"] and prov["stages"]["roughcut"]["stale"] is True
+    assert any("roughcut.otio" in n for n in res.notes)
 
 
 def tc_shift(tc: str, frames: int, fps: int = 25) -> str:

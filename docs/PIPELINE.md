@@ -367,6 +367,30 @@ is used). `matchcut.review` reads the stage timelines and never writes them, and
 the pipeline does not import it. [M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md) lists what
 is verified headless and what still needs a human at a desktop.
 
+## Taking a cut to an editor and back
+
+`matchcut.interchange` writes any stage as OpenTimelineIO, FCPXML 1.10 and a CMX3600
+EDL, and reads an editor's re-export back. It is standard library only and the engine
+never imports it.
+
+```shell
+python -m matchcut.pipeline.cli export WORKSPACE                    # roughcut and final, all formats -> WORKSPACE/exports/
+python -m matchcut.pipeline.cli export WORKSPACE --stage final --format otio --resolve-script
+python -m matchcut.pipeline.cli import WORKSPACE edited.otio        # the editor's file (.otio, .fcpxml or .edl)
+```
+
+`export` prints every file and a fidelity summary (`fidelity.json` and `fidelity.md` list,
+per stage and format, what was preserved, approximated and lost) and exits 1 if a file does not
+read back to its stage. `exports/provenance.json` keeps the decisions behind the junction and clip ids the
+files carry. `import` writes `human.json`, a stage listed after `final` whose history holds one `human`
+decision per change (trim, transition, removed, added, reorder), and never modifies a canonical stage file;
+`junctions` and the Edit view show it. If the pipeline runs again, a `human.json` that no longer fits is
+left out and reported (never deleted). `--resolve-script` also writes `open_in_resolve.py` for Resolve
+Studio; matchcut never runs it. Everything about the formats, their limits and Resolve is in
+[INTEROP.md](INTEROP.md); what is verified and what still needs a human with an editor is in
+[M2A-ACCEPTANCE.md](M2A-ACCEPTANCE.md). The `final.edl` that `run` writes in the workspace is the older delivery
+EDL; for an editor use `exports/final.edl`.
+
 ## Working iteratively
 
 Every stage is cached in the workspace, so you can change something and re-run

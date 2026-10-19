@@ -89,6 +89,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     sp.add_argument("--stage", action="append", default=None, dest="stages", metavar="S", help="stage to export, repeatable (default: roughcut and final)")
     sp.add_argument("--format", action="append", default=None, dest="formats", help="otio, fcpxml or edl, repeatable (default: all)")
     sp.add_argument("--out", default=None, help="output directory (default: WORKSPACE/exports)")
+    sp.add_argument("--resolve-script", action="store_true", help="also write open_in_resolve.py, a script for DaVinci Resolve Studio that imports the final OTIO and marks the junctions (never run by matchcut)")
     sp = sub.add_parser("import", help="read an editor's re-export back as the workspace's human stage")
     sp.add_argument("workspace")
     sp.add_argument("file", help="the .otio, .fcpxml or .edl file the editor saved")
@@ -121,7 +122,7 @@ def _interchange(args: argparse.Namespace) -> int:
     try:
         if args.command == "export":
             res = workspace.export_workspace(ws, cfg, tuple(args.stages or workspace.DEFAULT_STAGES), tuple(args.formats or workspace.FORMATS),
-                                             Path(args.out) if args.out else None)
+                                             Path(args.out) if args.out else None, args.resolve_script)
             out_dir = res.files[0].parent
             print(f"exported {len(res.files)} files to {out_dir}")
             for f in res.files:

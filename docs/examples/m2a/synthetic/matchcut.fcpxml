@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" frameDuration="1/25s" width="320" height="180" />
+    <asset id="r2" name="demo" uid="com.matchcut.source.34dfc60fe56a3287" start="0s" duration="462/25s" hasVideo="1" hasAudio="1" format="r1">
+      <media-rep kind="original-media" src="file:///ABSOLUTE/PATH/TO/demo.mp4" />
+    </asset>
+    <effect id="r3" name="Cross Dissolve" uid="FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265" />
+  </resources>
+  <library>
+    <event name="demo">
+      <project name="demo - roughcut">
+        <sequence format="r1" duration="199/25s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <asset-clip name="c001 shot0" ref="r2" offset="0s" start="0s" duration="2s" tcFormat="NDF">
+              <metadata>
+                <md key="com.matchcut.clip_key" value="0@0.000-2.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c001" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="0" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c002 shot1" ref="r2" offset="2s" start="106/25s" duration="19/25s" tcFormat="NDF">
+              <marker start="106/25s" duration="1/25s" value="s0-s1 (s0 -&gt; s1)" note="no pass changed this junction" />
+              <keyword start="106/25s" duration="19/25s" value="mc:s0-s1" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="1@4.250-5.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c002" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c003 shot3" ref="r2" offset="69/25s" start="163/25s" duration="62/25s" tcFormat="NDF">
+              <marker start="163/25s" duration="1/25s" value="s1-s3 (s1 -&gt; s3)" note="no pass changed this junction" />
+              <keyword start="163/25s" duration="62/25s" value="mc:s1-s3" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="3@6.500-9.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c003" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b2" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c004 shot6" ref="r2" offset="131/25s" start="14s" duration="2s" tcFormat="NDF">
+              <marker start="14s" duration="1/25s" value="s3-s6 (s3 -&gt; s6)" note="no pass changed this junction" />
+              <keyword start="14s" duration="2s" value="mc:s3-s6" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="6@14.000-16.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c004" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="6" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c005 shot7" ref="r2" offset="181/25s" start="444/25s" duration="18/25s" tcFormat="NDF">
+              <marker start="444/25s" duration="1/25s" value="s6-s7 (s6 -&gt; s7)" note="no pass changed this junction" />
+              <keyword start="444/25s" duration="18/25s" value="mc:s6-s7" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="7@17.750-18.500" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c005" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="7" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+          </spine>
+          <metadata>
+            <md key="com.matchcut.stage" value="roughcut" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source" value="/ABSOLUTE/PATH/TO/demo.mp4" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source_size" value="374723" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source_mtime_ns" value="1792405540366029893" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.fade_in" value="0.0" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.fade_out" value="0.0" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.provenance_file" value="provenance.json" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.matchcut_version" value="dev" type="string" editable="1" source="custom" />
+          </metadata>
+        </sequence>
+      </project>
+      <project name="demo - final">
+        <sequence format="r1" duration="173/25s" tcStart="0s" tcFormat="NDF">
+          <spine>
+            <asset-clip name="c001 shot0" ref="r2" offset="0s" start="0s" duration="2s" tcFormat="NDF">
+              <metadata>
+                <md key="com.matchcut.clip_key" value="0@0.000-2.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c001" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="0" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c002 shot1" ref="r2" offset="2s" start="106/25s" duration="3/5s" tcFormat="NDF">
+              <marker start="106/25s" duration="1/25s" value="s0-s1 (s0 -&gt; s1)" note="no pass changed this junction" />
+              <keyword start="106/25s" duration="3/5s" value="mc:s0-s1" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="1@4.250-5.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c002" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b1" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <transition name="Cross Dissolve" offset="61/25s" duration="8/25s">
+              <filter-video ref="r3" name="Cross Dissolve" />
+              <metadata>
+                <md key="com.matchcut.kind" value="dissolve" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.junction_id" value="s1-s3" type="string" editable="1" source="custom" />
+              </metadata>
+            </transition>
+            <asset-clip name="c003 shot3" ref="r2" offset="13/5s" start="167/25s" duration="49/25s" tcFormat="NDF">
+              <marker start="167/25s" duration="1/25s" value="s1-s3 (s1 -&gt; s3)" note="transitions: beat b1 -&gt; b2: dissolve 0.30s" />
+              <keyword start="167/25s" duration="49/25s" value="mc:s1-s3" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="3@6.500-9.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c003" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b2" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <transition name="Cross Dissolve" offset="21/5s" duration="18/25s">
+              <filter-video ref="r3" name="Cross Dissolve" />
+              <metadata>
+                <md key="com.matchcut.kind" value="dissolve" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.junction_id" value="s3-s6" type="string" editable="1" source="custom" />
+              </metadata>
+            </transition>
+            <asset-clip name="c004 shot6" ref="r2" offset="114/25s" start="359/25s" duration="41/25s" tcFormat="NDF">
+              <marker start="359/25s" duration="1/25s" value="s3-s6 (s3 -&gt; s6)" note="transitions: beat b2 -&gt; b3: dissolve 0.75s" />
+              <keyword start="359/25s" duration="41/25s" value="mc:s3-s6" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="6@14.000-16.000" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c004" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="6" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+            <asset-clip name="c005 shot7" ref="r2" offset="31/5s" start="444/25s" duration="18/25s" tcFormat="NDF">
+              <marker start="444/25s" duration="1/25s" value="s6-s7 (s6 -&gt; s7)" note="no pass changed this junction" />
+              <keyword start="444/25s" duration="18/25s" value="mc:s6-s7" />
+              <metadata>
+                <md key="com.matchcut.clip_key" value="7@17.750-18.500" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.clip_id" value="c005" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.shot_index" value="7" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.beat_id" value="b3" type="string" editable="1" source="custom" />
+                <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+              </metadata>
+            </asset-clip>
+          </spine>
+          <metadata>
+            <md key="com.matchcut.stage" value="final" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source" value="/ABSOLUTE/PATH/TO/demo.mp4" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source_size" value="374723" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.source_mtime_ns" value="1792405540366029893" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.fade_in" value="0.8" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.fade_out" value="0.3" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.provenance_file" value="provenance.json" type="string" editable="1" source="custom" />
+            <md key="com.matchcut.matchcut_version" value="dev" type="string" editable="1" source="custom" />
+          </metadata>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>

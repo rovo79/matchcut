@@ -1,12 +1,21 @@
 # M2 editorial integration: feasibility findings
 
-Status: findings and a recommendation, awaiting approval. Nothing here is wired
+Status when written: findings and a recommendation, awaiting approval. Nothing here was wired
 into the pipeline or the TUI. The M2 custom-preview plan
 (`docs/superpowers/plans/2026-10-18-m2-temporal-review.md`) is on hold until a
 direction is chosen. M1's human acceptance gate is still open and unaffected.
 
-Evidence: research notes (scratch, summarised here), and the offline proof in
-`prototypes/interchange/` (15 tests: `python3 -m pytest prototypes/interchange -q`).
+**Status update (M2a):** the interchange part of this study is built:
+`matchcut/interchange/` and the `export` and `import` commands, described in
+[INTEROP.md](INTEROP.md) and verified as far as automation goes in
+[M2A-ACCEPTANCE.md](M2A-ACCEPTANCE.md) (human acceptance with real editors is pending). The
+feasibility proof that stood here, `prototypes/interchange/`, was ported into that package and
+removed; the mpv adapter and the Resolve Studio adapter proposed below were not part of M2a (M2b built
+the mpv review; the Resolve script M2a generates is for the user to run). The text below is the study as it
+was written; its tables describe the proof, not the product.
+
+Evidence: research notes (scratch, summarised here), and the offline proof that was in
+`prototypes/interchange/` (15 tests; 14 are covered by `tests/interchange/`, the 15th, a headless mpv EDL and IPC loop, was dropped with the mpv EDL: M2b's `matchcut.review` plays junctions).
 
 ## Answer in one paragraph
 
@@ -120,13 +129,13 @@ the canonical cut.
 ## Live checklist (needs a Mac or PC with the applications)
 
 1. Resolve (free is enough): File > Import > Timeline with `final.otio` and with
-   `matchcut.fcpxml` from `prototypes/interchange/demo.py`. Do the dissolves
+   `matchcut.fcpxml` from `matchcut.pipeline.cli export` (see INTEROP.md). Do the dissolves
    become transitions? Are the markers there with their notes? What is the
    start timecode?
-2. Resolve Studio: run the generated `resolve_open_junction.py`. Does the
+2. Resolve Studio: run the generated `open_in_resolve.py` (`export --resolve-script`). Does the
    playhead land on the junction? Are the markers' `customData` set?
 3. In Resolve, trim one clip and export OTIO and FCPXML 1.10; import them with
-   `prototypes/interchange` and check the `human` decisions.
+   `matchcut.pipeline.cli import` and check the `human` decisions.
 4. Final Cut Pro: import `matchcut.fcpxml`; check the dissolves, markers and
    keywords; re-export and import as in step 3.
 5. IINA: open the EDL via `iina://open?url=…` with `mpv_ab-loop-a/b`.

@@ -30,8 +30,8 @@ from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_ti
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 
-from . import InterchangeError, fidelity
-from .common import LaidClip, SourceInfo, clip_key, export_timeline, layout, plain, source_info
+from . import InterchangeError, fidelity, resolve
+from .common import LaidClip, SourceInfo, clip_key, export_timeline, junction_ids, layout, plain, source_info, truncate
 from .edl import export_edl, import_edl
 from .fcpxml import export_fcpxml, fcpxml_stages, import_fcpxml
 from .fidelity import FORMATS, FidelityResult
@@ -40,6 +40,7 @@ from .provenance import write_provenance
 
 HUMAN = "human"
 DEFAULT_STAGES: Tuple[str, ...] = ("roughcut", "final")
+RESOLVE_SCRIPT = "open_in_resolve.py"
 IMPORT_SCHEMA = "matchcut.human_import/1"
 _EXTENSIONS = {".otio": "otio", ".fcpxml": "fcpxml", ".xml": "fcpxml", ".edl": "edl"}
 
@@ -123,27 +124,56 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _record_files(out: Path, stage: str, fmt: Optional[str] = None) -> List[str]:
+    """The exported files of ``stage`` (of ``fmt``, when given) that are in ``out``; for FCPXML, only while ``matchcut.fcpxml`` still has the
+    stage's project (named ``matchcut.fcpxml (project <stage>)``)."""
+    names: List[str] = []
+    for f in (FORMATS if fmt is None else (fmt,)):
+        if f == "fcpxml":
+            try:
+                if stage in fcpxml_stages((out / "matchcut.fcpxml").read_text(encoding="utf-8")):
+                    names.append(f"matchcut.fcpxml (project {stage})")
+            except (OSError, InterchangeError):
+                pass
+        elif (out / f"{stage}.{f}").exists():
+            names.append(f"{stage}.{f}")
+    return names
+
+
 def _merge_provenance(path: Path, doc: Dict[str, Any], old: Optional[Dict[str, Any]], order: Sequence[str], hashes: Dict[str, Optional[str]],
-                      stages: Sequence[str]) -> List[str]:
-    """Stamp each exported stage of ``doc`` with the sha256 of its stage file and carry over, from the provenance.json that was there,
-    the stages not exported now whose stage file is unchanged (same source and rate).  Rewrites ``path``; returns the carried stages."""
+                      stages: Sequence[str]) -> Tuple[List[str], List[str]]:
+    """Stamp each exported stage of ``doc`` with the sha256 of its stage file and carry over, from the provenance.json that was there, the
+    stages not exported now (same source and rate): kept as they are while their stage file is unchanged, and kept flagged ``"stale": true``
+    once it changed, for as long as exported files of that stage are still in the directory.  Rewrites ``path``; returns (kept, stale)."""
     for s in stages:
         doc["stages"][s]["canonical_sha256"] = hashes[s]
     kept: List[str] = []
+    stale: List[str] = []
+    extra: List[str] = []
     if old and old.get("source") == doc.get("source") and old.get("rate") == doc.get("rate") and isinstance(old.get("stages"), dict):
         for s, entry in old["stages"].items():
-            if s not in doc["stages"] and isinstance(entry, dict) and hashes.get(s) and entry.get("canonical_sha256") == hashes[s]:
-                doc["stages"][s] = entry
+            if s in doc["stages"] or not isinstance(entry, dict):
+                continue
+            if hashes.get(s) and entry.get("canonical_sha256") == hashes[s]:
+                doc["stages"][s] = {k: v for k, v in entry.items() if k != "stale"}
                 kept.append(s)
-    doc["stage_order"] = [s for s in order if s in doc["stages"]]
+            elif _record_files(path.parent, s):
+                doc["stages"][s] = dict(entry, stale=True)
+                stale.append(s)
+            else:
+                continue
+            if s not in order:
+                extra.append(s)
+    doc["stage_order"] = [s for s in list(order) + extra if s in doc["stages"]]
     doc["stages"] = {s: doc["stages"][s] for s in doc["stage_order"]}
     path.write_text(json.dumps(plain(doc), indent=1))
-    return kept
+    return kept, stale
 
 
 def _carried_results(old: Optional[Dict[str, Any]], out: Path, hashes: Dict[str, Optional[str]], now: set) -> List[FidelityResult]:
-    """The entries of an earlier fidelity.json that this export does not replace and that still hold: the stage file is unchanged and
-    the exported file is still there (for FCPXML, still has the stage's project)."""
+    """The entries of an earlier fidelity.json that this export does not replace and whose exported file is still there (for FCPXML, still
+    has the stage's project).  An entry whose stage file is unchanged is carried as it was; one whose stage file changed since is carried
+    flagged ``stale`` (it describes a file that no longer matches the stage)."""
     carried: List[FidelityResult] = []
     stages = (old or {}).get("stages")
     if not isinstance(stages, dict):
@@ -151,24 +181,35 @@ def _carried_results(old: Optional[Dict[str, Any]], out: Path, hashes: Dict[str,
     for stage, by_fmt in stages.items():
         for fmt, d in (by_fmt.items() if isinstance(by_fmt, dict) else []):
             try:
-                if (stage, fmt) in now or fmt not in FORMATS or not hashes.get(stage) or d.get("canonical_sha256") != hashes[stage]:
+                if (stage, fmt) in now or fmt not in FORMATS or not _record_files(out, stage, fmt):
                     continue
-                if fmt == "fcpxml":
-                    if stage not in fcpxml_stages((out / "matchcut.fcpxml").read_text(encoding="utf-8")):
-                        continue
-                elif not (out / f"{stage}.{fmt}").exists():
-                    continue
-                carried.append(FidelityResult.from_dict(d))
+                res = FidelityResult.from_dict(d)
+                res.stale = not (hashes.get(stage) and d.get("canonical_sha256") == hashes[stage])
+                carried.append(res)
             except (OSError, InterchangeError, KeyError, TypeError, AttributeError):
                 continue
     return carried
 
 
 # -- export ------------------------------------------------------------------------------------------
+def _resolve_script_text(out: Path, stage: str, tl: Timeline, junctions: Sequence[Junction], src: SourceInfo, name: str) -> str:
+    """The Resolve script for ``<out>/<stage>.otio``: a marker per junction at the cut frame the OTIO file carries, the playhead at the first
+    junction with a transition (else the first).  The timeline starts at 00:00:00:00, which is what every exporter writes."""
+    rows = layout(tl, src.rate)
+    ids = junction_ids(tl)
+    frames = {ids[j.index]: rows[j.index + 1].cut for j in junctions if j.index + 1 < len(rows)}
+    notes = {ids[j.index]: (f"J{j.index + 1} s{j.out_shot}->s{j.in_shot}", truncate(j.why())) for j in junctions if ids[j.index] in frames}
+    nav = next((ids[j.index] for j in junctions if ids[j.index] in frames and rows[j.index + 1].tr), next(iter(frames), ""))
+    return resolve.resolve_script(str((out / f"{stage}.otio").resolve()), f"{name} - {stage}", frames, nav, "00:00:00:00", src.rate, notes)
+
+
 def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFAULT_STAGES, formats: Sequence[str] = FORMATS,
-                     out_dir: Optional[Path] = None) -> ExportResult:
+                     out_dir: Optional[Path] = None, resolve_script: bool = False) -> ExportResult:
     """Write the interchange files of ``stages`` in ``formats`` (default ``<ws>/exports``), validate each by reading it back, write the
-    reports, and fail with a one-line ``InterchangeError`` if any export does not match its canonical stage (after the reports exist)."""
+    reports, and fail with a one-line ``InterchangeError`` if any export does not match its canonical stage (after the reports exist).
+
+    ``resolve_script`` also writes ``open_in_resolve.py`` (``resolve.resolve_script``) for the ``final`` stage's OTIO file, else the last
+    stage exported; it needs the otio format.  matchcut never runs it."""
     ws = Path(ws)
     stages, formats = _unique(stages), _unique(formats)
     if not stages:
@@ -179,6 +220,8 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
         if f not in FORMATS:
             raise InterchangeError(f"unknown format {f}: use otio, fcpxml or edl")
     formats = [f for f in FORMATS if f in formats]
+    if resolve_script and "otio" not in formats:
+        raise InterchangeError("--resolve-script needs the otio format: Resolve imports the OTIO file")
     stage_files = dict(stage_timeline_paths(ws))
     canonical = _canonical(ws)
     by_stage = dict(canonical)
@@ -226,11 +269,17 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
             _atomic_write(path, export_edl(snapped[s], s, src, f"{stem} - {s}", music))
             files.append(path)
             texts[(s, "edl")] = path.read_text(encoding="utf-8")
+    if resolve_script:
+        pick = "final" if "final" in stages else stages[-1]
+        path = out / RESOLVE_SCRIPT
+        _atomic_write(path, _resolve_script_text(out, pick, snapped[pick], junctions[pick], src, stem))
+        files.append(path)
+        notes.append(f"{RESOLVE_SCRIPT} imports {pick}.otio into Resolve Studio (external scripting = Local); matchcut does not run it")
     prov = out / "provenance.json"
     hashes = {s: _sha256(stage_files[s]) for s in by_stage}
     old_prov, old_fidelity = _read_json(prov), _read_json(out / "fidelity.json")
     doc = write_provenance(prov, [(s, by_stage[s]) for s in stages], junctions, src)
-    kept = _merge_provenance(prov, doc, old_prov, [s for s, _ in canonical], hashes, stages)
+    kept, stale_prov = _merge_provenance(prov, doc, old_prov, [s for s, _ in canonical], hashes, stages)
     files.append(prov)
     # validation: what was written, read back by matchcut's own readers, against the stage
     results: List[FidelityResult] = []
@@ -257,9 +306,17 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
     order = {s: k for k, (s, _) in enumerate(canonical)}
     everything = sorted(results + carried, key=lambda r: (order.get(r.stage, len(order)), FORMATS.index(r.fmt)))
     files += list(fidelity.write_report(everything, out))
-    if kept or carried:
+    current = [r for r in carried if not r.stale]
+    if kept or current:
         notes.append("the earlier records of this directory are kept where their stage file is unchanged: "
-                     + ", ".join([f"provenance {s}" for s in kept] + [f"fidelity {r.stage}/{r.fmt}" for r in carried]))
+                     + ", ".join([f"provenance {s}" for s in kept] + [f"fidelity {r.stage}/{r.fmt}" for r in current]))
+    # a stage's provenance record is stale as a whole; a fidelity entry is stale for its own format's file only (the stage may have been
+    # exported again in another format since: that file is current)
+    stale_files = _unique([n for s in stale_prov for n in _record_files(out, s)]
+                          + [n for r in carried if r.stale for n in _record_files(out, r.stage, r.fmt)])
+    if stale_files:
+        notes.append("the stage file changed since these were exported, so their records in provenance.json and fidelity.json are kept but "
+                     "flagged stale (export the stage again to refresh them): " + ", ".join(stale_files))
     stale = stale_human(ws)
     if stale:
         notes.append(stale)

@@ -53,7 +53,7 @@ KNOWN: Dict[str, Dict[str, List[str]]] = {
             "fade in/out of the whole cut: metadata only, not rendered by the receiving editor",
             "music mix: the music file (lane -1), its start and gain are carried, the render's mix is not",
             "UNVERIFIED: whether the matchcut metadata (md keys, keywords, marker values) survives a round trip through a third-party application",
-            "UNVERIFIED: that srcEnable=\"none\" mutes the source audio under music.only in every application",
+            "UNVERIFIED: that srcEnable=\"video\" mutes the source audio under music.only in every application",
         ],
     },
     "edl": {
@@ -80,6 +80,7 @@ class FidelityResult:
     lost: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     canonical_sha256: str = ""  # sha256 of the stage file the export was made from (lets a later, narrower export keep this entry only while it holds)
+    stale: bool = False  # the stage file changed since this export, whose files are still in the directory: kept, but no longer a statement about the stage
 
     @property
     def ok(self) -> bool:
@@ -90,12 +91,14 @@ class FidelityResult:
              "approximated": list(self.approximated), "lost": list(self.lost), "errors": list(self.errors)}
         if self.canonical_sha256:
             d["canonical_sha256"] = self.canonical_sha256
+        if self.stale:
+            d["stale"] = True
         return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "FidelityResult":
         return cls(str(d["fmt"]), str(d["stage"]), list(d.get("preserved", [])), list(d.get("approximated", [])), list(d.get("lost", [])),
-                   list(d.get("errors", [])), str(d.get("canonical_sha256", "")))
+                   list(d.get("errors", [])), str(d.get("canonical_sha256", "")), bool(d.get("stale", False)))
 
 
 # -- comparison ------------------------------------------------------------------------------------
@@ -276,18 +279,23 @@ def write_report(results: Sequence[FidelityResult], out_dir: Any) -> Tuple[Path,
     for r in results:
         stages.setdefault(r.stage, {})[r.fmt] = r.to_dict()
     jp, mp = out / "fidelity.json", out / "fidelity.md"
-    jp.write_text(json.dumps({"stages": stages, "ok": all(r.ok for r in results)}, indent=2, ensure_ascii=False) + "\n")
+    # a stale entry describes an earlier export: it neither fails nor passes the current one
+    jp.write_text(json.dumps({"stages": stages, "ok": all(r.ok for r in results if not r.stale)}, indent=2, ensure_ascii=False) + "\n")
     md = ["# Interchange fidelity report", "",
           "Each export was read back with matchcut's own reader and compared with the stage it was written from. "
           "**Preserved** items were compared and match. **Approximated** items carry a documented difference. "
           "**Lost** items cannot be carried by that format. **Errors** are differences nothing explains; any error fails the export. "
           "None of these formats is a complete copy of a matchcut cut.", ""]
+    if any(r.stale for r in results):
+        md += ["Rows marked **STALE** describe an earlier export whose stage file has changed since: its files are still in this directory "
+               "but are no longer checked against the stage. Export that stage again to refresh it.", ""]
     for stage, by_fmt in stages.items():
         md += [f"## Stage: {stage or '(unnamed)'}", "", "| format | preserved | approximated | lost | errors |", "|---|---|---|---|---|"]
         for fmt in FORMATS:
             if fmt in by_fmt:
                 d = by_fmt[fmt]
-                md.append(f"| {FORMAT_NAMES.get(fmt, fmt)} | {_cell(d['preserved'])} | {_cell(d['approximated'])} | {_cell(d['lost'])} | {_cell(d['errors'])} |")
+                label = FORMAT_NAMES.get(fmt, fmt) + (" **STALE**" if d.get("stale") else "")
+                md.append(f"| {label} | {_cell(d['preserved'])} | {_cell(d['approximated'])} | {_cell(d['lost'])} | {_cell(d['errors'])} |")
         md.append("")
     mp.write_text("\n".join(md))
     return jp, mp
