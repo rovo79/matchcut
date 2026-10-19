@@ -12,6 +12,7 @@ import pytest
 from matchcut.interchange import InterchangeError
 from matchcut.interchange.common import SourceInfo, junction_ids, layout, record_frames, rt, source_info
 from matchcut.interchange.fcpxml import CROSS_DISSOLVE_UID, FADE_TO_COLOR_UID, export_fcpxml, fcpxml_junction_ids, import_fcpxml
+from matchcut.interchange.otio import export_otio
 from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.timeline import Clip, Timeline, Transition
 
@@ -140,7 +141,10 @@ def test_junctions_have_a_marker_a_keyword_and_a_truncated_note_on_the_incoming_
         assert (m.get("start"), m.get("duration")) == (rt(row.vis_in, world.src.rate), rt(1, world.src.rate))
         assert k.get("value") == f"mc:{ids[j.index]}" and k.get("start") == m.get("start") and k.get("duration") == rt(row.dur, world.src.rate)
     assert fcpxml_junction_ids(xml, "final") == ids == [f"s{j.out_shot}-s{j.in_shot}" for j in js]
-    assert fcpxml_junction_ids(xml, "nope") == []
+    with pytest.raises(InterchangeError, match="no project for stage 'nope'"):
+        fcpxml_junction_ids(xml, "nope")
+    with pytest.raises(InterchangeError, match="invalid FCPXML"):
+        fcpxml_junction_ids("not xml")
 
 
 def test_a_long_why_line_is_cut_to_240_characters_and_control_characters_are_dropped():
@@ -368,7 +372,6 @@ def test_music_only_disables_the_source_audio_on_the_spine(world, music_file, tm
     assert notes == [] and len(back.clips) == len(tl.clips)
     dtd_valid(xml, tmp_path, "only")
     # a source without audio has nothing to disable
-    _, xml2 = world_doc(world, "final", MusicConfig(path=str(music_file), only=True), msrc)
     silent = SourceInfo(**{**world.src.__dict__, "has_audio": False})
     xml3 = export_fcpxml([("final", tl, [])], silent, MusicConfig(path=str(music_file), only=True), msrc, "demo")
     assert all(c.get("srcEnable") is None for c in spine_of(xml3).findall("asset-clip"))
@@ -501,3 +504,134 @@ def test_a_transition_without_an_offset_is_read_as_centred_on_the_cut():
     back, notes = import_fcpxml(ET.tostring(root, encoding="unicode"), "final")
     assert back.clips[1].transition_in.kind == "dissolve" and any("transition" in n and "offset" in n for n in notes)
     check_equivalent(synthetic(), back, RATE24)
+
+
+# -- review round 1 ------------------------------------------------------------------------------
+def with_broll_first(xml: str, n: int = 2) -> str:
+    """``n`` clips of another file lead the spine."""
+    root = ET.fromstring(xml)
+    ET.SubElement(root.find("resources"), "asset", id="r50", name="other", hasVideo="1").append(ET.Element("media-rep", src="file:///elsewhere/other.mp4"))
+    spine = root.find(".//spine")
+    for i in range(n):
+        spine.insert(0, ET.Element("asset-clip", ref="r50", name=f"b-roll {i}", offset="0s", start="0s", duration="1s"))
+    return ET.tostring(root, encoding="unicode")
+
+
+def strip_metadata(xml: str, keep_uid: bool = True) -> str:
+    root = ET.fromstring(xml)
+    for el in root.iter():
+        for md in el.findall("metadata"):
+            el.remove(md)
+        if not keep_uid and el.tag == "asset":
+            el.attrib.pop("uid", None)
+    return ET.tostring(root, encoding="unicode")
+
+
+def test_the_source_is_declared_in_the_sequence_metadata():
+    src = fake_src()
+    md = {m.get("key"): m.get("value") for m in ET.fromstring(fx(synthetic())).findall(".//sequence/metadata/md")}
+    assert (md["com.matchcut.source"], md["com.matchcut.source_size"], md["com.matchcut.source_mtime_ns"]) == (src.path, str(src.size), str(src.mtime_ns))
+
+
+def test_a_broll_inserted_first_does_not_become_the_source():
+    tl = synthetic()
+    back, notes = import_fcpxml(with_broll_first(fx(tl)), "final")  # the declared source wins
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and back.source == "/x/media.mp4"
+    check_equivalent(tl, back, RATE24)
+    assert [n for n in notes if "other media" in n] == [f"clip b-roll {i}: other media /elsewhere/other.mp4 ignored" for i in (1, 0)]
+    assert len(notes) == 2
+
+
+def test_the_footage_is_found_without_the_declaration():
+    tl = synthetic()
+    # the uid our asset carries marks it even when five b-roll clips outnumber the three footage clips and all metadata is gone
+    back, notes = import_fcpxml(strip_metadata(with_broll_first(fx(tl), 5)))
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and sum("other media" in n for n in notes) == 5
+    # without the uid as well: the clips' own metadata points at the footage
+    root = ET.fromstring(with_broll_first(fx(tl), 5))
+    seq = root.find(".//sequence")
+    seq.remove(seq.find("metadata"))
+    for a in root.iter("asset"):
+        a.attrib.pop("uid", None)
+    back, notes = import_fcpxml(ET.tostring(root, encoding="unicode"), "final")
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and sum("other media" in n for n in notes) == 5
+    # nothing at all: the most used asset
+    back, notes = import_fcpxml(strip_metadata(with_broll_first(fx(tl), 2), keep_uid=False))
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and sum("other media" in n for n in notes) == 2
+
+
+def test_audio_only_spine_clips_split_edits_and_conform_rate_are_noted():
+    tl = synthetic()
+    root = ET.fromstring(fx(tl))
+    spine = root.find(".//spine")
+    clips = spine.findall("asset-clip")
+    audio = ET.Element("asset-clip", ref=clips[0].get("ref"), name="sound", offset="0s", start="0s", duration="1s", srcEnable="audio")
+    spine.insert(0, audio)
+    clips[1].set("audioStart", "0s")
+    clips[1].set("audioDuration", "1s")
+    ET.SubElement(clips[2], "conform-rate", srcFrameRate="25")
+    back, notes = import_fcpxml(ET.tostring(root, encoding="unicode"), "final")
+    assert [c.shot_index for c in back.clips] == [0, 1, 2] and len(back.clips) == 3
+    text = "\n".join(notes)
+    assert "clip sound: srcEnable=audio (sound without picture) ignored" in text
+    assert "audioStart/audioDuration (split edit) ignored" in text and "conform-rate ignored" in text
+
+
+def test_a_transition_at_the_start_or_end_of_the_spine_says_so():
+    root = ET.fromstring(fx(synthetic()))
+    spine = root.find(".//spine")
+    tr = spine.find("transition")
+    lead = ET.Element("transition", offset="0s", duration="1/2s", name="Cross Dissolve")
+    spine.insert(0, lead)
+    spine.append(ET.Element("transition", offset="9s", duration="1/2s", name="Cross Dissolve"))
+    back, notes = import_fcpxml(ET.tostring(root, encoding="unicode"), "final")
+    assert tr is not None and len(back.clips) == 3 and back.clips[1].transition_in.kind == "dissolve"
+    assert "transition at the start of the spine dropped" in notes and "transition at the end of the spine dropped" in notes
+
+
+def test_junction_ids_follow_the_project_import_would_read(world):
+    stages = [(n, exported(world, n)[0], world.jb[n]) for n in ("roughcut", "final")]
+    xml = export_fcpxml(stages, world.src, None, None, "demo")
+    assert fcpxml_junction_ids(xml) == fcpxml_junction_ids(xml, "roughcut")
+    assert fcpxml_junction_ids(xml) == [f"s{j.out_shot}-s{j.in_shot}" for j in world.jb["roughcut"]]
+    root = ET.fromstring(xml)
+    for el in root.iter():
+        for md in el.findall("metadata"):
+            el.remove(md)
+    assert fcpxml_junction_ids(ET.tostring(root, encoding="unicode"), "final") == [f"s{j.out_shot}-s{j.in_shot}" for j in world.jb["final"]]  # by project name
+
+
+def test_music_clip_never_runs_past_the_real_end_of_the_track(world, tmp_path):
+    track = write_wav(tmp_path / "frac.wav", 5.02)  # 125.5 frames at 25 fps: the clip may use 125, not 126
+    msrc = source_info(str(track), audio_only=True)
+    tl, xml = world_doc(world, "final", MusicConfig(path=str(track), start=3.0), msrc)
+    conn = ET.fromstring(xml).find(".//asset-clip[@lane='-1']")
+    assert (conn.get("start"), conn.get("duration")) == ("3s", "2s")
+    asset = ET.fromstring(xml).findall("resources/asset")[1]
+    assert asset.get("duration") == "5s"
+    _, doc = tl, export_otio(tl, "final", world.src, [], MusicConfig(path=str(track), start=3.0), msrc)
+    clip = doc["tracks"]["children"][2]["children"][0]
+    assert clip["media_references"]["DEFAULT_MEDIA"]["available_range"]["duration"]["value"] == 125
+    assert clip["source_range"]["start_time"]["value"] + clip["source_range"]["duration"]["value"] <= 125
+
+
+def test_a_window_under_one_frame_has_its_own_message(world, tmp_path):
+    track = write_wav(tmp_path / "five.wav", 5.0)
+    msrc = source_info(str(track), audio_only=True)
+    music = MusicConfig(path=str(track), start=4.99)
+    msg = r"^music\.start \(4\.99s\) leaves less than one frame of music before the end of the track \(5\.00s\)$"
+    with pytest.raises(InterchangeError, match=msg):
+        world_doc(world, "final", music, msrc)
+    tl, _ = exported(world, "final")
+    with pytest.raises(InterchangeError, match=msg):
+        export_otio(tl, "final", world.src, [], music, msrc)
+
+
+def test_a_stage_without_clips_cannot_be_exported():
+    empty = Timeline(source="/x/media.mp4", fps=24.0, stage="final")
+    with pytest.raises(InterchangeError, match="^stage final has no clips to export$"):
+        fx(empty)
+    with pytest.raises(InterchangeError, match="^stage draft has no clips to export$"):
+        export_fcpxml([("final", synthetic(), []), ("draft", empty, [])], fake_src(), None, None, "x")
+    with pytest.raises(InterchangeError, match="^stage final has no clips to export$"):
+        export_otio(empty, "final", fake_src(), [])

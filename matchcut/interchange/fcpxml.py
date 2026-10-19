@@ -77,6 +77,9 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                           hasVideo="1", hasAudio="1" if src.has_audio else "0", format="r1")
     ET.SubElement(asset, "media-rep", kind="original-media", src=src.url)
     ET.SubElement(res, "effect", id="r3", name="Cross Dissolve", uid=CROSS_DISSOLVE_UID)
+    for stage, tl, _ in stages:
+        if not tl.clips:
+            raise InterchangeError(f"stage {stage} has no clips to export")
     laid = [layout(tl, rate) for _, tl, _ in stages]
     if any(r.kind == "dip_to_black" for rows in laid for r in rows):
         ET.SubElement(res, "effect", id="r4", name="Fade To Color", uid=FADE_TO_COLOR_UID)  # UNVERIFIED; only declared when a dip is used
@@ -119,7 +122,7 @@ def export_fcpxml(stages: Sequence[Tuple[str, Timeline, Sequence[Junction]]], sr
                               note=_x(truncate(j.why())))
                 ET.SubElement(ac, "keyword", start=rt(row.vis_in, rate), duration=rt(row.dur, rate), value=_x(f"mc:{jid}"))
             _md(ac, clip_key=clip_key(c), clip_id=c.id, shot_index=c.shot_index, beat_id=c.beat_id, stage=stage)
-        smd: Dict[str, Any] = {"stage": stage, "fade_in": tl.fade_in, "fade_out": tl.fade_out, "provenance_file": "provenance.json",
+        smd: Dict[str, Any] = {"stage": stage, "source": src.path, "source_size": src.size, "source_mtime_ns": src.mtime_ns, "fade_in": tl.fade_in, "fade_out": tl.fade_out, "provenance_file": "provenance.json",
                                "matchcut_version": MATCHCUT_VERSION}
         if muted:
             smd["source_audio"] = "disabled (srcEnable=video on every clip): music.only drops the source audio from the render"
@@ -163,6 +166,26 @@ def _path_of(asset: Optional[ET.Element]) -> Optional[str]:
 
 def _same_media(a: Optional[str], b: Optional[str]) -> bool:
     return a is None or b is None or a == b or Path(a).name == Path(b).name
+
+
+def _source_path(declared: Optional[str], used: List[ET.Element], clips: List[ET.Element]) -> Optional[str]:
+    """The path of the source footage among the assets the spine uses: the sequence's declared source, else the asset our uid marks,
+    else the one our clip metadata points at, else the most used, else the first."""
+    if not used:
+        return None
+    if declared:
+        for a in used:
+            p = _path_of(a)
+            if p is not None and _same_media(p, declared):
+                return p
+    ours = [a for a in used if (a.get("uid") or "").startswith("com.matchcut.source.")]
+    marked = {k.get("ref") for k in clips if _md_of(k).get("clip_id") or _md_of(k).get("clip_key")}
+    mine = [a for a in used if a.get("id") in marked]
+    counts: Dict[Optional[str], int] = {}
+    for a in used:
+        counts[a.get("id")] = counts.get(a.get("id"), 0) + 1
+    common = max(used, key=lambda a: counts[a.get("id")])  # max keeps the first of equals
+    return _path_of((ours or mine or [common])[0])
 
 
 def _is_music(el: ET.Element) -> bool:
@@ -240,12 +263,8 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
     kids = list(spine) if spine is not None else []
     if not any(k.tag == "asset-clip" for k in kids):
         raise InterchangeError("FCPXML spine has no clips")
-    want: Optional[str] = None
-    for k in kids:
-        a = assets.get(k.get("ref")) if k.tag == "asset-clip" else None
-        if a is not None:
-            want = _path_of(a)
-            break
+    want = _source_path(_md_of(seq).get("source"), [assets[k.get("ref")] for k in kids if k.tag == "asset-clip" and k.get("ref") in assets],
+                        [k for k in kids if k.tag == "asset-clip"])
     items: List[Tuple[str, Dict[str, Any]]] = []
     mapped = 0
     skipped_media = 0
@@ -289,6 +308,10 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
                 notes.append(f"clip {name}: other media {path} ignored")
                 items.append(_SKIP)
                 continue
+            if el.get("srcEnable") == "audio":
+                notes.append(f"clip {name}: srcEnable=audio (sound without picture) ignored")
+                items.append(_SKIP)
+                continue
             try:
                 origin = fr(asset.get("start")) if asset.get("start") else 0
                 vis_in = fr(el.get("start")) if el.get("start") else origin
@@ -309,13 +332,15 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
                 offsets[origin] = offsets.get(origin, 0) + 1
             if el.get("enabled") == "0":
                 notes.append(f"clip {name}: disabled in the file, read as enabled")
+            if el.get("audioStart") or el.get("audioDuration"):
+                notes.append(f"clip {name}: audioStart/audioDuration (split edit) ignored")
             for ch in el:
                 lane = ch.get("lane")
                 if lane not in (None, "", "0"):
                     if not _is_music(ch):
                         label = " ".join(x for x in (lane and f"lane {lane}", ch.tag, ch.get("name") or ch.get("ref")) if x)
                         notes.append(f"{label} ignored (connected items are not read)")
-                elif ch.tag.startswith(("adjust-", "filter-")) or ch.tag in ("timeMap", "mute", "audio-role-source"):
+                elif ch.tag.startswith(("adjust-", "filter-")) or ch.tag in ("timeMap", "conform-rate", "mute", "audio-role-source"):
                     notes.append(f"clip {name}: {ch.tag} ignored")
             pos = cut + dur
             mapped += 1
@@ -344,7 +369,8 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
             continue
         if kind == "trpending":
             if not (0 < k < len(items) - 1 and items[k - 1][0] == "clip" and items[k + 1][0] == "clip"):
-                notes.append("transition next to an ignored item dropped")
+                where = "at the start of the spine" if k == 0 else "at the end of the spine" if k == len(items) - 1 else "next to an ignored item"
+                notes.append(f"transition {where} dropped")
                 continue
             dur = d["dur"]
             in_off = dur // 2 if d["off"] is None else min(max(d["cut"] - d["off"], 0), dur)  # the transition starts in_off before the cut
@@ -370,25 +396,26 @@ def _import(xml: Any, stage: Optional[str], bounds: Optional[Dict[int, Sequence[
 
 
 def fcpxml_junction_ids(xml: Any, stage: Optional[str] = None) -> List[str]:
-    """The junction ids that survive in an (edited) file: per clip, its marker value (``s3-s5 (...)``), else its ``mc:`` keyword."""
-    root = _parse(xml)
+    """The junction ids that survive in an (edited) file, for the project ``import_fcpxml`` would read: per clip, its marker value
+    (``s3-s5 (...)``), else its ``mc:`` keyword."""
+    try:
+        proj, _ = _select(_parse(xml), stage)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise InterchangeError(f"invalid FCPXML: {type(exc).__name__}: {exc}".splitlines()[0]) from exc
     out: List[str] = []
-    for p in root.iter("project"):
-        if stage is not None and _stage_of(p) != stage:
-            continue
-        for clip in p.iter("asset-clip"):
-            found = None
-            for m in clip.findall("marker"):
-                mm = re.match(r"(s-?\d+-s-?\d+(?:#\d+)?)", m.get("value", ""))
+    for clip in proj.iter("asset-clip"):
+        found = None
+        for m in clip.findall("marker"):
+            mm = re.match(r"(s-?\d+-s-?\d+(?:#\d+)?)", m.get("value", ""))
+            if mm:
+                found = mm.group(1)
+                break
+        if found is None:
+            for k in clip.findall("keyword"):
+                mm = re.fullmatch(r"mc:(s-?\d+-s-?\d+(?:#\d+)?)", k.get("value", ""))
                 if mm:
                     found = mm.group(1)
                     break
-            if found is None:
-                for k in clip.findall("keyword"):
-                    mm = re.fullmatch(r"mc:(s-?\d+-s-?\d+(?:#\d+)?)", k.get("value", ""))
-                    if mm:
-                        found = mm.group(1)
-                        break
-            if found:
-                out.append(found)
+        if found:
+            out.append(found)
     return out

@@ -58,6 +58,8 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
     """One OTIO document for ``tl`` (normally the frame-snapped copy from ``common.export_timeline``)."""
     rate = src.rate
     r = float(rate)
+    if not tl.clips:
+        raise InterchangeError(f"stage {stage} has no clips to export")
     rows = layout(tl, rate)
     ids = junction_ids(tl)
     jid_in = {i + 1: jid for i, jid in enumerate(ids)}  # incoming-clip index -> junction id

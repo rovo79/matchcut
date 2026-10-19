@@ -225,18 +225,19 @@ def music_window(music: Any, music_src: Optional["SourceInfo"], rate: Fraction, 
     """(start, duration, available) in frames at ``rate`` of the music clip under a cut of ``total`` frames.
 
     The renderer plays ``min(total, music_duration - start)`` of the track from ``music.start``; every exporter follows
-    the same rule, and a start at or past the end of the track is an error.
+    the same rule, and a start at or past the end of the track is an error.  ``available`` is floored, so the clip never
+    runs past the real end of the track.
     """
     if music_src is None:
         raise InterchangeError(f"music file not probed: {music.path}")
-    past = InterchangeError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_src.seconds:.1f}s)")
     if max(0.0, music.start) >= music_src.seconds:
-        raise past
-    avail = to_frames(music_src.seconds, rate)
+        raise InterchangeError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_src.seconds:.1f}s)")
+    avail = math.floor(Fraction(music_src.duration_frames) / music_src.rate * Fraction(rate))
     start = max(to_frames(music.start, rate), 0)
     dur = min(total, avail - start)
     if dur < 1:
-        raise past
+        raise InterchangeError(f"music.start ({music.start:.2f}s) leaves less than one frame of music before the end of the track "
+                               f"({music_src.seconds:.2f}s)")
     return start, dur, avail
 
 
