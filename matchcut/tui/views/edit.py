@@ -335,7 +335,8 @@ class EditView(Vertical):
     # -- review in mpv -----------------------------------------------------------------
     def _review_key(self) -> Optional[tuple]:
         j, stage = self.current_junction(), self.current_stage()
-        return (stage, j.out_shot, j.in_shot) if j is not None and stage is not None else None
+        # the junction's index too: a stage can hold the same shot pair twice, and each is its own cut to review
+        return (stage, j.index, j.out_shot, j.in_shot) if j is not None and stage is not None else None
 
     def _show_review_status(self) -> None:
         j, stage = self.current_junction(), self.current_stage()
@@ -343,7 +344,7 @@ class EditView(Vertical):
         if j is None or stage is None:
             line.update("")
             return
-        text, style = self._review_status.get((stage, j.out_shot, j.in_shot)) or (None, "")
+        text, style = self._review_status.get(self._review_key()) or (None, "")
         if text is None:
             base = j.baseline.stage
             text, style = ("p play" if base == stage else f"p play · a compare with {base}"), "dim"
