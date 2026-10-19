@@ -20,7 +20,7 @@ from matchcut.pipeline.junctions import Junction
 from matchcut.pipeline.timeline import Timeline
 
 from . import MATCHCUT_VERSION, InterchangeError
-from .common import (SourceInfo, assemble, clip_key, junction_ids, junction_meta, layout, record_frames, snap_rate, to_frames,
+from .common import (SourceInfo, assemble, clip_key, junction_ids, junction_meta, layout, music_window, record_frames, snap_rate, to_frames,
                      truncate)
 
 UNVERIFIED_DIP = "dip_to_black is UNVERIFIED: OTIO has no such transition type (Custom_Transition + metadata); how an editor treats it is untested"
@@ -98,15 +98,8 @@ def export_otio(tl: Timeline, stage: str, src: SourceInfo, junctions: Sequence[J
             a1["metadata"] = {"matchcut": {"muted": True, "note": "source audio disabled: music.only drops it from the render"}}
         tracks.append(a1)
     if has_music:
-        if music_src is None:
-            raise InterchangeError(f"music file not probed: {music.path}")
         mrate = float(rate)
-        avail = to_frames(music_src.seconds, rate)
-        start = to_frames(music.start, rate)
-        if max(0.0, music.start) >= music_src.seconds:
-            raise InterchangeError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_src.seconds:.1f}s)")
-        start = max(start, 0)
-        dur = min(record_frames(rows), avail - start)  # the renderer clamps the same way: min(total, music_duration - start)
+        start, dur, avail = music_window(music, music_src, rate, record_frames(rows))
         mref = {**_ref(music_src, Path(music_src.path).stem), "available_range": _range(0, avail, mrate)}
         tracks.append(_track("Audio", "A2", [_clip(Path(music_src.path).name, _range(start, dur, mrate), mref,
                                                    {"kind": "music", "gain_db": music.gain_db, "duck": music.duck, "start": music.start,

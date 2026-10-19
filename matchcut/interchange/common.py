@@ -221,6 +221,25 @@ def junction_meta(j: Junction, jid: str, scores: bool = False) -> Dict[str, Any]
     return meta
 
 
+def music_window(music: Any, music_src: Optional["SourceInfo"], rate: Fraction, total: int) -> Tuple[int, int, int]:
+    """(start, duration, available) in frames at ``rate`` of the music clip under a cut of ``total`` frames.
+
+    The renderer plays ``min(total, music_duration - start)`` of the track from ``music.start``; every exporter follows
+    the same rule, and a start at or past the end of the track is an error.
+    """
+    if music_src is None:
+        raise InterchangeError(f"music file not probed: {music.path}")
+    past = InterchangeError(f"music.start ({music.start:.1f}s) is past the end of the track ({music_src.seconds:.1f}s)")
+    if max(0.0, music.start) >= music_src.seconds:
+        raise past
+    avail = to_frames(music_src.seconds, rate)
+    start = max(to_frames(music.start, rate), 0)
+    dur = min(total, avail - start)
+    if dur < 1:
+        raise past
+    return start, dur, avail
+
+
 # -- the dissolve conversion ---------------------------------------------------------------------
 @dataclass(frozen=True)
 class LaidClip:

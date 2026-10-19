@@ -18,10 +18,12 @@ except Exception:  # pragma: no cover - depends on how matchcut is installed
     MATCHCUT_VERSION = "dev"
 
 from .common import LaidClip, SourceInfo, clip_key, export_timeline, junction_id, junction_ids, layout, rt, source_info, to_frames  # noqa: E402
+from .fcpxml import export_fcpxml, fcpxml_junction_ids, import_fcpxml  # noqa: E402
 from .otio import export_otio, import_otio  # noqa: E402
 from .provenance import write_provenance  # noqa: E402
 
 __all__ = [
     "InterchangeError", "MATCHCUT_VERSION", "LaidClip", "SourceInfo", "clip_key", "export_timeline", "junction_id", "junction_ids",
-    "layout", "rt", "source_info", "to_frames", "export_otio", "import_otio", "write_provenance",
+    "layout", "rt", "source_info", "to_frames", "export_otio", "import_otio", "export_fcpxml", "import_fcpxml", "fcpxml_junction_ids",
+    "write_provenance",
 ]
