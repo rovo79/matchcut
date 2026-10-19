@@ -14,7 +14,7 @@ from textual.widgets import Static
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_human
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import clip_origin
+from matchcut.pipeline.timeline import HUMAN_STAGE, clip_origin
 from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
@@ -134,6 +134,9 @@ class EditView(Vertical):
         summary = f" ({self.stages.index(stage) + 1}/{len(self.stages)}) · {len(tl.clips) if tl else 0} clips · {tl.duration if tl else 0:.1f}s · {len(self.junctions)} junctions · {len(pins)} pinned"
         if unplaced:
             summary += f" · {len(unplaced)} pin(s) not placed"
+        changed = self._changed_pins(state, pins)
+        if changed:
+            summary += f" · {changed} pin(s) changed by the editor"
         stale = stale_human(state.workspace)  # an imported editor cut that no longer fits is left out of the stages: say why
         header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
@@ -178,12 +181,19 @@ class EditView(Vertical):
             self._frames_key = frames_key
             self._show_frames(j, stage)
 
+    def _changed_pins(self, state: RunState, pins: List[Pin]) -> int:
+        """How many pins the latest stage reports as changed by the editor (only the human stage can: an imported editor cut that no longer holds them)."""
+        if not pins or not self.stages or self.stages[-1] != HUMAN_STAGE:
+            return 0
+        latest = state.timeline(HUMAN_STAGE)
+        return sum(1 for p in pins if latest is not None and (d := pin_outcome(latest, p, stage=HUMAN_STAGE)) is not None and d.action == "pin_changed")
+
     def _pin_decision(self, pin: Optional[Pin]):
         """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
         if pin is None or self._state is None or not self.stages:
             return None
         latest = self._state.timeline(self.stages[-1])
-        return pin_outcome(latest, pin) if latest is not None else None
+        return pin_outcome(latest, pin, stage=self.stages[-1]) if latest is not None else None
 
     def _show_frames(self, j: Junction, stage: str) -> None:
         frames = self._frames()

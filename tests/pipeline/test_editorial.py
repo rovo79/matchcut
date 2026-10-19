@@ -624,3 +624,106 @@ def test_an_origin_that_matches_no_piece_is_a_boundary_choice_and_is_marked():
     stale = Pin(3, 4, 9.0, 9.5, out_origin="3@6.000-7.000")
     _, decisions = apply_pins(tl, [stale], SPLIT_BOUNDS, min_clip=0.5)
     assert decisions[0].action == "pinned" and decisions[0].data["by_boundary"] is True
+
+
+# -- a pin on the human stage: held only if the editor's cut still holds it ---------------------------------------------
+def pinned_pair(with_origins: bool = True):
+    """(pin, final cut with the pin applied): c001 (shot 0) -> c002 (shot 2) held at out 2.00 s / in 4.60 s."""
+    tl = cut()
+    for c in tl.clips:
+        c.origin = clip_origin(c)
+    pin = Pin(0, 2, 2.0, 4.6, out_origin=tl.clips[0].origin if with_origins else "", in_origin=tl.clips[1].origin if with_origins else "")
+    final, decisions = apply_pins(tl, [pin], BOUNDS, min_clip=0.75)
+    final.stage = "final"
+    assert [d.action for d in decisions] == ["pinned"]
+    return pin, final
+
+
+def human_of(final: Timeline, clips=None) -> Timeline:
+    """The editor's cut: a copy of ``final`` (its history, the inherited editor decision included) as the stage ``human``."""
+    human = final.copy()
+    human.stage = "human"
+    if clips is not None:
+        human.clips = clips(human.clips)
+    return human
+
+
+def test_a_pin_the_editor_left_alone_reads_applied_on_the_human_stage():
+    pin, final = pinned_pair()
+    assert pin_outcome(human_of(final), pin).action == "pinned"
+    assert pin_outcome(human_of(final), pin).to_dict() == pin_outcome(final, pin).to_dict()
+    # a move of less than half a frame is the frame grid, not an edit (the rough cut is 1/25 s = 0.04 s per frame)
+    nudged = human_of(final, lambda cs: [cs[0], cs[1], cs[2]])
+    nudged.clips[0].source_out += 0.019
+    assert pin_outcome(nudged, pin).action == "pinned"
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+def test_the_human_stage_reports_a_pin_whose_cut_the_editor_trimmed(with_origins):
+    pin, final = pinned_pair(with_origins)
+    out = human_of(final)
+    out.clips[0].source_out -= 3 / 25
+    d = pin_outcome(out, pin)
+    assert (d.pass_name, d.action) == ("human", "pin_changed") and d.detail == "cut trimmed by 3 frames (out)", d
+    assert "\n" not in d.detail
+    both = human_of(final)
+    both.clips[0].source_out += 2 / 25
+    both.clips[1].source_in += 1 / 25
+    assert pin_outcome(both, pin).detail == "cut trimmed by 2 frames (out) and 1 frame (in)"
+    just_in = human_of(final)
+    just_in.clips[1].source_in -= 4 / 25
+    assert pin_outcome(just_in, pin).detail == "cut trimmed by 4 frames (in)"
+    assert pin_outcome(final, pin).action == "pinned"  # the canonical stage is judged by its own history, as before
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+def test_the_human_stage_reports_a_pin_whose_clip_the_editor_deleted(with_origins):
+    pin, final = pinned_pair(with_origins)
+    for gone, other in ((1, "shot 2"), (0, "shot 0")):
+        d = pin_outcome(human_of(final, lambda cs: [c for k, c in enumerate(cs) if k != gone]), pin)
+        assert (d.action, d.detail) == ("pin_changed", f"clip removed ({other})"), d
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+def test_the_human_stage_reports_a_pin_whose_pair_the_editor_separated(with_origins):
+    pin, final = pinned_pair(with_origins)
+    inserted = Clip("h001", 1, 3.0, 3.6, "b1", origin="human:h001")
+    d = pin_outcome(human_of(final, lambda cs: [cs[0], inserted, cs[1], cs[2]]), pin)
+    assert (d.action, d.detail) == ("pin_changed", "clips are no longer adjacent"), d
+    d = pin_outcome(human_of(final, lambda cs: [cs[1], cs[0], cs[2]]), pin)  # swapped: shot 2 now comes first
+    assert d.action == "pin_changed" and d.detail == "clips are no longer adjacent"
+
+
+def test_the_human_stage_reports_a_pin_whose_clip_is_another_piece_of_the_footage_now():
+    pin, final = pinned_pair()
+    other = Clip("h001", 2, 4.6, 5.8, "b1", origin="human:h001")  # same shot, same range, but not the clip the pin named
+    d = pin_outcome(human_of(final, lambda cs: [cs[0], other, cs[2]]), pin)
+    assert (d.action, d.detail) == ("pin_changed", "other footage (shot 2 is a different clip now)"), d
+    # without the pin's clip instances the shots decide: the same shots are still held
+    bare, final = pinned_pair(with_origins=False)
+    assert pin_outcome(human_of(final, lambda cs: [cs[0], other, cs[2]]), bare).action == "pinned"
+
+
+def test_the_inherited_editor_decision_is_never_what_makes_a_pin_read_applied_on_the_human_stage():
+    pin, final = pinned_pair()
+    human = human_of(final, lambda cs: cs[1:])
+    assert any(d.pass_name == "editor" and d.action == "pinned" for d in human.history)  # it is in the history ...
+    assert pin_outcome(human, pin).action == "pin_changed"  # ... and does not count
+    # a stage name passed by the caller decides, not only the one the file says
+    stageless = human_of(final, lambda cs: cs[1:])
+    stageless.stage = ""
+    assert pin_outcome(stageless, pin).action == "pinned" and pin_outcome(stageless, pin, stage="human").action == "pin_changed"
+    # an unplaced pin and a pin the run never saw keep their outcome
+    assert pin_outcome(human_of(final), Pin(0, 2, 1.0, 5.0)) is None
+
+
+def test_junctions_of_the_human_stage_say_a_changed_pin_is_not_pinned():
+    pin, final = pinned_pair()
+    stages = [("final", final), ("human", human_of(final))]
+    j = build_junctions(stages)[0]
+    assert j.pinned and not j.pin_lost
+    trimmed = human_of(final)
+    trimmed.clips[0].source_out -= 3 / 25
+    j = build_junctions([("final", final), ("human", trimmed)])[0]
+    assert not j.pinned and j.pin_lost == "cut trimmed by 3 frames (out)"
+    assert build_junctions([("final", final)])[0].pinned  # unchanged for the canonical stages

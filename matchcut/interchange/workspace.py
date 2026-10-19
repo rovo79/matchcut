@@ -152,15 +152,37 @@ def _save_snapshot(out: Path, stage: str, data: bytes) -> None:
         raise InterchangeError(f"cannot write {target}: {exc.strerror or exc}") from exc
 
 
-def _find_snapshot(ws: Path, imported: Path, stage: str, sha: str) -> Optional[Path]:
-    """The snapshot of ``stage`` as exported (``sha``): in the workspace's ``exports/.stages``, else in ``.stages`` next to the imported file
-    (an export made with ``--out DIR`` keeps its snapshots in ``DIR/.stages``).  A copy whose content does not hash to ``sha`` is not used."""
+def _shown(ws: Path, path: Path) -> str:
+    """``path`` as the workspace-relative text a message names, else as it is."""
+    try:
+        return str(path.resolve().relative_to(Path(ws).resolve()))
+    except ValueError:
+        return str(path)
+
+
+def _load_snapshot(ws: Path, imported: Path, stage: str, sha: str) -> Tuple[Path, Timeline]:
+    """The snapshot of ``stage`` as exported (``sha``), loaded: in the workspace's ``exports/.stages``, else in ``.stages`` next to the imported
+    file (an export made with ``--out DIR`` keeps its snapshots in ``DIR/.stages``).  A copy whose content does not hash to ``sha`` is not
+    used; a good copy in the second place is found even when the first holds a damaged one.  Raises a one-line ``InterchangeError``: missing
+    (naming where it looked) or damaged (the hash does not match, or the JSON cannot be read)."""
     name = _snapshot_name(stage, sha)
-    for folder in (ws / "exports", imported.resolve().parent):
-        candidate = folder / SNAPSHOT_DIR / name
-        if _sha256(candidate) == sha:
-            return candidate
-    return None
+    folders = list(dict.fromkeys([ws / "exports" / SNAPSHOT_DIR, imported.resolve().parent / SNAPSHOT_DIR]))
+    head = f"{imported.name} was exported from an earlier {stage} (sha {sha[:12]}) and its snapshot "
+    damaged: Optional[str] = None
+    for folder in folders:
+        candidate = folder / name
+        if not candidate.is_file():
+            continue
+        if _sha256(candidate) != sha:
+            damaged = damaged or f"{_shown(ws, candidate)} is damaged (sha256 mismatch)"
+            continue
+        try:
+            return candidate, Timeline.load(candidate)
+        except Exception:
+            damaged = damaged or f"{_shown(ws, candidate)} is damaged (unreadable JSON)"
+    if damaged:
+        raise InterchangeError(f"{head}{damaged}: re-export and redo the edit")
+    raise InterchangeError(f"{head}{name} is missing (searched {' and '.join(_shown(ws, f) for f in folders)}): re-export and redo the edit, or restore the snapshot")
 
 
 def _record_files(out: Path, stage: str, fmt: Optional[str] = None) -> List[str]:
@@ -374,7 +396,10 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
                 bad.lost = fidelity.known(fmt)["lost"]
                 results.append(bad)
                 continue
-            res = fidelity.check(by_stage[s], back, fmt, src.rate, snapped[s], drop_frame=bool(src.start_tc_drop and is_drop_rate(src.rate)), placement=where)
+            # OTIO and FCPXML carry the music clip, placed on the video frame grid; an EDL carries no music
+            moved = fidelity.music_start_note(music, src.rate) if music is not None and fmt != "edl" else None
+            res = fidelity.check(by_stage[s], back, fmt, src.rate, snapped[s], drop_frame=bool(src.start_tc_drop and is_drop_rate(src.rate)), placement=where,
+                                 extra_approximated=[moved] if moved else [])
             res.stage = s
             results.append(res)
     for r in results:
@@ -426,30 +451,56 @@ class _Diff:
     crows: List[LaidClip]
     erows: List[LaidClip]
     by_range: int  # matches made by source range because no clip key told
+    notes: List[str] = field(default_factory=list)  # ambiguous clips read as new (see _match), the new clips' ids filled in
 
 
-def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: Sequence[LaidClip]) -> Tuple[Dict[int, int], int]:
+def _list(names: Sequence[str]) -> str:
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: Sequence[LaidClip]) -> Tuple[Dict[int, int], int, List[Tuple[str, List[int]]]]:
     """canonical clip index -> edited clip index, one to one: by clip key (the lineage id the exports carry) first, then by lineage
-    (same shot, overlapping source range, best overlap first) for what the key did not settle.  Also how many matches the range made."""
+    (same shot, overlapping source range, best overlap first) for what the key did not settle.
+
+    Also how many matches the range made and the notes (text with a ``{new}`` placeholder for the ids the new clips get, and the edited clips
+    they are about).  An ambiguous clip is read as new on purpose, never guessed: a key that several edited clips carry (a copied clip) does
+    not say which one is the original, so none is taken for it; an edited clip with no key to decide that overlaps two canonical clips
+    equally (the same number of frames) is not taken for either.
+    """
     out: Dict[int, int] = {}
     used: set = set()
+    blocked: set = set()
+    notes: List[Tuple[str, List[int]]] = []
     keyed: Dict[str, List[int]] = {}
     for j, e in enumerate(edited.clips):
         if e.origin:
             keyed.setdefault(e.origin, []).append(j)
     for i, c in enumerate(canon.clips):
-        free = [j for j in keyed.get(clip_key(c), []) if j not in used]
-        if free:
-            j = max(free, key=lambda j: (_overlap(crows[i], erows[j]), -abs(i - j)))  # a copied clip keeps its key: the one nearest the original wins
-            out[i] = j
-            used.add(j)
-    pairs = []
-    for i, c in enumerate(canon.clips):
-        if i in out:
+        carriers = keyed.get(clip_key(c), [])
+        if len(carriers) == 1 and carriers[0] not in used:
+            out[i] = carriers[0]
+            used.add(carriers[0])
+        elif len(carriers) > 1:
+            blocked.update(carriers)
+            notes.append((f"clip key {clip_key(c)} of {c.id} is used by clips {_list([str(j + 1) for j in carriers])} of the file: "
+                          f"read as new clips ({{new}}), not matched to {c.id}", list(carriers)))
+    pending = [i for i in range(len(canon.clips)) if i not in out]
+    for j, e in enumerate(edited.clips):
+        if j in used or j in blocked:
             continue
+        overlaps = [(_overlap(crows[i], erows[j]), i) for i in pending if canon.clips[i].shot_index == e.shot_index]
+        best = max((ov for ov, _ in overlaps), default=0)
+        tied = [i for ov, i in overlaps if ov == best] if best > 0 else []
+        if len(tied) > 1:
+            blocked.add(j)
+            notes.append((f"clip {j + 1} of the file (shot {e.shot_index}, {e.source_in:.2f}-{e.source_out:.2f}s) overlaps "
+                          f"{_list([canon.clips[i].id for i in tied])} equally: read as a new clip ({{new}}), not matched to any of them", [j]))
+    pairs = []
+    for i in pending:
+        c = canon.clips[i]
         for j, e in enumerate(edited.clips):
             ov = _overlap(crows[i], erows[j])
-            if j not in used and c.shot_index == e.shot_index and ov > 0:
+            if j not in used and j not in blocked and c.shot_index == e.shot_index and ov > 0:
                 pairs.append((-ov, abs(i - j), i, j))
     by_range = 0
     for _, _, i, j in sorted(pairs):
@@ -457,7 +508,7 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
             out[i] = j
             used.add(j)
             by_range += 1
-    return out, by_range
+    return out, by_range, notes
 
 
 def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List[str]:
@@ -478,8 +529,9 @@ def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List
 
 def _compare(canonical: Timeline, edited: Timeline, rate: Fraction) -> _Diff:
     crows, erows = layout(canonical, rate), layout(edited, rate)
-    match, by_range = _match(canonical, edited, crows, erows)
+    match, by_range, found = _match(canonical, edited, crows, erows)
     ids = _fresh_ids(canonical, edited, match)
+    notes = [text.replace("{new}", ", ".join(ids[j] for j in js)) for text, js in found]
     inv = {j: i for i, j in match.items()}
     out: List[Decision] = []
 
@@ -512,7 +564,7 @@ def _compare(canonical: Timeline, edited: Timeline, rate: Fraction) -> _Diff:
                 label = lambda t: "cut" if not t[1] else f"{t[0]} {t[1]}f"  # noqa: E731
                 decide("transition", [ids[j - 1], cid], f"human changed transition {label(before)} -> {label(after)}",
                        before={"kind": before[0], "frames": before[1]}, after={"kind": after[0], "frames": after[1]})
-    return _Diff(match, ids, out, crows, erows, by_range)
+    return _Diff(match, ids, out, crows, erows, by_range, notes)
 
 
 def diff_human_edits(canonical: Timeline, edited: Timeline, rate: Fraction) -> List[Decision]:
@@ -528,10 +580,13 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
     diff = _compare(snapped, edited, rate)
     inv = {j: i for i, j in diff.match.items()}
     clips: List[Clip] = []
+    taken = {clip_key(c) for c in canonical.clips}
     for j, e in enumerate(edited.clips):
         if j not in inv:
             c = Clip.from_dict(e.to_dict())
             c.id = diff.ids[j]
+            if c.origin and c.origin in taken:  # a copy carries the original's key: it is a new instance, not the canonical clip
+                c.origin = f"human:{c.id}"
             clips.append(c)
             continue
         i = inv[j]
@@ -661,20 +716,14 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     base_snapshot: Optional[Path] = None
     if fingerprint and claimed == chosen:  # (a stage chosen against the file's word has no fingerprint to check)
         if fingerprint != stage_hash:  # the pipeline ran again since the export: diff against the stage as it was exported
-            base_snapshot = _find_snapshot(ws, path, chosen, fingerprint)
-            if base_snapshot is None:
-                raise InterchangeError(f"{path.name} was exported from an earlier {chosen} (sha {fingerprint[:12]}) and its snapshot "
-                                       f"exports/{SNAPSHOT_DIR}/{_snapshot_name(chosen, fingerprint)} is missing: re-export and redo the edit, or restore the snapshot")
-            try:
-                canon = Timeline.load(base_snapshot)
-            except Exception as exc:
-                raise InterchangeError(f"cannot read the snapshot {base_snapshot}: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from exc
+            base_snapshot, canon = _load_snapshot(ws, path, chosen, fingerprint)
             notes.append(f"{path.name} was exported from an earlier {chosen}: the editor's changes were diffed against that version; "
                          f"junction histories compare the human stage with the current {chosen}")
     elif not fingerprint:
         notes.append(f"{path.name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions")
     snapped, _ = export_timeline(canon, bounds, src)
     human, diff = _build(canon, snapped, edited, src.rate, latest)
+    notes.extend(diff.notes)
     if diff.by_range:
         notes.append(f"{diff.by_range} clip{'s' if diff.by_range != 1 else ''} matched by source range because the clip key was missing or unknown")
     if chosen != latest_name:

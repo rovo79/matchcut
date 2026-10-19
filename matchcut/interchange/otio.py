@@ -319,6 +319,10 @@ def _import_otio(doc: dict, bounds: Optional[Dict[int, Sequence[float]]], src: O
                 notes.append(f"clip {name}: no usable source range, ignored")
                 items.append(_SKIP)
                 continue
+            if dur < 1:  # like the FCPXML reader: a clip with no length is damage, never a clip whose source out is not after its in
+                notes.append(f"clip {name}: source range duration is {dur} frames (not positive), ignored")
+                items.append(_SKIP)
+                continue
             if origin:
                 offsets[origin] = offsets.get(origin, 0) + 1
             for eff in ch.get("effects") or []:

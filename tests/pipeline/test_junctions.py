@@ -558,3 +558,56 @@ def test_a_reorder_made_junction_gets_the_match_cut_and_rejected_verdicts_about_
     assert first.why() == "matchcut: graphic match cut: accepted on feature score alone"
     assert second.decisions == [rejected]
     assert second.why() == "matchcut: no match: scores below the threshold"
+
+
+# -- the human stage: inherited decisions belong to the same pair of clip instances only ------------------------------------
+def stamped(stage, clips, history=()):
+    """A stage whose clips carry the origin the pipeline stamps (the instance they descend from)."""
+    for c in clips:
+        c.origin = c.origin or f"{c.shot_index}@{c.source_in:.3f}-{c.source_out:.3f}"
+    return tl(stage, clips, history)
+
+
+def verdicts(n=5):
+    return [Decision("matchcut", "match_cut", [f"c{k:03d}", f"c{k + 1:03d}"], f"verdict about c{k:03d}->c{k + 1:03d}", 0.6, {"match_type": "graphic"}) for k in range(1, n)]
+
+
+def canonical_final(n=5):
+    return stamped("final", [clip(f"c{k:03d}", k, 4.0 * k, 4.0 * k + 2.0) for k in range(1, n + 1)], verdicts(n))
+
+
+def human_from(final, clips, decisions):
+    return tl("human", clips, list(final.history) + list(decisions))
+
+
+def test_a_replaced_clip_in_the_human_stage_does_not_borrow_the_passes_verdict_of_the_clip_it_overlaps():
+    final = canonical_final()
+    kept = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips]
+    # the editor put another piece of shot 3 (overlapping c003's range, a different clip instance) between c002 and c003
+    extra = clip("h001", 3, 12.5, 14.0, origin="human:h001")
+    clips = kept[:2] + [extra] + kept[2:]
+    human = human_from(final, clips, [Decision("human", "added", ["h001"], "human added h001 (shot 3, 12.50-14.00s)")])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions([("final", final), ("human", human)])}
+    for pair in (("c002", "h001"), ("h001", "c003")):
+        j = js[pair]
+        assert [s.stage for s in j.states] == ["human"], pair
+        assert not any(d.pass_name == "matchcut" for d in j.decisions), (pair, j.decisions)
+        assert "verdict" not in j.why(), (pair, j.why())
+    # the junctions the editor did not touch keep their inherited verdict and history
+    for pair in (("c003", "c004"), ("c004", "c005"), ("c001", "c002")):
+        j = js[pair]
+        assert [s.stage for s in j.states] == ["final", "human"] and j.why() == f"matchcut: verdict about {pair[0]}->{pair[1]}", pair
+
+
+def test_a_reorder_that_creates_a_pairing_shows_no_verdict_about_the_old_pairings():
+    final = canonical_final()
+    by_id = {c.id: clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips}
+    order = ["c001", "c004", "c003", "c002", "c005"]  # c002 and c004 swapped
+    human = human_from(final, [by_id[i] for i in order], [Decision("human", "reorder", order, "human reordered clips: " + " ".join(order))])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions([("final", final), ("human", human)])}
+    assert set(js) == {("c001", "c004"), ("c004", "c003"), ("c003", "c002"), ("c002", "c005")}
+    for pair, j in js.items():
+        assert not any(d.pass_name == "matchcut" for d in j.decisions) and "verdict" not in j.why(), (pair, j.why())
+    # the untouched pair keeps its verdict
+    kept = build_junctions([("final", final), ("human", human_from(final, [by_id[i] for i in ["c001", "c002", "c003", "c005", "c004"]], []))])
+    assert next(j for j in kept if (j.out_clip, j.in_clip) == ("c002", "c003")).why() == "matchcut: verdict about c002->c003"

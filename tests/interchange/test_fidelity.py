@@ -334,3 +334,29 @@ def test_the_placement_check_passes_every_legitimate_stage_at_every_rate():
         assert not [n for n in notes if _PLACEMENT_NOTE.match(n)], (trial, rate, notes)
         done += 1
     assert done >= 40
+
+
+# -- the music start on the video frame grid --------------------------------------------------------------------------
+def test_a_music_start_moved_to_the_frame_grid_is_an_approximation_with_the_size_of_the_move():
+    """The tester's D4: 2.0 s at 23.976 fps is written as 2.002 s (frame 48) and the report said nothing."""
+    from types import SimpleNamespace
+
+    from matchcut.interchange.fidelity import music_start_note
+
+    note = music_start_note(SimpleNamespace(start=2.0), Fraction(24000, 1001))
+    assert note == "music start moved to the video frame grid: 2 s written as 2.002 s (frame 48 at 23.976 fps), +2.0 ms (0.05 frame)"
+    assert "\n" not in note
+    assert music_start_note(SimpleNamespace(start=2.01), Fraction(25)) == \
+        "music start moved to the video frame grid: 2.01 s written as 2 s (frame 50 at 25 fps), -10.0 ms (0.25 frame)"
+    assert music_start_note(SimpleNamespace(start=2.0), Fraction(25)) is None  # on the grid: nothing moved
+    assert music_start_note(SimpleNamespace(start=-3.0), Fraction(25)) is None  # a negative start plays from 0, as the exports write it
+    assert music_start_note(SimpleNamespace(start=0.0), Fraction(24000, 1001)) is None
+
+
+def test_check_lists_extra_approximations_after_the_known_ones():
+    tl = synthetic()
+    snapped, _ = export_timeline(tl, None, fake_src())
+    back, _ = import_otio(export_otio(snapped, "final", fake_src(), []))
+    res = check(tl, back, "otio", RATE24, snapped, extra_approximated=["music start moved to the video frame grid: x"])
+    assert res.approximated[-1] == "music start moved to the video frame grid: x"
+    assert set(KNOWN["otio"]["approximated"]) <= set(res.approximated)

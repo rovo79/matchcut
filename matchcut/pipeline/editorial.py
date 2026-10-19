@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from .timeline import Clip, Decision, Timeline, clip_origin
+from .timeline import HUMAN_STAGE, Clip, Decision, Timeline, clip_origin
 
 log = logging.getLogger(__name__)
 
@@ -241,8 +241,55 @@ def apply_pins(tl: Timeline, pins: Sequence[Pin], bounds: Dict[int, Tuple[float,
     return out, decisions
 
 
-def pin_outcome(tl: Timeline, pin: Pin) -> Optional[Decision]:
-    """What the latest run did with ``pin``: the editor's latest decision in ``tl`` for the same two shots at the same points."""
+def _frames(seconds: float, fps: float) -> int:
+    return max(1, int(round(abs(seconds) * fps))) if fps > 0 else 1
+
+
+def _plural(n: int, word: str = "frame") -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def pin_change(tl: Timeline, pin: Pin, out_time: Optional[float] = None, in_time: Optional[float] = None) -> str:
+    """Why ``tl`` (an editor's cut) no longer holds ``pin``, in one line; "" when it still does.
+
+    The cut holds a pin when it has the pin's two clips, the same instances (``clip_origin`` equal to the pin's ``out_origin`` / ``in_origin``;
+    a pin without them is held by clips of the same two shots), next to each other in that order, with both cut points where the pin was
+    applied (``out_time`` / ``in_time``, default the pin's own) to within half a frame.
+    """
+    out_t = pin.out_time if out_time is None else out_time
+    in_t = pin.in_time if in_time is None else in_time
+    clips = tl.clips
+    if pin.out_origin and pin.in_origin:
+        outs = [i for i, c in enumerate(clips) if clip_origin(c) == pin.out_origin]
+        ins = [i for i, c in enumerate(clips) if clip_origin(c) == pin.in_origin]
+        for sides, shot in ((outs, pin.out_shot), (ins, pin.in_shot)):
+            if not sides:
+                return f"other footage (shot {shot} is a different clip now)" if any(c.shot_index == shot for c in clips) else f"clip removed (shot {shot})"
+    else:
+        outs = [i for i, c in enumerate(clips) if c.shot_index == pin.out_shot]
+        ins = [i for i, c in enumerate(clips) if c.shot_index == pin.in_shot]
+        for sides, shot in ((outs, pin.out_shot), (ins, pin.in_shot)):
+            if not sides:
+                return f"clip removed (shot {shot})"
+    pairs = [(i, i + 1) for i in outs if i + 1 in ins]
+    if not pairs:
+        return "clips are no longer adjacent"
+    # the pair nearest the pinned points (two jump-cut pieces of one shot can both fit a pin without clip instances)
+    a, b = min(pairs, key=lambda p: abs(clips[p[0]].source_out - out_t) + abs(clips[p[1]].source_in - in_t))
+    half = 0.5 / tl.fps + 1e-6 if tl.fps > 0 else 0.02
+    d_out, d_in = clips[a].source_out - out_t, clips[b].source_in - in_t
+    parts = [f"{_plural(_frames(d, tl.fps))} ({side})" for d, side in ((d_out, "out"), (d_in, "in")) if abs(d) > half]
+    return "cut trimmed by " + " and ".join(parts) if parts else ""
+
+
+def pin_outcome(tl: Timeline, pin: Pin, stage: str = "") -> Optional[Decision]:
+    """What the latest run did with ``pin``: the editor's latest decision in ``tl`` for the same two shots at the same points.
+
+    On the human stage (``stage``, else ``tl.stage``) the history alone is not the answer: it repeats the canonical stage's editor decision
+    whatever the editor then did.  An applied pin is returned only while the editor's cut still holds it (``pin_change``); otherwise a
+    ``human`` / ``pin_changed`` decision whose detail is the one-line reason.
+    """
+    found: Optional[Decision] = None
     for d in reversed(tl.history):
         if d.pass_name != "editor" or d.data.get("out_shot") != pin.out_shot or d.data.get("in_shot") != pin.in_shot:
             continue
@@ -251,8 +298,15 @@ def pin_outcome(tl: Timeline, pin: Pin) -> Optional[Decision]:
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
         if same:
-            return d
-    return None
+            found = d
+            break
+    if found is None or found.action != "pinned" or (stage or tl.stage) != HUMAN_STAGE:
+        return found
+    try:
+        reason = pin_change(tl, pin, float(found.data.get("out", pin.out_time)), float(found.data.get("in_", pin.in_time)))
+    except (TypeError, ValueError, OverflowError):
+        reason = ""
+    return Decision("human", "pin_changed", list(found.clip_ids), reason, None, dict(found.data)) if reason else found
 
 
 def pin_constraints(pins: Sequence[Pin]) -> List[str]:

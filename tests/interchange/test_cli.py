@@ -152,6 +152,23 @@ def test_junctions_says_when_the_human_stage_is_stale_and_leaves_it_out(wsx, cap
     assert code == 0 and any(l.startswith(f"  - {msg}; this import replaces it") for l in out.splitlines())
 
 
+def test_import_with_a_damaged_or_missing_snapshot_is_one_line_on_stderr_with_exit_1(wsx, capsys):
+    from .test_workspace import snapshot_case
+
+    edited, old_hash, snap = snapshot_case(wsx)
+    name = f"final-{old_hash[:12]}.json"
+    good = snap.read_bytes()
+    snap.write_bytes(b"{}")
+    code, out, err = run(["import", wsx.ws, edited], capsys)
+    assert (code, out) == (1, "") and err == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot "
+                                              f"exports/.stages/{name} is damaged (sha256 mismatch): re-export and redo the edit\n")
+    snap.unlink()
+    code, out, err = run(["import", wsx.ws, edited], capsys)
+    assert (code, out) == (1, "") and err.count("\n") == 1 and f"snapshot {name} is missing (searched exports/.stages and " in err
+    snap.write_bytes(good)
+    assert run(["import", wsx.ws, edited], capsys)[0] == 0
+
+
 def test_import_against_an_earlier_stage_prints_the_warning(wsx, capsys):
     w = wsx.world
     snapped, _ = export_timeline(w.by_stage["roughcut"], w.bounds, w.src)

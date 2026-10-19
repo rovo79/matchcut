@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from fractions import Fraction
 from pathlib import Path
@@ -19,9 +20,9 @@ from matchcut.interchange.otio import export_otio, import_otio
 from matchcut.interchange.workspace import ExportResult, ImportResult, diff_human_edits, export_workspace, human_stage, import_timeline
 from matchcut.pipeline.config import MusicConfig
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
-from matchcut.pipeline.junctions import build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
+from matchcut.pipeline.junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.pipeline import Pipeline
-from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition
+from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
 from matchcut.tui.widgets.inspector import render_inspector
 
 from .conftest import exported
@@ -170,6 +171,20 @@ def test_music_is_probed_exported_and_music_only_is_noted(wsx, music_file):
         export_workspace(wsx.ws, cfg, stages=("final",))
 
 
+@pytest.mark.parametrize("start,moved", [(2.01, True), (2.0, False)])
+def test_the_fidelity_report_lists_a_music_start_moved_to_the_frame_grid(wsx, music_file, start, moved):
+    """OTIO and FCPXML place the music clip on the video frame grid (25 fps here); the EDL carries no music."""
+    cfg = copy.deepcopy(wsx.cfg)
+    cfg.music = MusicConfig(path=str(music_file), start=start)
+    export_workspace(wsx.ws, cfg, stages=("final",))
+    by_fmt = json.loads((wsx.ws / "exports" / "fidelity.json").read_text())["stages"]["final"]
+    note = "music start moved to the video frame grid: 2.01 s written as 2 s (frame 50 at 25 fps), -10.0 ms (0.25 frame)"
+    for fmt in ("otio", "fcpxml"):
+        assert (note in by_fmt[fmt]["approximated"]) is moved, (fmt, by_fmt[fmt]["approximated"])
+    assert not any("music start" in a for a in by_fmt["edl"]["approximated"])
+    assert (note in (wsx.ws / "exports" / "fidelity.md").read_text()) is moved
+
+
 def test_export_notes_the_frame_snap_per_stage(wsx):
     res = export_workspace(wsx.ws, wsx.cfg, stages=("roughcut",), formats=("otio",))
     snapped, snap_notes = exported(wsx.world, "roughcut")
@@ -316,6 +331,105 @@ def test_clips_without_a_clip_key_are_matched_by_source_range(wsx):
     assert summary(res.decisions) == expected_edit(snapped, wsx.world.src.rate)
     assert any("matched by source range" in n for n in res.notes), res.notes
     assert [c.id for c in Timeline.load(res.stage_path).clips] == [c.id for c in final.clips]
+
+
+@pytest.mark.parametrize("duration", [0, -20])
+def test_an_otio_clip_with_no_duration_never_reaches_human_json(wsx, duration):
+    """The tester's D1: a clip with zero or negative duration was written to human.json as source_out <= source_in, without a note."""
+    export_workspace(wsx.ws, wsx.cfg, stages=("final",), formats=("otio",))
+    doc = json.loads((wsx.ws / "exports" / "final.otio").read_text())
+    clip = next(k for k in doc["tracks"]["children"][0]["children"] if k["OTIO_SCHEMA"].startswith("Clip"))
+    clip["source_range"]["duration"]["value"] = duration
+    path = wsx.tmp / "nodur.otio"
+    path.write_text(json.dumps(doc))
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    human = Timeline.load(res.stage_path)
+    assert all(c.source_out > c.source_in for c in human.clips)
+    assert any(n.startswith(f"clip {clip['name']}: ") and "ignored" in n for n in res.notes), res.notes
+    assert [d.action for d in res.decisions] == ["removed"]  # the damaged clip is not read, so the stage lacks it (as for a damaged FCPXML clip)
+
+
+def key_of(c) -> str:
+    return clip_origin(c)
+
+
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_clip_key_used_twice_reads_both_clips_as_new_with_a_note_naming_the_candidates(wsx, fmt):
+    """A copied clip keeps its key: which one is the original cannot be told, so neither is taken for it (never a guess)."""
+    final, snapped = final_of(wsx)
+    ed = snapped.copy()
+    dup = Clip.from_dict(ed.clips[2].to_dict())
+    dup.id, dup.origin = "copy", key_of(ed.clips[2])
+    ed.clips[2].origin = key_of(ed.clips[2])
+    ed.clips.insert(3, dup)
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    before = canonical_bytes(wsx.ws)
+    res = import_timeline(wsx.ws, wsx.cfg, files[fmt])
+    assert [(d.action, d.clip_ids) for d in res.decisions] == [("removed", ["c003"]), ("added", ["h001"]), ("added", ["h002"])]
+    note = (f"clip key {key_of(ed.clips[2])} of c003 is used by clips 3 and 4 of the file: read as new clips (h001, h002), not matched to c003")
+    assert note in res.notes, res.notes
+    assert all("\n" not in n for n in res.notes) and not any("matched by source range" in n for n in res.notes)
+    human = Timeline.load(res.stage_path)
+    assert [c.id for c in human.clips] == ["c001", "c002", "h001", "h002", "c004", "c005"]
+    # the two new clips are not instances the canonical stages have, so the pass verdicts about c002->c003 and c003->c004 are not theirs
+    assert all(c.origin.startswith("human:") for c in human.clips[2:4])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(load_stage_timelines(wsx.ws))}
+    for pair in (("c002", "h001"), ("h001", "h002"), ("h002", "c004")):
+        assert [s.stage for s in js[pair].states] == ["human"] and not any(d.pass_name not in ("human",) for d in js[pair].decisions), pair
+    assert canonical_bytes(wsx.ws) == before
+
+
+def two_pieces_of_one_shot(wsx) -> Timeline:
+    """final.json rewritten so that c002 and c003 are adjacent pieces of shot 4 (frames 225-245 and 245-265 at 25 fps), cuts only."""
+    w = wsx.world
+    tl = w.by_stage["final"].copy()
+    p1, p2 = Clip("c002", 4, 9.0, 9.8, tl.clips[1].beat_id), Clip("c003", 4, 9.8, 10.6, tl.clips[1].beat_id)
+    tl.clips = [tl.clips[0], p1, p2] + tl.clips[3:]
+    for c in tl.clips:
+        c.transition_in = Transition()
+        c.locked_in = c.locked_out = False
+    tl.save(wsx.ws / "final.json")
+    return tl
+
+
+def one_clip_over_both(wsx, tl: Timeline, start: float, end: float, fmt: str) -> Path:
+    w = wsx.world
+    snapped, _ = export_timeline(tl, w.bounds, w.src)
+    ed = snapped.copy()
+    one = Clip("x1", 4, start, end, tl.clips[1].beat_id)
+    one.origin = "someone-elses-key"  # unknown to this workspace: the source range decides
+    ed.clips[1:3] = [one]
+    fp = sha(wsx.ws / "final.json")
+    if fmt == "otio":
+        path = wsx.tmp / "over_both.otio"
+        path.write_text(json.dumps(export_otio(ed, "final", w.src, [], stage_sha256=fp)))
+    else:
+        path = wsx.tmp / "over_both.edl"
+        path.write_text(export_edl(ed, "final", w.src, "demo - final", stage_sha256=fp))
+    return path
+
+
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_clip_over_two_canonical_clips_equally_is_a_new_clip_with_a_note_naming_both(wsx, fmt):
+    tl = two_pieces_of_one_shot(wsx)
+    path = one_clip_over_both(wsx, tl, 9.4, 10.2, fmt)  # 10 frames of c002 and 10 frames of c003
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert [(d.action, d.clip_ids) for d in res.decisions] == [("removed", ["c002"]), ("removed", ["c003"]), ("added", ["h001"])]
+    note = "clip 2 of the file (shot 4, 9.40-10.20s) overlaps c002 and c003 equally: read as a new clip (h001), not matched to any of them"
+    assert note in res.notes, res.notes
+    assert not any("matched by source range" in n for n in res.notes)
+    human = Timeline.load(res.stage_path)
+    assert [c.id for c in human.clips][:3] == ["c001", "h001", "c004"] and (human.clips[1].source_in, human.clips[1].source_out) == (9.4, 10.2)
+
+
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_clip_over_two_canonical_clips_unequally_still_goes_to_the_one_it_overlaps_most(wsx, fmt):
+    tl = two_pieces_of_one_shot(wsx)
+    path = one_clip_over_both(wsx, tl, 9.3, 10.1, fmt)  # 12.5 frames of c002, 7.5 of c003: the evidence decides
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert [(d.action, d.clip_ids) for d in res.decisions if d.action != "trim"] == [("removed", ["c003"])]
+    assert "1 clip matched by source range because the clip key was missing or unknown" in res.notes
+    assert not any("equally" in n for n in res.notes)
 
 
 def test_unchanged_file_gives_no_decisions_and_an_identical_stage(wsx):
@@ -510,6 +624,99 @@ def test_a_pinned_junction_keeps_its_badge_and_outcome_after_an_import_that_does
     assert [d.to_dict() for d in jh.decisions] == [d.to_dict() for d in jf.decisions]
 
 
+def origin_pinned_workspace(wsx, with_origins: bool):
+    """Like ``pinned_workspace``, the pin optionally naming the two rough-cut clip instances it holds."""
+    stages = load_stage_timelines(wsx.ws)
+    rough = dict(stages)["roughcut"]
+    j0 = next(j for j in build_junctions(stages) if j.baseline.stage == "roughcut" and j.beat_boundary)
+    a, b = next((x, y) for x, y in zip(rough.clips, rough.clips[1:]) if (x.shot_index, y.shot_index) == (j0.out_shot, j0.in_shot))
+    pin = Pin(j0.out_shot, j0.in_shot, round(j0.current.out_time, 3), round(j0.current.in_time, 3),
+              out_origin=clip_origin(a) if with_origins else "", in_origin=clip_origin(b) if with_origins else "")
+    PinStore(wsx.ws).put(pin)
+    Pipeline(copy.deepcopy(wsx.cfg)).refine()
+    return pin
+
+
+def edit_around_the_pin(wsx, pin: Pin, how: str):
+    """Import an editor's file that does ``how`` to the pinned junction of the final cut; returns (human timeline, the junction of the pinned pair
+    in the final stage)."""
+    stages = load_stage_timelines(wsx.ws)
+    final = dict(stages)["final"]
+    jf = next(j for j in build_junctions(stages) if (j.out_shot, j.in_shot) == (pin.out_shot, pin.in_shot))
+    w = wsx.world
+    snapped, _ = export_timeline(final, w.bounds, w.src)
+    ed = snapped.copy()
+    out_i = next(i for i, c in enumerate(ed.clips) if c.id == jf.out_clip)
+    fps = float(w.src.rate)
+    if how == "delete":
+        del ed.clips[out_i + 1]
+    elif how == "trim":
+        ed.clips[out_i].source_out = round(ed.clips[out_i].source_out - 3 / fps, 4)
+    elif how == "separate":
+        lo, hi = w.bounds[ed.clips[0].shot_index]
+        extra = Clip("zz", ed.clips[0].shot_index, lo, lo + 1.0)
+        extra.origin = "mystery"
+        ed.clips.insert(out_i + 1, extra)
+    elif how != "untouched":
+        raise AssertionError(how)
+    path = wsx.tmp / f"pin_{how}.otio"
+    path.write_text(json.dumps(export_otio(ed, "final", w.src, build_junctions(stages))))
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert res.stage == "final"
+    return Timeline.load(res.stage_path), jf, snapped
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+@pytest.mark.parametrize("how,reason", [
+    ("delete", "clip removed (shot {in_shot})"),
+    ("trim", "cut trimmed by 3 frames (out)"),
+    ("separate", "clips are no longer adjacent"),
+    ("untouched", ""),
+])
+def test_a_pin_the_editor_changed_does_not_read_applied_on_the_human_stage(wsx, how, reason, with_origins):
+    """The pin's editor decision is inherited into human.json's history whatever the editor did; the Edit view badge, the junctions
+    CLI and pin_outcome must judge the editor's cut instead."""
+    pin = origin_pinned_workspace(wsx, with_origins)
+    human, jf, snapped = edit_around_the_pin(wsx, pin, how)
+    assert any(d.pass_name == "editor" and d.action == "pinned" for d in human.history)  # inherited
+    outcome = pin_outcome(human, pin)
+    after = load_stage_timelines(wsx.ws)
+    assert after[-1][0] == "human"
+    jh = build_junctions(after)
+    badge = lambda j: render_inspector(j, "human", pin, pin_decision=pin_outcome(human, pin, stage="human")).plain  # noqa: E731
+    if how == "untouched":
+        assert outcome.action == "pinned"
+        j = next(j for j in jh if (j.out_shot, j.in_shot) == (pin.out_shot, pin.in_shot))
+        assert j.pinned and not j.pin_lost and "pinned (locked)" in badge(j) and "pin changed" not in badge(j)
+        return
+    want = reason.format(in_shot=pin.in_shot)
+    assert (outcome.action, outcome.detail) == ("pin_changed", want), outcome
+    # the junction code agrees, and the CLI listing / detail say so
+    held = [j for j in jh if (j.out_shot, j.in_shot) == (pin.out_shot, pin.in_shot) and j.decisions and any(d.action == "pinned" for d in j.decisions)]
+    for j in held:
+        assert not j.pinned and j.pin_lost == want
+        text = badge(j).splitlines()[1]  # the badge line (the why and the history below it keep telling what the editor once did)
+        assert f"pin changed by the editor: {want}" in text and "pinned (" not in text and "locked by the editor" not in text and "pending" not in text
+        assert "pin-changed" in junction_line(j) and "pinned" not in junction_line(j).replace("pin-changed", "")
+        assert f"pin: changed by the editor: {want}" in junction_detail(j)
+    if how == "trim":
+        assert held, "the trimmed junction is still in the cut and must say the pin changed"
+
+
+def test_junctions_cli_says_a_pin_changed_by_the_editor_is_not_pinned(wsx, capsys):
+    from matchcut.pipeline import cli
+
+    pin = origin_pinned_workspace(wsx, True)
+    edit_around_the_pin(wsx, pin, "trim")
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    listing = capsys.readouterr().out
+    line = next(l for l in listing.splitlines() if "pin-changed" in l)
+    assert "pinned" not in line.replace("pin-changed", "") and "(" not in line
+    jh = next(j for j in build_junctions(load_stage_timelines(wsx.ws)) if j.pin_lost)
+    assert cli.main(["junctions", str(wsx.ws), "--index", str(jh.index + 1)]) == 0
+    assert "pin: changed by the editor: cut trimmed by 3 frames (out)" in capsys.readouterr().out
+
+
 def test_human_history_continues_the_latest_canonical_stage_even_when_a_roughcut_was_edited(wsx):
     """The junction code reads a stage's new decisions as ``history[len(previous history):]``: a human stage built on the rough cut still
     continues the final stage's history, so its decisions are not sliced away."""
@@ -671,6 +878,56 @@ def test_a_junction_made_adjacent_by_a_human_deletion_says_what_was_removed():
     j = next(j for j in build_junctions([("final", tl), ("human", human)]) if (j.out_clip, j.in_clip) == ("c001", "c003"))
     assert j.why().startswith("made adjacent by human: removed c002 (shot 1")
     assert j.adjacent_detail.startswith("removed c002")
+
+
+def plain_cut(n: int = 7) -> Timeline:
+    """``n`` clips of 2 s on the 25 fps grid, one shot each, cuts only, with a pass decision about every junction."""
+    tl = Timeline(source="/x/media.mp4", fps=25.0, stage="final")
+    tl.clips = [Clip(f"c{k + 1:03d}", k, 4.0 * k, 4.0 * k + 2.0) for k in range(n)]
+    tl.history = [Decision("matchcut", "match_cut", [tl.clips[k].id, tl.clips[k + 1].id], f"pass verdict about c{k + 1:03d}->c{k + 2:03d}", 0.5, {"match_type": "graphic"})
+                  for k in range(n - 1)]
+    return tl
+
+
+def edited_plain(tl: Timeline, remove=(), trims=None) -> Timeline:
+    """What an editor's re-export reads as: the clips in ``remove`` deleted, ``trims`` ({id: (in frames, out frames)}) applied."""
+    ed = tl.copy()
+    ed.clips = [c for c in ed.clips if c.id not in remove]
+    for c in ed.clips:
+        d_in, d_out = (trims or {}).get(c.id, (0, 0))
+        c.source_in, c.source_out = round(c.source_in + d_in / 25.0, 4), round(c.source_out + d_out / 25.0, 4)
+    return ed
+
+
+@pytest.mark.parametrize("trims,names", [
+    ({"c005": (3, 0)}, ["c005"]),  # the incoming clip is trimmed (after the removed clip)
+    ({"c003": (0, -3)}, ["c003"]),  # the outgoing clip is trimmed (before the removed clip)
+    ({"c003": (0, -3), "c005": (3, 0)}, ["c003", "c005"]),
+])
+def test_a_junction_made_adjacent_by_a_removal_lists_the_human_trim_of_its_clips(trims, names):
+    """The tester's D2: the trim was in human.json's history but not under the junction the removal made."""
+    rate = Fraction(25)
+    tl = plain_cut()
+    human = human_stage(tl, edited_plain(tl, remove={"c004"}, trims=trims), rate)
+    junctions = build_junctions([("final", tl), ("human", human)])
+    j = next(j for j in junctions if (j.out_clip, j.in_clip) == ("c003", "c005"))
+    listed = [(d.action, d.clip_ids) for d in j.decisions if d.pass_name == "human"]
+    assert listed == [("trim", [n]) for n in names], j.decisions
+    assert all(j.clip_level[k] for k, d in enumerate(j.decisions) if d.action == "trim")
+    assert j.why().startswith("made adjacent by human: removed c004"), j.why()  # a clip-level trim does not replace the story of the removal
+    assert "human trimmed" in junction_detail(j)
+    # the trim of a clip that is not part of the junction is not listed there, and the pass verdicts about other pairs are not borrowed
+    other = human_stage(tl, edited_plain(tl, remove={"c004"}, trims={"c006": (3, 0)}), rate)
+    j2 = next(j for j in build_junctions([("final", tl), ("human", other)]) if (j.out_clip, j.in_clip) == ("c003", "c005"))
+    assert [d.action for d in j2.decisions] == []
+
+
+def test_a_trim_next_to_a_kept_clip_is_still_listed_where_the_clip_is_kept():
+    rate = Fraction(25)
+    tl = plain_cut()
+    human = human_stage(tl, edited_plain(tl, remove={"c004"}, trims={"c005": (3, 0)}), rate)
+    kept = next(j for j in build_junctions([("final", tl), ("human", human)]) if (j.out_clip, j.in_clip) == ("c005", "c006"))
+    assert [(d.pass_name, d.action) for d in kept.decisions] == [("matchcut", "match_cut"), ("human", "trim")]
 
 
 def test_importing_against_an_earlier_stage_warns_in_one_line(wsx):
@@ -1018,25 +1275,71 @@ def test_the_reviewers_case_three_editor_changes_then_a_rerun_with_a_longer_targ
     assert not any(d.action == "trim" and d.clip_ids != ["c002"] for d in again.decisions)
 
 
-def test_a_fingerprint_without_its_snapshot_is_a_one_line_error_naming_the_fix(wsx):
+def snapshot_case(wsx):
+    """An export, the editor's file made from it, the pipeline run again: (the file, the old stage hash, the snapshot's path)."""
     final, snapped = final_of(wsx)
     export_workspace(wsx.ws, wsx.cfg)
     old_hash = sha(wsx.ws / "final.json")
     files = write_edited_files(wsx, editor_timeline(snapped, wsx.world.src.rate), wsx.tmp)
     rerun_with_another_target(wsx)
-    snap = wsx.ws / "exports" / ".stages" / f"final-{old_hash[:12]}.json"
-    snap.unlink()
+    return files["otio"], old_hash, wsx.ws / "exports" / ".stages" / f"final-{old_hash[:12]}.json"
+
+
+def refused(wsx, path) -> str:
     before = {p.name: p.read_bytes() for p in wsx.ws.glob("human*.json")}
     with pytest.raises(InterchangeError) as exc:
-        import_timeline(wsx.ws, wsx.cfg, files["otio"])
-    assert str(exc.value) == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot "
-                              f"exports/.stages/final-{old_hash[:12]}.json is missing: re-export and redo the edit, or restore the snapshot")
+        import_timeline(wsx.ws, wsx.cfg, path)
+    assert "\n" not in str(exc.value)
     assert {p.name: p.read_bytes() for p in wsx.ws.glob("human*.json")} == before  # nothing was written
+    return str(exc.value)
+
+
+def test_a_fingerprint_without_its_snapshot_is_a_one_line_error_naming_the_fix_and_where_it_looked(wsx):
+    edited, old_hash, snap = snapshot_case(wsx)
+    snap.unlink()
+    name = f"final-{old_hash[:12]}.json"
+    # the editor's file sits outside the workspace: both places it looks are named
+    assert refused(wsx, edited) == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot {name} is missing "
+                                    f"(searched exports/.stages and {edited.parent / '.stages'}): re-export and redo the edit, or restore the snapshot")
+    # next to the workspace's own exports it is one place
+    inside = wsx.ws / "exports" / "edited.otio"
+    inside.write_bytes(edited.read_bytes())
+    assert refused(wsx, inside) == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot {name} is missing "
+                                    "(searched exports/.stages): re-export and redo the edit, or restore the snapshot")
+
+
+def test_a_damaged_snapshot_is_not_called_missing(wsx):
+    """The tester's D3: a snapshot that is there but does not hash to the fingerprint was reported as missing."""
+    edited, old_hash, snap = snapshot_case(wsx)
+    good = snap.read_bytes()
+    snap.write_bytes(json.dumps({"x": 1}).encode())  # a copy that is not the exported stage
+    msg = refused(wsx, edited)
+    assert msg == (f"edited.otio was exported from an earlier final (sha {old_hash[:12]}) and its snapshot exports/.stages/final-{old_hash[:12]}.json "
+                   "is damaged (sha256 mismatch): re-export and redo the edit"), msg
+    assert "missing" not in msg
+    snap.write_bytes(good[:-20])  # cut short: unreadable JSON and a different hash; the hash is what is named
+    assert "is damaged (sha256 mismatch): re-export and redo the edit" in refused(wsx, edited)
+    # a good copy next to the file wins over a damaged one in the workspace
+    (edited.parent / ".stages").mkdir()
+    (edited.parent / ".stages" / snap.name).write_bytes(good)
+    assert import_timeline(wsx.ws, wsx.cfg, edited).decisions
     # restored: it imports
-    snap.parent.mkdir(exist_ok=True)
-    snap.write_bytes(json.dumps({"x": 1}).encode())  # a copy that is not the exported stage is not used
-    with pytest.raises(InterchangeError, match="snapshot exports/.stages/final-"):
-        import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    snap.write_bytes(good)
+    shutil.rmtree(edited.parent / ".stages")
+    assert import_timeline(wsx.ws, wsx.cfg, edited).decisions
+
+
+def test_a_snapshot_with_unreadable_json_is_damaged_too(wsx):
+    edited, old_hash, snap = snapshot_case(wsx)
+    junk = b"{not json"
+    digest = hashlib.sha256(junk).hexdigest()
+    doc = json.loads(edited.read_text())
+    doc["metadata"]["matchcut"]["stage_sha256"] = digest  # the file claims an export whose stage file was these bytes
+    edited.write_text(json.dumps(doc))
+    (snap.parent / f"final-{digest[:12]}.json").write_bytes(junk)
+    msg = refused(wsx, edited)
+    assert msg == (f"edited.otio was exported from an earlier final (sha {digest[:12]}) and its snapshot exports/.stages/final-{digest[:12]}.json "
+                   "is damaged (unreadable JSON): re-export and redo the edit"), msg
 
 
 def test_the_snapshot_is_found_next_to_the_imported_file_for_an_export_with_out(wsx):

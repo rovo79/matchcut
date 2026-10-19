@@ -39,6 +39,9 @@ After `python -m matchcut.pipeline.cli import WORKSPACE FILE` (an editor's re-ex
 [INTEROP.md](INTEROP.md)) a `human` stage follows `final`, so `[`/`]` can inspect what the editor changed; if
 the pipeline has run again since, that stage no longer fits and is left out until you re-export, or import the editor's file again
 (matchcut diffs the file against the version of the stage it was exported from, so the human stage then holds the editor's changes only).
+A `human` junction follows the earlier stages only when both its clips are the same clip instances the canonical stages have: a junction with a clip the
+editor added, replaced or copied, or a pairing the editor made, shows only the `human` decisions and `made adjacent by human: ...`, never a pass's verdict
+about another pairing. When a removal made two clips adjacent, the human trim of either clip is listed under that junction.
 
 Below the beat strip are three frames: the outgoing frame (the last frame
 before the cut), the incoming frame, and a 50% overlay of the two, which is the
@@ -152,7 +155,11 @@ to fit the clips` when the points had to be clamped, or `pin not placed:
 holds a clip it would have to move, moving a clip would split or reorder the
 beats, a jump-cut pin's shot appears only once in the cut, a shot has more than
 one piece that fits the pinned point equally well, or the clips have no room). The badge is judged from the latest stage's history, so it reads the same
-whichever stage you inspect, and the header counts the pins not placed. A
+whichever stage you inspect, and the header counts the pins not placed. When the latest stage is `human` the history is not enough (it repeats the
+canonical stage's editor decision whatever the editor did), so the badge is judged from the editor's cut: the pin reads applied only while the cut still has the two
+clips the pin names, next to each other, with both pinned cut points unchanged to within half a frame; otherwise it reads `pin changed by the editor: <reason>` (`clip
+removed (shot 5)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, `other footage (shot 2 is a different clip now)`), the junction's
+`locked by the editor` badge is dropped, and the header adds `N pin(s) changed by the editor`. A pin the editor did not touch still reads `pinned (locked)`. A
 junction a later pass created (its baseline is not the rough cut) is placed by
 moving one of its clips next to the other in the rough cut before the passes
 run, unless that would split or reorder the beats or another pin holds a clip;

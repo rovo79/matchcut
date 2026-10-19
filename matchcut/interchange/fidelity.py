@@ -244,17 +244,35 @@ def _dip_note(canonical: Timeline) -> str:
     return f"dip to black: {dips} of {len(trs)} transition{'s' if len(trs) != 1 else ''} in this cut" + (" (approximated as described above)" if dips else "")
 
 
+def _seconds(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def music_start_note(music: Any, rate: Fraction) -> Optional[str]:
+    """The approximated entry for a music start that the OTIO and FCPXML exports write on the video frame grid (``common.music_window``),
+    with the size of the move; None when the start is on the grid (or negative: the render plays from 0, as the exports write it)."""
+    want = max(0.0, float(music.start))
+    frames = max(to_frames(want, rate), 0)
+    written = frames / float(rate)
+    moved = written - want
+    if abs(moved) < 5e-5:
+        return None
+    return (f"music start moved to the video frame grid: {_seconds(want)} s written as {_seconds(written)} s (frame {frames} at {_seconds(float(rate))} fps), "
+            f"{moved * 1000:+.1f} ms ({abs(moved) * float(rate):.2f} frame)")
+
+
 def _fmt_rate(rate: Fraction) -> str:
     return f"{rate.numerator}/{rate.denominator} ({float(rate):.3f})" if rate.denominator != 1 else str(rate.numerator)
 
 
 def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, exported: Optional[Timeline] = None,
-          drop_frame: bool = False, placement: Optional[Sequence[str]] = None) -> FidelityResult:
+          drop_frame: bool = False, placement: Optional[Sequence[str]] = None, extra_approximated: Sequence[str] = ()) -> FidelityResult:
     """Validate one export.
 
     ``canonical`` is the stage as matchcut holds it; ``exported`` is the frame-snapped copy that was written (``canonical`` itself
     when it is already on the frame grid); ``reimported`` is what matchcut's own reader made of the file.  ``reimported`` must equal
     ``exported`` frame for frame; how far ``exported`` is from ``canonical`` is reported as approximated, not as an error.
+    ``extra_approximated`` entries (what the caller measured, e.g. ``music_start_note``) follow the measured ones.
     """
     if fmt not in KNOWN:
         raise InterchangeError(f"unknown interchange format {fmt!r}")
@@ -287,6 +305,7 @@ def check(canonical: Timeline, reimported: Timeline, fmt: str, rate: Fraction, e
     for note in (_snap_note(canonical, exp, rate) if not snap_errors else None, _dissolve_note(canonical, rate), _dip_note(canonical)):
         if note:
             res.approximated.append(note)
+    res.approximated += list(extra_approximated)
     res.lost = list(KNOWN[fmt]["lost"])
     if abs(exp.fade_in - reimported.fade_in) > 1e-3 or abs(exp.fade_out - reimported.fade_out) > 1e-3:
         res.errors.append(f"fade metadata {reimported.fade_in:g}/{reimported.fade_out:g} != {exp.fade_in:g}/{exp.fade_out:g} (in/out seconds)")

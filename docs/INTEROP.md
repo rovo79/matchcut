@@ -66,7 +66,7 @@ for frame) at export time; it says nothing about what an editor does with the fi
 | Dip to black | approximated: `Custom_Transition` + metadata, UNVERIFIED | approximated: "Fade To Color", UNVERIFIED | approximated: a dissolve plus a `TRANSITION` comment |
 | Fade in/out of the whole cut | lost as an effect; seconds kept in timeline metadata | lost as an effect; seconds kept in `md` keys | lost as an effect; a comment |
 | Source audio | follows the picture (track `A1` mirrors the clips) | the asset's own audio | `AA/V` events |
-| Music file, start, gain | track `A2` + metadata | connected clip on lane -1 with a volume adjustment | not carried |
+| Music file, start, gain | track `A2` + metadata; the start is placed on the video frame grid (see below) | connected clip on lane -1 with a volume adjustment; the start is placed on the video frame grid | not carried |
 | Ducking, loudness normalisation | lost | lost | lost |
 | Junction id (`s<out>-s<in>`) | marker metadata (the marker's name is `J<n> s<out>->s<in>`) | marker value (`s0-s1 (s0 -> s1)`), keyword `mc:<id>`, `md` key on the dissolve | `* MATCHCUT JUNCTION` comment |
 | Why line | marker metadata (full) and marker `comment` (cut to 240 characters) | marker `note`, cut to 240 characters | not carried |
@@ -79,7 +79,7 @@ for frame) at export time; it says nothing about what an editor does with the fi
 The complete lists of what each format approximates and loses, verbatim from
 `matchcut/interchange/fidelity.py` (`KNOWN`, the table every export and every
 report uses; the report adds what that export measured: clips moved by the frame
-snap, dissolve lengths rounded). Entries marked UNVERIFIED have not been checked in an editor.
+snap, dissolve lengths rounded, and for OTIO and FCPXML a music start that the frame grid moved). Entries marked UNVERIFIED have not been checked in an editor.
 
 **OpenTimelineIO, approximated**
 
@@ -185,8 +185,17 @@ Interchange files carry ids; the decisions live in `provenance.json`.
   the note says `provenance.json now describes the new export of roughcut` while the other formats' entries stay flagged. Export that stage again to
   replace the rest; if the stage file goes back to what was exported, the flag clears.
   A stale entry never fails an export and does not count in `fidelity.json`'s `ok`.
-- If an editor drops every id, import falls back to the clip's name (`... shot<N>`), then to its
+- If an editor drops every id, import falls back to the clip's name (`... shot<N>`, which gives the shot only), then to its
   source range against the shot bounds (`shots.json`), and says how many clips needed that.
+- **Ambiguous clips are never guessed.** A clip that cannot be matched to exactly one canonical clip is read as a **new clip** (`h001`, ...) with a one-line
+  note naming the candidates, so the stage shows `removed` and `added` decisions instead of a trim that might be wrong:
+  - a **clip key used by more than one clip of the file** (a copied clip keeps its key): none of them is taken for the original
+    (`clip key 2@4.000-6.000 of c003 is used by clips 3 and 4 of the file: read as new clips (h001, h002), not matched to c003`). Their `origin` in
+    `human.json` is `human:<id>`, not the canonical key, so they do not inherit anything;
+  - a **clip with no key to decide that overlaps two canonical clips equally** (the same number of frames, one shot):
+    `clip 2 of the file (shot 4, 9.40-10.20s) overlaps c002 and c003 equally: read as a new clip (h001), not matched to any of them`. A clip that overlaps one
+    canonical clip more than the others still goes to it.
+  A clip whose key is unique and known, or whose overlap has a clear winner, keeps its canonical id, key and history.
 
 ## The fidelity report
 
@@ -202,6 +211,12 @@ report lists per stage and format what was **preserved**, what is **approximated
 measured counts and largest deltas: clips moved by the snap, dissolve lengths rounded to whole
 frames, dips to black in the cut) and what is **lost**.
 
+**The music start is on the video frame grid.** The OTIO `A2` clip and the FCPXML lane -1 clip start at a whole video frame, as the cut does, so a
+`music.start` that is not a whole number of frames moves, by at most half a frame (about 21 ms at 23.976 fps). When it moves, the OTIO and FCPXML
+entries list it under **approximated** with the size of the move, for example `music start moved to the video frame grid: 2 s written as 2.002 s
+(frame 48 at 23.976 fps), +2.0 ms (0.05 frame)`; the exact value stays in the metadata (`metadata.matchcut.start`, the `md` key). Nothing is listed when
+the start is on the grid, and the EDL carries no music.
+
 ## Importing an editor's file
 
 `import WORKSPACE FILE` reads an OTIO, FCPXML or EDL file (the format from the extension,
@@ -210,7 +225,10 @@ or name, FCPXML project, EDL title) or given with `--stage`, else `final`. Clips
 back to matchcut's clips by clip key, then by name, then by source range; arbitrary rational time bases and
 renumbered ids are accepted. Anything it cannot map (other media, gaps, extra video tracks,
 audio-only items, speed changes, effects, nested items) is listed in the **import report**
-and ignored; nothing is dropped silently.
+and ignored; nothing is dropped silently. A clip with **no length** (zero or negative duration) is damage, and is read the same way by OTIO and FCPXML:
+listed (`clip <name>: source range duration is -20 frames (not positive), ignored` in OTIO, `no usable start, duration or offset, ignored` in FCPXML) and skipped,
+so `human.json` never holds a clip whose source out is not after its in; the clip then reads as `removed`. An EDL event shorter than its transitions stops the
+import with one line (`invalid EDL: event 001 is shorter than its transitions`).
 
 - **The source footage** is the workspace's: a clip is the footage when its media path is the footage's exact path (symbolic links resolved); only when no
   clip has the exact path are clips with the same file name taken for it, and the report says so (camera names such as `C0001.MP4` repeat across cards, so
@@ -229,12 +247,13 @@ and ignored; nothing is dropped silently.
   - different, and the snapshot of that version is there: the file is diffed against **the snapshot**, so the decisions are the editor's changes only (not the pipeline's), with the
     note `<file> was exported from an earlier <stage>: the editor's changes were diffed against that version; junction histories compare the human stage with the current <stage>`.
     `human_import.json` records `base_snapshot` and `base_snapshot_sha256`; its `stage_sha256` stays the current stage file's, so the human stage is not stale at once;
-  - different, and the snapshot is missing: the import stops with one line (`<file> was exported from an earlier <stage> (sha <12 hex>) and its snapshot exports/.stages/<stage>-<12 hex>.json is missing: re-export and redo the edit, or restore the snapshot`);
+  - different, and the snapshot is missing: the import stops with one line naming the places it looked (`<file> was exported from an earlier <stage> (sha <12 hex>) and its snapshot <stage>-<12 hex>.json is missing (searched exports/.stages and <dir of the file>/.stages): re-export and redo the edit, or restore the snapshot`);
+  - different, and the snapshot is there but **damaged** (its content does not hash to the fingerprint, or it is not readable JSON): its own one line, not the missing-snapshot one (`<file> was exported from an earlier <stage> (sha <12 hex>) and its snapshot exports/.stages/<stage>-<12 hex>.json is damaged (sha256 mismatch): re-export and redo the edit`; `(unreadable JSON)` in the second case);
   - no fingerprint (an application dropped the metadata, or the file is from an older matchcut or another tool): the file is read against the current stage, and the note says
     `<file> carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions`.
 
   The snapshot is looked up in `WORKSPACE/exports/.stages/`, then in `.stages/` next to the imported file (an export made with `--out DIR` keeps it in `DIR/.stages/`; save the editor's file there or copy the folder into `WORKSPACE/exports/`). A copy
-  that does not hash to the fingerprint is not used.
+  that does not hash to the fingerprint is not used; a good copy in the second place is found even if the first holds a damaged one.
 
 The result is the **human stage**: `human.json` (a stage timeline, listed after `final`
 in `junctions`, the TUI's Edit view and the review package) and `human_import.json` (what was read and
@@ -267,6 +286,19 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   deleted**. The line says what to do: re-export, or re-import the editor's file; matchcut diffs it against the stage it was exported from (the snapshot), so the
   re-import records the editor's changes only. A file with no fingerprint, or one whose snapshot is gone, cannot be checked that way (see above).
   A missing or unreadable `human_import.json` counts as stale.
+- **Inherited decisions belong to the same clips.** A junction of the human stage is followed through the earlier stages (history, pass
+  decisions, the pass's "why") only when both its clips are instances the canonical stages have (the same `clip_origin` as the canonical clip: the
+  clip key). A junction with a clip the editor added, replaced or copied, or with a new pairing the editor made, shows only the `human` decisions and
+  `made adjacent by human: ...`, never a pass's verdict about another pairing. An untouched junction keeps its inherited "why". When a removal made two clips
+  adjacent, the human trim of either clip is listed under that junction's decisions (the "why" stays the removal).
+- **Pins on the human stage.** The human history repeats the canonical stage's `editor` decision whatever the editor then did, so it never decides whether a
+  pin still holds. The engine (`editorial.pin_outcome` / `pin_change`, no interchange code) judges the editor's cut: a pin counts as applied on `human`
+  only if the cut still has the two clips the pin names, the same instances (the pin's `out_origin` / `in_origin`; for a pin without them, clips of the same two shots),
+  next to each other, with both pinned cut points unchanged to within half a frame. Otherwise the human stage reports the pin as **changed by the editor**
+  with a one-line reason: `clip removed (shot 5)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, or `other footage (shot 2 is a different clip now)`.
+  The Edit view's pin badge (`pin changed by the editor: <reason>`) and header (`N pin(s) changed by the editor`), and the `junctions` listing (tag `pin-changed`, and a
+  `pin: changed by the editor: <reason>` line in the detail) say so instead of `pinned`. A pin the editor did not touch still reads applied, and the
+  canonical stages are judged by their own history as before. The cost of a wrong call: a pin the editor reproduced exactly by other means reads changed (still true).
 - **Untouched dissolves.** A dissolve the editor did not change keeps matchcut's own value (for
   example 0.75 s), not the whole-frame length the file carried, so the junction shows no `human`
   line for it. The same holds when a clip is deleted: the untouched fractional dissolves

@@ -23,6 +23,8 @@ def _pin_badge(j: Junction, pin: Pin, decision: Optional[Decision]) -> str:
         return "pin pending: run again (R) to apply"
     if decision.action == "pin_unplaced":
         return f"pin not placed: {decision.detail}"
+    if decision.action == "pin_changed":  # the human stage: the editor's cut no longer holds the pin
+        return f"pin changed by the editor: {decision.detail}"
     if decision.action != "pinned":
         return "pin pending: run again (R) to apply"
     tol = (1.0 / j.fps if j.fps > 0 else 0.04) + 1e-6
@@ -37,7 +39,7 @@ def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: 
     out: List[str] = []
     if j.match_type and shown.locked:
         out.append(f"MATCH CUT ({j.match_type})")
-    if shown.locked:
+    if shown.locked and not j.pin_lost:  # (a pin the editor's cut no longer holds says so in the pin badge; the lock was the pin's)
         if j.pinned:
             out.append(f"{j.pin_origin or 'locked'} by the editor")
         else:

@@ -345,6 +345,29 @@ def test_import_reports_a_transition_without_offsets_and_a_clip_without_a_range(
     assert len(back.clips) == 2 and any("no usable source range" in n for n in notes)
 
 
+@pytest.mark.parametrize("duration", [0, -20])
+@pytest.mark.parametrize("position", [0, 2, 3])
+def test_a_clip_with_zero_or_negative_duration_is_ignored_with_a_note(duration, position):
+    """Like the FCPXML reader (``clip ...: no usable start, duration or offset, ignored``): never a clip whose source out is not after its in."""
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    kids = tracks(doc)[0]["children"]
+    name = kids[position]["name"]
+    kids[position]["source_range"]["duration"]["value"] = duration
+    back, notes = import_otio(doc)
+    assert all(c.source_out > c.source_in for c in back.clips)
+    assert len(back.clips) == 2 and any(n.startswith(f"clip {name}: ") and "ignored" in n and "duration" in n for n in notes), notes
+    assert all("\n" not in n for n in notes)
+
+
+def test_every_clip_with_no_duration_is_a_one_line_error():
+    doc = export_otio(synthetic(), "final", fake_src(), [])
+    for k in tracks(doc)[0]["children"]:
+        if k["OTIO_SCHEMA"].startswith("Clip"):
+            k["source_range"]["duration"]["value"] = 0
+    with pytest.raises(InterchangeError, match="no usable clips"):
+        import_otio(doc)
+
+
 @pytest.mark.parametrize("damage", [
     lambda d: d.update(tracks=None), lambda d: d.update(tracks={"children": [None, 5]}), lambda d: d["tracks"]["children"][0]["children"].__setitem__(0, 7),
     lambda d: d["tracks"]["children"][0]["children"][0]["source_range"]["start_time"].pop("rate"),
