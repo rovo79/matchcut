@@ -194,11 +194,15 @@ Interchange files carry ids; the decisions live in `provenance.json`.
     `human.json` is `human:<id>`, not the canonical key, so they do not inherit anything;
   - a **clip with no key to decide that overlaps two canonical clips equally** (the same number of frames, one shot):
     `clip 2 of the file (shot 4, 9.40-10.20s) overlaps c002 and c003 equally: read as a new clip (h001), not matched to any of them`. A clip that overlaps one
-    canonical clip more than the others still goes to it.
+    canonical clip more than the others still goes to it;
+  - a **canonical clip whose best candidates tie** (a clip razored into two unkeyed halves of equal length): neither half is taken for it, both are new clips
+    (`c003's range is shared equally by clips 3 and 4 of the file: read as new clips (h001, h002), not matched to c003`) and the canonical clip reads as removed.
+    The new clips' `origin` is `human:<id>`;
   - a **known key on the footage of another shot**: a key is trusted only while the edited range still overlaps the shot of the canonical clip (`shots.json`). If
     the clip now lies in another shot, matchcut reads it as a new clip (its shot is the one its range is in) and the canonical clip as removed, unless another clip maps to it
     unambiguously: `clip key 3@6.520-9.000 of c003 now covers shot 7 (12.20-13.00s), not shot 3: read as a new clip (h001), not matched to c003`. An extreme slip that stays
-    inside the same shot is still a trim of that clip. (Without `shots.json` the key is trusted.)
+    inside the same shot is still a trim of that clip. Without `shots.json` the key is trusted, and when its range no longer overlaps the clip's the import says so:
+    `could not check that clip key 3@6.500-9.000 of c003 is still shot 3 (no shots.json): its range 12.20-13.00s no longer overlaps the clip's`.
   A clip whose key is unique and known (and still in its shot), or whose overlap has a clear winner, keeps its canonical id, key and history.
 
 ## The fidelity report
@@ -290,19 +294,25 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   deleted**. The line says what to do: re-export, or re-import the editor's file; matchcut diffs it against the stage it was exported from (the snapshot), so the
   re-import records the editor's changes only. A file with no fingerprint, or one whose snapshot is gone, cannot be checked that way (see above).
   A missing or unreadable `human_import.json` counts as stale.
-- **Inherited decisions belong to the same clips.** A junction of the human stage is followed through the earlier stages (history, pass
+- **Inherited decisions belong to the same clips, in the same order.** A junction of the human stage is followed through the earlier stages (history, pass
   decisions, the pass's "why") only when both its clips are instances the canonical stages have (the same `clip_origin` as the canonical clip: the
-  clip key). A junction with a clip the editor added, replaced or copied, or with a new pairing the editor made, shows only the `human` decisions and
-  `made adjacent by human: ...`, never a pass's verdict about another pairing. An untouched junction keeps its inherited "why". When a removal made two clips
+  clip key) **and** a canonical stage has those two instances adjacent in that order: the earlier stages are located by clip instance first (lineage only when
+  an instance is gone from a stage, as after a merge), so a clip slipped off its old range inside its shot keeps its junction's history. A junction with a clip the
+  editor added, replaced or copied, with a new pairing, or with a pair in the reverse order shows only the `human` decisions and
+  `made adjacent by human: ...` (`reordered c003, c002` for a reorder), never a pass's verdict about another pairing. An untouched junction keeps its inherited "why". When a removal made two clips
   adjacent, the human trim of either clip is listed under that junction's decisions (the "why" stays the removal).
 - **Pins on the human stage.** The human history repeats the canonical stage's `editor` decision whatever the editor then did, so it never decides whether a
   pin still holds. The engine (`editorial.pin_outcome` / `pin_change`, no interchange code) judges the editor's cut: a pin counts as applied on `human`
   only if the cut still has the two clips the pin names, the same instances (the pin's `out_origin` / `in_origin`; for a pin without them, clips of the same two shots),
   next to each other, with both pinned cut points unchanged to within half a frame. Otherwise the human stage reports the pin as **changed by the editor**
   with a one-line reason: `clip removed (shot 5)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, or `other footage (shot 2 is a different clip now)`.
-  The Edit view's pin badge (`pin changed by the editor: <reason>`) and header (`N pin(s) changed by the editor`), and the `junctions` listing (tag `pin-changed`, and a
-  `pin: changed by the editor: <reason>` line in the detail) say so instead of `pinned`. A pin the editor did not touch still reads applied, and the
-  canonical stages are judged by their own history as before. The cost of a wrong call: a pin the editor reproduced exactly by other means reads changed (still true).
+  If the pair was razored or copied (a `human:` clip covers the pinned clip's range) the reason is `clip split or copied (shot N)`.
+  **Every stored pin is reported once** on the human stage, by one engine answer (`editorial.pin_states`, which calls `pin_outcome`): the `junctions` command ends with a
+  line per pin (`pin s0->s1: applied`, `pin s0->s1: changed by the editor: clip removed (shot 1)`, `... not placed: <reason>`, `... pending (run again to apply)`), the Edit view's header
+  lists the changed ones with their reasons (`pin s0->s1 changed by the editor: clip removed (shot 1)`), and the junction where the pin now sits (its pair, else the junction after its
+  outgoing clip, else the one before its incoming clip) carries the tag `pin-changed` and a `pin: changed by the editor: <reason>` detail line in `junctions` and the badge
+  `pin changed by the editor: <reason>` in the Edit view, instead of `pinned`. The locks the pin put on the human stage's clips are cleared in `human.json`, so nothing reads them as matchcut's. A
+  pin the editor did not touch still reads applied, and the canonical stages are judged by their own history as before. The cost of a wrong call: a pin the editor reproduced exactly by other means reads changed (still true).
 - **Untouched dissolves.** A dissolve the editor did not change keeps matchcut's own value (for
   example 0.75 s), not the whole-frame length the file carried, so the junction shows no `human`
   line for it. The same holds when a clip is deleted: the untouched fractional dissolves

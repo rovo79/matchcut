@@ -8,9 +8,10 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import DEFAULT_PASSES, PipelineConfig
+from .editorial import PinStore, pin_states
 from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_human
 from .pipeline import Pipeline
-from .timeline import Timeline
+from .timeline import HUMAN_STAGE, Timeline
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -150,6 +151,18 @@ def _interchange(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pin_footer(ws: Path, stages) -> List[str]:
+    """On the human stage, one line per stored pin: what the editor's cut did with it (the engine's ``pin_states``, the answer the Edit view gives too)."""
+    if not stages or stages[-1][0] != HUMAN_STAGE:
+        return []
+    lines = []
+    for st in pin_states(stages[-1][1], PinStore(ws).load(), HUMAN_STAGE):
+        what = {"applied": "applied", "changed": f"changed by the editor: {st.reason}", "not_placed": f"not placed: {st.reason}",
+                "pending": "pending (run again to apply)"}[st.state]
+        lines.append(f"pin {st.label}: {what}")
+    return lines
+
+
 def _junctions(ws: Path, index: Optional[int]) -> int:
     cfg = _workspace_config(ws)
     if cfg is None:
@@ -160,12 +173,15 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
         return 1
     junctions = build_junctions(stages, scorer_for_workspace(ws, cfg))
     stale = stale_human(ws)  # a stale human.json is left out of the stages above; say so
+    footer = _pin_footer(ws, stages)
     if index is None:
         print(f"{len(junctions)} junctions in {stages[-1][0]} ({len(stages)} stages)")
         for j in junctions:
             print(junction_line(j))
         if stale:
             print(f"note: {stale}")
+        for line in footer:
+            print(line)
         return 0
     if not 1 <= index <= len(junctions):
         print(f"junction {index} is out of range 1..{len(junctions)}", file=sys.stderr)
@@ -173,6 +189,8 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
     print(junction_detail(junctions[index - 1]))
     if stale:
         print(f"note: {stale}")
+    for line in footer:
+        print(line)
     return 0
 
 

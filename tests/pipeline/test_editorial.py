@@ -696,12 +696,19 @@ def test_the_human_stage_reports_a_pin_whose_pair_the_editor_separated(with_orig
 
 def test_the_human_stage_reports_a_pin_whose_clip_is_another_piece_of_the_footage_now():
     pin, final = pinned_pair()
-    other = Clip("h001", 2, 4.6, 5.8, "b1", origin="human:h001")  # same shot, same range, but not the clip the pin named
-    d = pin_outcome(human_of(final, lambda cs: [cs[0], other, cs[2]]), pin)
+    elsewhere = Clip("h001", 2, 5.85, 5.95, "b1", origin="human:h001")  # same shot, other footage of it: not the clip the pin named
+    d = pin_outcome(human_of(final, lambda cs: [cs[0], elsewhere, cs[2]]), pin)
     assert (d.action, d.detail) == ("pin_changed", "other footage (shot 2 is a different clip now)"), d
+    # a clip the importer made over the pinned clip's range (it was razored or copied) is said to be split or copied
+    over = Clip("h001", 2, 4.6, 5.8, "b1", origin="human:h001")
+    d = pin_outcome(human_of(final, lambda cs: [cs[0], over, cs[2]]), pin)
+    assert (d.action, d.detail) == ("pin_changed", "clip split or copied (shot 2)"), d
+    half = Clip("h002", 2, 4.6, 5.2, "b1", origin="human:h002")
+    d = pin_outcome(human_of(final, lambda cs: [cs[0], half, Clip("h003", 2, 5.2, 5.8, "b1", origin="human:h003"), cs[2]]), pin)
+    assert d.detail == "clip split or copied (shot 2)", d
     # without the pin's clip instances the shots decide: the same shots are still held
     bare, final = pinned_pair(with_origins=False)
-    assert pin_outcome(human_of(final, lambda cs: [cs[0], other, cs[2]]), bare).action == "pinned"
+    assert pin_outcome(human_of(final, lambda cs: [cs[0], over, cs[2]]), bare).action == "pinned"
 
 
 def test_the_inherited_editor_decision_is_never_what_makes_a_pin_read_applied_on_the_human_stage():
@@ -727,3 +734,28 @@ def test_junctions_of_the_human_stage_say_a_changed_pin_is_not_pinned():
     j = build_junctions([("final", final), ("human", trimmed)])[0]
     assert not j.pinned and j.pin_lost == "cut trimmed by 3 frames (out)"
     assert build_junctions([("final", final)])[0].pinned  # unchanged for the canonical stages
+
+
+def test_pin_site_is_where_the_pair_or_its_surviving_clip_now_sits():
+    from matchcut.pipeline.editorial import pin_site
+
+    pin, final = pinned_pair()
+    assert pin_site(human_of(final), pin) == 0
+    assert pin_site(human_of(final, lambda cs: cs[1:]), pin) == 0  # c001 gone: the incoming clip's junction (clamped to the first)
+    assert pin_site(human_of(final, lambda cs: [cs[0], cs[2]]), pin) == 0  # c002 gone: after the outgoing clip
+    inserted = Clip("h001", 1, 3.0, 3.6, "b1", origin="human:h001")
+    assert pin_site(human_of(final, lambda cs: [cs[0], inserted, cs[1], cs[2]]), pin) == 0  # separated: after the outgoing clip
+    assert pin_site(human_of(final, lambda cs: [cs[2], cs[1], cs[0]]), pin) == 1  # swapped around: the outgoing clip is last, so the junction before it
+    assert pin_site(human_of(final, lambda cs: [cs[2]]), pin) is None
+
+
+def test_pin_states_gives_every_view_the_same_answer():
+    from matchcut.pipeline.editorial import pin_states
+
+    pin, final = pinned_pair()
+    other = Pin(1, 5, 1.0, 2.0)
+    held = pin_states(human_of(final), [pin, other], "human")
+    assert [(p.label, p.state, p.reason) for p in held] == [("s0->s2", "applied", ""), ("s1->s5", "pending", "")]
+    gone = pin_states(human_of(final, lambda cs: cs[1:]), [pin], "human")
+    assert [(p.state, p.reason) for p in gone] == [("changed", "clip removed (shot 0)")]
+    assert [p.state for p in pin_states(None, [pin])] == ["pending"]

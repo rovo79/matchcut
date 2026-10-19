@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
+from matchcut.pipeline.editorial import Pin, pin_change
 from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
@@ -453,6 +454,7 @@ class _Diff:
     by_range: int  # matches made by source range because no clip key told
     notes: List[str] = field(default_factory=list)  # ambiguous clips read as new (see _match), the new clips' ids filled in
     reshot: Dict[int, int] = field(default_factory=dict)  # edited clip index -> the shot its range lies in, for a key that went to other footage
+    blocked: set = field(default_factory=set)  # edited clips read as new on purpose (see _match)
 
 
 def _list(names: Sequence[str]) -> str:
@@ -466,7 +468,7 @@ def _shot_at(bounds: Dict[int, Sequence[float]], start: float, end: float) -> in
 
 
 def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: Sequence[LaidClip],
-           bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Dict[int, int], int, List[Tuple[str, List[int]]], Dict[int, int]]:
+           bounds: Optional[Dict[int, Sequence[float]]] = None) -> Tuple[Dict[int, int], int, List[Tuple[str, List[int]]], Dict[int, int], set]:
     """canonical clip index -> edited clip index, one to one: by clip key (the lineage id the exports carry) first, then by lineage
     (same shot, overlapping source range, best overlap first) for what the key did not settle.
 
@@ -475,7 +477,8 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
     not say which one is the original, so none is taken for it; an edited clip with no key to decide that overlaps two canonical clips
     equally (the same number of frames) is not taken for either.  A known key is trusted only while the edited range still overlaps the
     canonical clip's shot (``bounds``): a key carried onto the footage of another shot is a new clip (a slip inside the shot is a trim).
-    The last result maps such a clip to the shot its range lies in.
+    Then a map from such a clip to the shot its range lies in, and the set of edited clips read as new on purpose.  A canonical clip whose
+    best unkeyed candidates share its range equally (a razored clip) matches none of them.
     """
     out: Dict[int, int] = {}
     used: set = set()
@@ -499,6 +502,9 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
                 notes.append((f"clip key {clip_key(c)} of {c.id} now covers " + (f"shot {where}" if where >= 0 else "no shot")
                               + f" ({e.source_in:.2f}-{e.source_out:.2f}s), not shot {c.shot_index}: read as a new clip ({{new}}), not matched to {c.id}", [j]))
                 continue
+            if lo_hi is None and min(e.source_out, c.source_out) - max(e.source_in, c.source_in) <= 0:
+                notes.append((f"could not check that clip key {clip_key(c)} of {c.id} is still shot {c.shot_index} (no shots.json): its range "
+                              f"{e.source_in:.2f}-{e.source_out:.2f}s no longer overlaps the clip's", []))
             out[i] = j
             used.add(j)
         elif len(carriers) > 1:
@@ -516,6 +522,15 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
             blocked.add(j)
             notes.append((f"clip {j + 1} of the file (shot {e.shot_index}, {e.source_in:.2f}-{e.source_out:.2f}s) overlaps "
                           f"{_list([canon.clips[i].id for i in tied])} equally: read as a new clip ({{new}}), not matched to any of them", [j]))
+    for i in pending:  # a canonical clip whose best candidates tie (a clip razored into equal halves): none of them is taken for it
+        c = canon.clips[i]
+        found = [(_overlap(crows[i], erows[j]), j) for j, e in enumerate(edited.clips) if j not in used and j not in blocked and e.shot_index == c.shot_index]
+        best = max((ov for ov, _ in found), default=0)
+        tied = [j for ov, j in found if ov == best] if best > 0 else []
+        if len(tied) > 1:
+            blocked.update(tied)
+            notes.append((f"{c.id}'s range is shared equally by clips {_list([str(j + 1) for j in tied])} of the file: "
+                          f"read as new clips ({{new}}), not matched to {c.id}", tied))
     pairs = []
     for i in pending:
         c = canon.clips[i]
@@ -529,7 +544,7 @@ def _match(canon: Timeline, edited: Timeline, crows: Sequence[LaidClip], erows: 
             out[i] = j
             used.add(j)
             by_range += 1
-    return out, by_range, notes, reshot
+    return out, by_range, notes, reshot, blocked
 
 
 def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List[str]:
@@ -550,7 +565,7 @@ def _fresh_ids(canon: Timeline, edited: Timeline, match: Dict[int, int]) -> List
 
 def _compare(canonical: Timeline, edited: Timeline, rate: Fraction, bounds: Optional[Dict[int, Sequence[float]]] = None) -> _Diff:
     crows, erows = layout(canonical, rate), layout(edited, rate)
-    match, by_range, found, reshot = _match(canonical, edited, crows, erows, bounds)
+    match, by_range, found, reshot, blocked = _match(canonical, edited, crows, erows, bounds)
     ids = _fresh_ids(canonical, edited, match)
     notes = [text.replace("{new}", ", ".join(ids[j] for j in js)) for text, js in found]
     inv = {j: i for i, j in match.items()}
@@ -586,7 +601,7 @@ def _compare(canonical: Timeline, edited: Timeline, rate: Fraction, bounds: Opti
                 label = lambda t: "cut" if not t[1] else f"{t[0]} {t[1]}f"  # noqa: E731
                 decide("transition", [ids[j - 1], cid], f"human changed transition {label(before)} -> {label(after)}",
                        before={"kind": before[0], "frames": before[1]}, after={"kind": after[0], "frames": after[1]})
-    return _Diff(match, ids, out, crows, erows, by_range, notes, reshot)
+    return _Diff(match, ids, out, crows, erows, by_range, notes, reshot, blocked)
 
 
 def diff_human_edits(canonical: Timeline, edited: Timeline, rate: Fraction, bounds: Optional[Dict[int, Sequence[float]]] = None) -> List[Decision]:
@@ -611,7 +626,7 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
             c.id = diff.ids[j]
             if j in diff.reshot:  # the key went to other footage: the shot is where the range is, not the key's
                 c.shot_index = diff.reshot[j]
-            if c.origin and c.origin in taken:  # a copy carries the original's key: it is a new instance, not the canonical clip
+            if j in diff.blocked or (c.origin and c.origin in taken):  # a copy carries the original's key: it is a new instance, not the canonical clip
                 c.origin = f"human:{c.id}"
             clips.append(c)
             continue
@@ -633,7 +648,34 @@ def _build(canonical: Timeline, snapped: Timeline, edited: Timeline, rate: Fract
     out = Timeline(source=canonical.source, fps=canonical.fps, clips=clips, fade_in=canonical.fade_in, fade_out=canonical.fade_out,
                    name="human edit", stage=HUMAN)
     out.history = [Decision.from_dict(d.to_dict()) for d in history_from.history] + diff.decisions
+    _release_changed_pins(out)
     return out, diff
+
+
+def _release_changed_pins(tl: Timeline) -> None:
+    """Clear, on the human stage's clips, the lock a pin put there when the editor's cut no longer holds that pin (the clips were copied from the
+    canonical stage with their locks; a lock nobody keeps would read as matchcut's own, and the timeline strip would draw it)."""
+    latest: Dict[Tuple[Any, Any], Decision] = {}
+    for d in tl.history:
+        if d.pass_name == "editor" and d.action == "pinned":
+            latest[(d.data.get("out_shot"), d.data.get("in_shot"))] = d
+    for d in latest.values():
+        try:
+            pin = Pin.from_dict(d.data)
+            if not pin_change(tl, pin, float(d.data["out"]), float(d.data["in_"])):
+                continue
+        except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+            continue
+        by_origin = bool(pin.out_origin and pin.in_origin)
+        for c in tl.clips:
+            out_side = clip_origin(c) == pin.out_origin if by_origin else (c.shot_index == pin.out_shot and "pinned" in c.tags)
+            in_side = clip_origin(c) == pin.in_origin if by_origin else (c.shot_index == pin.in_shot and "pinned" in c.tags)
+            if out_side:
+                c.locked_out = False
+            if in_side:
+                c.locked_in = False
+            if (out_side or in_side) and not (c.locked_in or c.locked_out) and "pinned" in c.tags:
+                c.tags.remove("pinned")
 
 
 def human_stage(canonical: Timeline, edited: Timeline, rate: Fraction, snapped: Optional[Timeline] = None,

@@ -18,7 +18,7 @@ from matchcut.interchange.edl import export_edl
 from matchcut.interchange.fcpxml import export_fcpxml, fcpxml_stages
 from matchcut.interchange.otio import export_otio, import_otio
 from matchcut.interchange.workspace import ExportResult, ImportResult, diff_human_edits, export_workspace, human_stage, import_timeline
-from matchcut.pipeline.config import MusicConfig
+from matchcut.pipeline.config import MusicConfig, PipelineConfig
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
 from matchcut.pipeline.pipeline import Pipeline
@@ -490,6 +490,88 @@ def test_a_clip_over_two_canonical_clips_equally_is_a_new_clip_with_a_note_namin
     assert [c.id for c in human.clips][:3] == ["c001", "h001", "c004"] and (human.clips[1].source_in, human.clips[1].source_out) == (9.4, 10.2)
 
 
+def one_clip_razored(wsx, cut: float, fmt: str) -> Path:
+    """final.json rewritten so that c002 is one clip of shot 4 (9.00-10.60 s); the editor's file has it razored at ``cut`` into two clips without keys."""
+    w = wsx.world
+    tl = w.by_stage["final"].copy()
+    tl.clips[1] = Clip("c002", 4, 9.0, 10.6, tl.clips[1].beat_id)
+    for c in tl.clips:
+        c.transition_in = Transition()
+        c.locked_in = c.locked_out = False
+    tl.save(wsx.ws / "final.json")
+    snapped, _ = export_timeline(tl, w.bounds, w.src)
+    ed = snapped.copy()
+    a, b = Clip("x1", 4, 9.0, cut, tl.clips[1].beat_id), Clip("x2", 4, cut, 10.6, tl.clips[1].beat_id)
+    a.origin, b.origin = "unknown-a", "unknown-b"  # keys this workspace never issued: the range decides
+    ed.clips[1:2] = [a, b]
+    fp = sha(wsx.ws / "final.json")
+    path = wsx.tmp / f"razor.{fmt}"
+    if fmt == "otio":
+        path.write_text(json.dumps(export_otio(ed, "final", w.src, [], stage_sha256=fp)))
+    else:
+        path.write_text(export_edl(ed, "final", w.src, "demo - final", stage_sha256=fp))
+    return path
+
+
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_clip_razored_into_equal_halves_is_read_as_two_new_clips_with_a_note(wsx, fmt):
+    """The reviewer's M2: two unkeyed halves share the clip's range equally; neither is the clip, so not a trim plus an added clip."""
+    path = one_clip_razored(wsx, 9.8, fmt)  # 20 frames each
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert [(d.action, d.clip_ids) for d in res.decisions] == [("removed", ["c002"]), ("added", ["h001"]), ("added", ["h002"])], [d.detail for d in res.decisions]
+    assert "c002's range is shared equally by clips 2 and 3 of the file: read as new clips (h001, h002), not matched to c002" in res.notes, res.notes
+    assert not any("matched by source range" in n for n in res.notes) and all("\n" not in n for n in res.notes)
+    human = Timeline.load(res.stage_path)
+    assert [c.id for c in human.clips][:3] == ["c001", "h001", "h002"] and all(c.origin.startswith("human:") for c in human.clips[1:3])
+
+
+@pytest.mark.parametrize("fmt", ["otio", "edl"])
+def test_a_clip_razored_unequally_still_matches_the_larger_half(wsx, fmt):
+    path = one_clip_razored(wsx, 10.0, fmt)  # 25 frames and 15
+    res = import_timeline(wsx.ws, wsx.cfg, path)
+    assert [(d.action, d.clip_ids) for d in res.decisions if d.action != "trim"] == [("added", ["h001"])]
+    assert "1 clip matched by source range because the clip key was missing or unknown" in res.notes and not any("shared equally" in n for n in res.notes)
+    assert Timeline.load(res.stage_path).clips[1].id == "c002"
+
+
+def test_a_key_that_went_to_other_footage_cannot_be_checked_without_shots_json_and_says_so(wsx):
+    """The reviewer's M3: no shot bounds, so the key is trusted, and the note says the check could not be made."""
+    ed, k, was, shot, rng = keyed_clip_moved(wsx, to_other_shot=True)
+    moved_id = f"c{k + 1:03d}"
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    (wsx.ws / "shots.json").unlink()
+    res = import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    key = clip_origin(wsx.world.by_stage["final"].clips[k])
+    assert (f"could not check that clip key {key} of {moved_id} is still shot {was} (no shots.json): its range {rng[0]:.2f}-{rng[1]:.2f}s "
+            "no longer overlaps the clip's") in res.notes, res.notes
+    assert not any(d.action in ("removed", "added") for d in res.decisions) and any(d.action == "trim" and d.clip_ids == [moved_id] for d in res.decisions)
+    # a key still on its own footage needs no such note
+    again = import_timeline(wsx.ws, wsx.cfg, write_edited_files(wsx, final_of(wsx)[1], wsx.tmp, rename=False)["otio"])
+    assert not any("could not check" in n for n in again.notes)
+
+
+def test_a_pinned_clip_that_was_copied_is_split_or_copied_not_other_footage(wsx):
+    """The reviewer's M4: a copy carries the pinned clip's key twice; neither is the pinned clip, and the pin says why."""
+    pin = origin_pinned_workspace(wsx, True)
+    stages = load_stage_timelines(wsx.ws)
+    final = dict(stages)["final"]
+    snapped, _ = export_timeline(final, wsx.world.bounds, wsx.world.src)
+    ed = snapped.copy()
+    i = next(k for k, c in enumerate(ed.clips) if clip_origin(c) == pin.out_origin)
+    dup = Clip.from_dict(ed.clips[i].to_dict())
+    dup.id, dup.transition_in = "copy", Transition()
+    for c in ed.clips:
+        c.origin = clip_origin(c)
+    dup.origin = ed.clips[i].origin
+    ed.clips.insert(i + 1, dup)
+    path = wsx.tmp / "copied.otio"
+    path.write_text(json.dumps(export_otio(ed, "final", wsx.world.src, [], stage_sha256=sha(wsx.ws / "final.json"))))
+    import_timeline(wsx.ws, wsx.cfg, path)
+    human = Timeline.load(wsx.ws / "human.json")
+    outcome = pin_outcome(human, pin)
+    assert (outcome.action, outcome.detail) == ("pin_changed", f"clip split or copied (shot {pin.out_shot})"), outcome
+
+
 @pytest.mark.parametrize("fmt", ["otio", "edl"])
 def test_a_clip_over_two_canonical_clips_unequally_still_goes_to_the_one_it_overlaps_most(wsx, fmt):
     tl = two_pieces_of_one_shot(wsx)
@@ -725,6 +807,27 @@ def edit_around_the_pin(wsx, pin: Pin, how: str):
         extra = Clip("zz", ed.clips[0].shot_index, lo, lo + 1.0)
         extra.origin = "mystery"
         ed.clips.insert(out_i + 1, extra)
+    elif how == "slip":  # the outgoing clip keeps its key and moves to other footage of its own shot (no overlap with the old range)
+        old = ed.clips[out_i]
+        lo, hi = w.bounds[old.shot_index]
+        for c in ed.clips:
+            c.origin = clip_origin(c)
+        old.source_in, old.source_out = round(round(lo * fps) / fps, 4), round(round((lo + 0.6) * fps) / fps, 4)
+        assert old.source_out <= snapped.clips[out_i].source_in - 0.2
+        for c in ed.clips:
+            c.transition_in = Transition()
+    elif how == "swap":
+        ed.clips[out_i], ed.clips[out_i + 1] = ed.clips[out_i + 1], ed.clips[out_i]
+        for c in ed.clips:
+            c.transition_in = Transition()
+    elif how == "replace_other":  # the outgoing clip becomes other footage of its shot (no overlap with the old range), without a key
+        old = ed.clips[out_i]
+        lo, hi = w.bounds[old.shot_index]
+        rng = (lo, lo + 0.6) if lo + 0.6 <= old.source_in - 0.2 else (hi - 0.6, hi)
+        assert rng[1] <= old.source_in - 0.2 or rng[0] >= old.source_out + 0.2, "no room in the shot"
+        extra = Clip("zz", old.shot_index, round(round(rng[0] * fps) / fps, 4), round(round(rng[1] * fps) / fps, 4))
+        extra.transition_in = Transition()
+        ed.clips[out_i] = extra
     elif how != "untouched":
         raise AssertionError(how)
     path = wsx.tmp / f"pin_{how}.otio"
@@ -769,6 +872,153 @@ def test_a_pin_the_editor_changed_does_not_read_applied_on_the_human_stage(wsx, 
         assert f"pin: changed by the editor: {want}" in junction_detail(j)
     if how == "trim":
         assert held, "the trimmed junction is still in the cut and must say the pin changed"
+
+
+def run_tui_on(ws: Path, body):
+    """Open the Edit view of ``ws`` headless, on the human stage, and call ``await body(app, view, pilot)``."""
+    from matchcut.tui.app import MatchcutApp
+    from matchcut.tui.views.edit import EditView
+    from tests.tui.conftest import run_async, wait_for
+
+    cfg = PipelineConfig.load(ws / "config.json")
+    cfg.workspace = str(ws)
+
+    async def go():
+        app = MatchcutApp(cfg)
+        async with app.run_test(size=(140, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-1] == "human" and view.current_stage() == "human"
+            await body(app, view, pilot)
+
+    run_async(go())
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+@pytest.mark.parametrize("how,reason", [
+    ("delete", "clip removed (shot {in_shot})"),
+    ("separate", "clips are no longer adjacent"),
+    ("swap", "clips are no longer adjacent"),
+    ("replace_other", None),
+])
+def test_the_cli_footer_and_tag_and_the_tui_header_and_badge_say_the_same_about_a_changed_pin(wsx, capsys, how, reason, with_origins):
+    """The reviewer's I2: every stored pin is reported once on the human stage with its reason, by one engine answer."""
+    from matchcut.pipeline import cli
+
+    pin = origin_pinned_workspace(wsx, with_origins)
+    human, jf, snapped = edit_around_the_pin(wsx, pin, how)
+    want = reason.format(in_shot=pin.in_shot) if reason else (
+        f"other footage (shot {pin.out_shot} is a different clip now)" if with_origins else None)
+    outcome = pin_outcome(human, pin)
+    assert outcome.action == "pin_changed", outcome
+    if want:
+        assert outcome.detail == want, outcome.detail
+    else:
+        assert re.fullmatch(r"cut trimmed by \d+ frames? \(out\)", outcome.detail), outcome.detail  # a shot-based pin: a clip of its shot is there, elsewhere
+    why = outcome.detail
+    # the CLI: one footer line for each stored pin, and the tag on one junction (the one the pin sits at)
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    listing = capsys.readouterr().out.splitlines()
+    footer = [l for l in listing if l.startswith("pin s")]
+    assert footer == [f"pin s{pin.out_shot}->s{pin.in_shot}: changed by the editor: {why}"], footer
+    tagged = [l for l in listing if "pin-changed" in l]
+    assert len(tagged) == 1 and " pinned" not in tagged[0].replace("pin-changed", "")
+    stages = load_stage_timelines(wsx.ws)
+    site = next(j for j in build_junctions(stages) if j.pin_lost)
+    assert site.pin_lost == why and tagged[0].startswith(f"{site.index + 1:>3}  {site.out_clip}->{site.in_clip}")
+    assert cli.main(["junctions", str(wsx.ws), "--index", str(site.index + 1)]) == 0
+    detail = capsys.readouterr().out
+    assert f"pin: changed by the editor: {why}" in detail and f"pin s{pin.out_shot}->s{pin.in_shot}: changed by the editor: {why}" in detail
+
+    async def body(app, view, pilot):
+        header = str(app.query_one("#edit-header").content)
+        assert f"pin s{pin.out_shot}->s{pin.in_shot} changed by the editor: {why}" in header, header
+        target = next(k for k, j in enumerate(view.junctions) if j.pin_lost)
+        assert target == site.index
+        await pilot.press(*(["right"] * (target - view.selected)))
+        panel = str(app.query_one("#junction-panel").content)
+        badges = panel.splitlines()[1]
+        assert f"pin changed by the editor: {why}" in badges and "pinned (" not in badges and "pending" not in badges, badges
+        assert "locked by matchcut" not in badges and "locked by the editor" not in badges
+
+    run_tui_on(wsx.ws, body)
+
+
+@pytest.mark.parametrize("with_origins", [True, False])
+def test_a_keyed_slip_inside_the_shot_keeps_the_pinned_junction_history_and_reports_the_pin(wsx, capsys, with_origins):
+    """The reviewer's I3: the clip keeps its key and slips off its old range inside its shot; the clips were adjacent all along."""
+    pin = origin_pinned_workspace(wsx, with_origins)
+    human, jf, snapped = edit_around_the_pin(wsx, pin, "slip")
+    assert not any(d.action in ("removed", "added") for d in human.history[len(snapped.history):]), [d.detail for d in human.history[-3:]]
+    outcome = pin_outcome(human, pin)
+    assert outcome.action == "pin_changed" and re.fullmatch(r"cut trimmed by \d+ frames \(out\)", outcome.detail), outcome
+    js = build_junctions(load_stage_timelines(wsx.ws))
+    site = next(j for j in js if j.pin_lost)
+    assert (site.out_clip, site.in_clip) == (jf.out_clip, jf.in_clip) and site.pin_lost == outcome.detail
+    assert site.states[0].stage == "roughcut" and site.states[-1].stage == "human" and not site.why().startswith("made adjacent by human")
+    assert any(d.pass_name == "editor" for d in site.decisions)  # its inherited history is still its own
+
+    async def body(app, view, pilot):
+        await pilot.press(*(["right"] * (site.index - view.selected)))
+        panel = str(app.query_one("#junction-panel").content)
+        badges = panel.splitlines()[1]
+        assert f"pin changed by the editor: {outcome.detail}" in badges and "locked by" not in badges and "pinned (" not in badges, badges
+        assert "made adjacent by human" not in panel
+
+    run_tui_on(wsx.ws, body)
+
+
+def test_swapping_two_clips_gives_the_reversed_pair_no_pass_verdict_of_the_old_order(wsx):
+    """The reviewer's I1 on a real workspace: c003->c002 used to show the dissolve the transitions pass gave c002->c003."""
+    final, snapped = final_of(wsx)
+    ed = snapped.copy()
+    ed.clips[1], ed.clips[2] = ed.clips[2], ed.clips[1]
+    for c in ed.clips:
+        c.transition_in = Transition()
+    files = write_edited_files(wsx, ed, wsx.tmp, rename=False)
+    res = import_timeline(wsx.ws, wsx.cfg, files["otio"])
+    assert "reorder" in [d.action for d in res.decisions]  # (the file has no dissolves left, so there are trims and transition changes too)
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(load_stage_timelines(wsx.ws))}
+    reversed_pair = js[("c003", "c002")]
+    assert reversed_pair.why() == "made adjacent by human: reordered c003, c002", reversed_pair.why()
+    assert [s.stage for s in reversed_pair.states] == ["human"] and not any(d.pass_name != "human" for d in reversed_pair.decisions)
+    assert js[("c001", "c003")].why() == "made adjacent by human: reordered c001, c003"
+
+
+def test_every_stored_pin_is_reported_once_on_the_human_stage_applied_or_not(wsx, capsys):
+    from matchcut.pipeline import cli
+
+    pin = origin_pinned_workspace(wsx, True)
+    edit_around_the_pin(wsx, pin, "untouched")
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    assert [l for l in capsys.readouterr().out.splitlines() if l.startswith("pin s")] == [f"pin s{pin.out_shot}->s{pin.in_shot}: applied"]
+    PinStore(wsx.ws).put(Pin(pin.in_shot, pin.out_shot, 1.0, 2.0))  # a pin the last run never saw
+    assert cli.main(["junctions", str(wsx.ws), "--index", "1"]) == 0
+    assert [l for l in capsys.readouterr().out.splitlines() if l.startswith("pin s")] == [
+        f"pin s{pin.out_shot}->s{pin.in_shot}: applied", f"pin s{pin.in_shot}->s{pin.out_shot}: pending (run again to apply)"]
+    # the canonical stages print no footer
+    (wsx.ws / "human.json").rename(wsx.ws / "human.off")
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    assert not [l for l in capsys.readouterr().out.splitlines() if l.startswith("pin s")]
+
+
+def test_a_changed_pin_releases_the_lock_it_put_on_the_human_clips(wsx, capsys):
+    """The reviewer's M1: the human clips were copied with the pin's locks; after a trimmed pin nothing keeps them."""
+    from matchcut.pipeline import cli
+
+    pin = origin_pinned_workspace(wsx, True)
+    human, jf, snapped = edit_around_the_pin(wsx, pin, "trim")
+    out_c = next(c for c in human.clips if clip_origin(c) == pin.out_origin)
+    in_c = next(c for c in human.clips if clip_origin(c) == pin.in_origin)
+    assert not out_c.locked_out and not in_c.locked_in and "pinned" not in out_c.tags and "pinned" not in in_c.tags
+    assert cli.main(["junctions", str(wsx.ws)]) == 0
+    line = next(l for l in capsys.readouterr().out.splitlines() if "pin-changed" in l)
+    assert " locked" not in line
+    # a pin the editor left alone keeps its lock
+    other = Pin(pin.out_shot, pin.in_shot, pin.out_time, pin.in_time, out_origin=pin.out_origin, in_origin=pin.in_origin)
+    human2, _, _ = edit_around_the_pin(wsx, other, "untouched")
+    assert next(c for c in human2.clips if clip_origin(c) == pin.out_origin).locked_out
 
 
 def test_junctions_cli_says_a_pin_changed_by_the_editor_is_not_pinned(wsx, capsys):

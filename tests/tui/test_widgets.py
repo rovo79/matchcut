@@ -409,6 +409,26 @@ def test_a_locked_pin_is_badged_locked_by_the_editor():
     assert "locked by the editor" in plain and "pinned (locked)" in plain
 
 
+def test_a_lock_that_was_a_pins_is_never_called_matchcuts_once_the_pin_changed():
+    """The reviewer's M5: the lock flags of the human clips come from the pin; when the pin changed there is no lock to attribute to matchcut."""
+    j, d = _pinned_junction("locked")
+    changed = Decision("human", "pin_changed", d.clip_ids, "cut trimmed by 3 frames (out)", None, dict(d.data))
+    pin = Pin(0, 1, 2.0, 3.0, "locked")
+    # the junction does not know the pin (pin_lost empty), only the pin's outcome does
+    assert j.current.locked and not j.pin_lost
+    plain = render_inspector(j, "final", pin, pin_decision=changed).plain
+    badge_line = plain.splitlines()[1]
+    assert "pin changed by the editor: cut trimmed by 3 frames (out)" in badge_line
+    assert "locked by matchcut" not in plain and "locked by the editor" not in badge_line
+    # and the junction that knows it says the same
+    j.pin_lost = "cut trimmed by 3 frames (out)"
+    assert "locked by" not in render_inspector(j, "final", None).plain.splitlines()[1]
+    # an ordinary lock without a pin is still matchcut's
+    j2, _ = _pinned_junction("locked")
+    j2.decisions = []
+    assert "locked by matchcut" in render_inspector(j2, "final", None).plain
+
+
 def test_the_inspector_never_prints_negative_zero():
     j, d = _pinned_junction("locked")
     j.states[-1].in_time = 2.99995  # a sub-frame rounding difference

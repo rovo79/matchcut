@@ -319,25 +319,31 @@ Human-stage integrity (the rulings of this wave):
 
 - **Pins.** The human history repeats the canonical stage's `editor` decision whatever the editor did, so it used to make a deleted or trimmed pin read applied. The engine now judges the
   editor's cut (`editorial.pin_change` / `pin_outcome`, no interchange import): a pin is applied on `human` only while the cut has the same two clips (the pin's clip instances;
-  clips of the same shots for a pin without them), adjacent, with both cut points unchanged to within half a frame; otherwise it is **changed by the editor** with a one-line
-  reason (`clip removed (shot N)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, `other footage (shot N is a different clip now)`). Used by the Edit view
-  (badge and header), the `junctions` CLI (tag `pin-changed`, a detail line) and `Junction.pinned`. Tests: the editor deletes a pinned clip, trims the pinned cut by 3 frames, separates
-  the pair by inserting a clip, swaps it, leaves it untouched (still applied; a move under half a frame too); a pin with and without clip instances; the Edit view panel and header on an imported workspace;
-  the CLI listing.
-- **Inherited decisions.** A human junction follows the earlier stages (states, pass decisions, the pass's "why") only when both its clips are instances the canonical stages
-  have (`clip_origin`). A junction with an added, replaced or copied clip, or a new pairing, shows only the human decisions and `made adjacent by human: ...`. Tests (`test_junctions.py`):
-  a replaced clip does not borrow the verdict of the clip it overlaps; a reorder shows no verdict about the old pairings; untouched junctions keep their inherited "why".
-- **Ambiguous mapping.** On import a clip key carried by more than one clip of the file, and a keyless clip that overlaps two canonical clips by the same number of frames, are read as
-  new clips (`hNNN`, origin `human:hNNN`) with a one-line note naming the candidates; a clear winner still gets the match. Tests: both through OTIO and EDL, and the winner case.
+  clips of the same shots for a pin without them), adjacent and in that order, with both cut points unchanged to within half a frame; otherwise it is **changed by the editor** with a one-line
+  reason (`clip removed (shot N)`, `cut trimmed by 3 frames (out)`, `clips are no longer adjacent`, `clip split or copied (shot N)`, `other footage (shot N is a different clip now)`).
+  **Every stored pin is reported once** through one engine helper (`editorial.pin_states`): the `junctions` CLI ends with a line per pin (`applied`, `changed by the editor: <reason>`, `not placed`, `pending`),
+  the Edit view header lists the changed pins with their reasons, and the junction where the pin now sits (its pair, else after its outgoing clip, else before its incoming clip) carries the CLI tag
+  `pin-changed` and the Edit badge `pin changed by the editor: <reason>`. The locks the pin put on the human clips are cleared in `human.json`, and a lock that was a pin's is never badged "locked by matchcut".
+  Tests: engine units (`test_editorial.py`: untouched, nudged under half a frame, trim, delete, separate, swap, split or copied, other footage, with and without clip instances, the site of a pin,
+  `pin_states`); real imports (`test_workspace.py`: delete, separate, swap, replace-other and keyed slip, each with and without clip instances, where the CLI footer, the CLI tag, the Edit header and the
+  Edit badge are compared, and the released locks); the inspector (`test_widgets.py`).
+- **Inherited decisions.** A human junction follows the earlier stages (states, pass decisions, the pass's "why") only when both its clips are instances the canonical stages have and a canonical stage
+  has those two instances adjacent in that order (earlier stages are located by clip instance first, lineage only when an instance is gone). A junction with an added, replaced or copied clip, a new
+  pairing or a swapped pair shows only the human decisions and `made adjacent by human: ...` (`reordered c003, c002` for a reorder). Tests (`test_junctions.py`, `test_workspace.py`): a replaced clip does not
+  borrow the verdict of the clip it overlaps; a reorder and a swap show no verdict about the old pairings (also for a pinned pair); a keyed slip inside the shot keeps its junction's history and why;
+  untouched junctions keep their inherited "why".
+- **Ambiguous mapping.** On import a clip key carried by more than one clip of the file, a keyless clip that overlaps two canonical clips by the same number of frames, and a canonical clip whose best
+  unkeyed candidates tie (a clip razored into equal halves) are read as new clips (`hNNN`, origin `human:hNNN`) with a one-line note naming the candidates; a clear winner still gets the match. Tests: through OTIO
+  and EDL, with the winner cases.
 - **A key on other footage.** A known clip key is trusted only while the edited range still overlaps the shot of the canonical clip. A key (with its shot metadata) carried onto the footage of
   another shot is a new clip (`clip key ... now covers shot 7 (12.20-13.00s), not shot 3: read as a new clip (h001), ...`, its shot taken from the range) and the canonical clip reads as removed;
-  a slip anywhere inside the same shot is still a trim. Tests: OTIO, FCPXML and EDL, both cases.
+  a slip anywhere inside the same shot is still a trim. Without `shots.json` the key is trusted and the import says it could not check. Tests: OTIO, FCPXML and EDL, both cases, and the no-`shots.json` note.
 - **Valid provenance is preserved.** Everything that maps unambiguously keeps its id, key and history; canonical files and `provenance.json` stay byte-identical after an import
   (the existing tests, and the hash comparison in the 84-edit proof).
 
 Verification at the stabilization commit: `python -m pytest tests/interchange tests/pipeline tests/tui tests/review -q`, run per directory:
-interchange 401 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
-`test_timecode` 9, `test_workspace` 98), pipeline 186, tui 147, review 87: 821 passed, 0 failed (the two known load-flaky TUI tests passed on the first run; the optional OpenTimelineIO and
+interchange 420 passed (`test_cli` 14, `test_common` 61, `test_docs` 10, `test_edl` 37, `test_fcpxml` 57, `test_fidelity` 24, `test_otio` 61, `test_resolve` 30,
+`test_timecode` 9, `test_workspace` 117), pipeline 192, tui 148, review 87: 847 passed, 0 failed (one of the two known load-flaky TUI tests, `test_run_with_checkpoints_advances_the_ladder`, failed once under load and passed on the rerun; the optional OpenTimelineIO and
 `xmllint` checks ran). The new pin, inherited-decision and ambiguity tests are in `tests/pipeline/test_editorial.py`, `tests/pipeline/test_junctions.py`, `tests/interchange/test_workspace.py` and `tests/tui/test_edit.py`.
 
 The tester's 84-edit proof was re-run against this commit with the tester's own `scripts/editor.py`: fresh workspaces made with the report's commands (a25 at 25 fps, b2398 at 23.976 fps
@@ -345,6 +351,5 @@ with music, c2997 at 29.97 fps drop-frame with a start timecode), 14 edit sets, 
 header, every decision line and the note count equal to what the tester recorded (the control sets give 0 decisions), and every canonical file (stage and pass files, analysis,
 `exports/` with `provenance.json`, `fidelity.*` and `.stages/`) byte-identical before and after every import.
 
-Limits that remain: without `shots.json` a known key is trusted whatever its range; two equal range candidates the other way round
-(one canonical clip over two unkeyed halves) still go to the nearer by position; the pin check compares source times, not what an editor shows after a transition trim. Nothing here
-was opened in an editor.
+Limits that remain: without `shots.json` a known key is trusted whatever its range (the import says so); the pin check compares source times, not what an editor shows after a transition trim; a shot-based pin (no clip instances) is
+judged by the nearest pair of its shots. Nothing here was opened in an editor.

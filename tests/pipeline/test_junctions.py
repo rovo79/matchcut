@@ -611,3 +611,79 @@ def test_a_reorder_that_creates_a_pairing_shows_no_verdict_about_the_old_pairing
     # the untouched pair keeps its verdict
     kept = build_junctions([("final", final), ("human", human_from(final, [by_id[i] for i in ["c001", "c002", "c003", "c005", "c004"]], []))])
     assert next(j for j in kept if (j.out_clip, j.in_clip) == ("c002", "c003")).why() == "matchcut: verdict about c002->c003"
+
+
+def staged(n=4, pinned=False):
+    """roughcut, a pass that recorded a dissolve between c002 and c003 (and, optionally, an editor pin on c001->c002), and final: the same four clips."""
+    def clips():
+        return [clip(f"c{k:03d}", k, 4.0 * k, 4.0 * k + 2.0) for k in range(1, n + 1)]
+    pin = {"out_shot": 1, "in_shot": 2, "out_time": 6.0, "in_time": 8.0, "origin": "locked", "note": "", "out_origin": "1@4.000-6.000", "in_origin": "2@8.000-10.000",
+           "out": 6.0, "in_": 8.0}
+    decisions = [Decision("transitions", "dissolve", ["c002", "c003"], "beat b1 -> b2: dissolve 0.30s")] + (
+        [Decision("editor", "pinned", ["c001", "c002"], "locked by the editor: out 6.00s, in 8.00s", None, pin)] if pinned else [])
+    rough = stamped("roughcut", clips())
+    passed = stamped("transitions", clips(), decisions)
+    final = stamped("final", clips(), decisions)
+    for t in (passed, final):
+        if pinned:
+            t.clips[0].locked_out = t.clips[1].locked_in = True
+    return [("roughcut", rough), ("transitions", passed), ("final", final)]
+
+
+def swapped_human(stages, a, b):
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin, locked_in=c.locked_in, locked_out=c.locked_out) for c in final.clips]
+    ia, ib = (next(k for k, c in enumerate(clips) if c.id == x) for x in (a, b))
+    clips[ia], clips[ib] = clips[ib], clips[ia]
+    order = [c.id for c in clips]
+    return human_from(final, clips, [Decision("human", "reorder", order, "human reordered clips: " + " ".join(order))])
+
+
+def test_a_reversed_pair_of_known_clips_borrows_no_inherited_decision():
+    """The reviewer's I1: swapping c002 and c003 made c003->c002 show the pass's dissolve between c002 and c003."""
+    stages = staged()
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", swapped_human(stages, "c002", "c003"))])}
+    assert set(js) == {("c001", "c003"), ("c003", "c002"), ("c002", "c004")}
+    for pair, j in js.items():
+        assert not any(d.pass_name == "transitions" for d in j.decisions) and "dissolve" not in j.why(), (pair, j.why())
+        assert [s.stage for s in j.states] == ["human"], pair
+    assert js[("c003", "c002")].why() == "made adjacent by human: reordered c003, c002"
+    assert js[("c001", "c003")].why() == "made adjacent by human: reordered c001, c003"
+
+
+def test_a_reversed_pinned_pair_is_not_held_by_the_editor_and_shows_no_pin_why():
+    stages = staged(pinned=True)
+    human = swapped_human(stages, "c001", "c002")
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", human)])}
+    reversed_pair = js[("c002", "c001")]
+    assert not reversed_pair.pinned and not any(d.pass_name == "editor" for d in reversed_pair.decisions)
+    assert reversed_pair.why() == "made adjacent by human: reordered c002, c001"
+    # the pin changed, and the junction where its outgoing clip now sits says so (the one after c001)
+    sited = js[("c001", "c003")]
+    assert sited.pin_lost == "clips are no longer adjacent" and sited.pin_key == (1, 2) and not sited.pinned
+
+
+def test_a_keyed_slip_inside_the_shot_keeps_the_junction_its_history_and_why():
+    """The reviewer's I3: c002 keeps its key and moves to other footage of its shot; the clips were adjacent all along."""
+    stages = staged(pinned=True)
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin, locked_in=c.locked_in, locked_out=c.locked_out) for c in final.clips]
+    clips[1].source_in, clips[1].source_out = 10.4, 11.0  # c002 (shot 2, 8.0-10.0 s) slipped to other footage of its own shot: no overlap with the old range
+    human = human_from(final, clips, [Decision("human", "trim", ["c002"], "human trimmed c002: in +60f, out +25f")])
+    js = {(j.out_clip, j.in_clip): j for j in build_junctions(stages + [("human", human)])}
+    j = js[("c001", "c002")]
+    assert [s.stage for s in j.states] == ["roughcut", "transitions", "final", "human"] and j.why().startswith("editor:"), (j.states, j.why())
+    assert j.pin_lost.startswith("cut trimmed by") and not j.pinned
+    other = js[("c002", "c003")]
+    assert other.why() == "transitions: beat b1 -> b2: dissolve 0.30s" and other.pin_lost == ""
+
+
+def test_a_human_reorder_is_named_only_when_nothing_more_specific_made_the_clips_adjacent():
+    stages = staged()
+    final = stages[-1][1]
+    clips = [clip(c.id, c.shot_index, c.source_in, c.source_out, origin=c.origin) for c in final.clips]
+    del clips[2]  # c003 removed, and the order is also reported: the removal is the story
+    human = human_from(final, clips, [Decision("human", "reorder", ["c001", "c002", "c004"], "human reordered clips: c001 c002 c004"),
+                                       Decision("human", "removed", ["c003"], "human removed c003 (shot 3, 12.00-14.00s)")])
+    j = next(j for j in build_junctions(stages + [("human", human)]) if (j.out_clip, j.in_clip) == ("c002", "c004"))
+    assert j.why() == "made adjacent by human: removed c003 (shot 3, 12.00-14.00s)"

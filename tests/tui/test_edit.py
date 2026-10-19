@@ -434,7 +434,7 @@ def test_an_imported_human_stage_shows_a_pin_the_editor_changed_as_changed_not_a
                 view = app.query_one(EditView)
                 await wait_for(pilot, lambda: bool(view.junctions))
                 assert view.stages[-1] == "human" and view.current_stage() == "human"
-                assert "1 pin(s) changed by the editor" in str(app.query_one("#edit-header").content)
+                assert f"pin s{key[0]}->s{key[1]} changed by the editor: " in str(app.query_one("#edit-header").content)
                 if how == "trim":
                     await pilot.press(*(["right"] * select_pair(view, key)))
                     panel = str(app.query_one("#junction-panel").content)

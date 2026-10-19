@@ -39,7 +39,9 @@ def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: 
     out: List[str] = []
     if j.match_type and shown.locked:
         out.append(f"MATCH CUT ({j.match_type})")
-    if shown.locked and not j.pin_lost:  # (a pin the editor's cut no longer holds says so in the pin badge; the lock was the pin's)
+    # (a lock that was a pin's, which the editor's cut no longer holds, is not matchcut's: the pin badge says what happened to it)
+    pin_gone = bool(j.pin_lost) or (pin_decision is not None and pin_decision.action == "pin_changed")
+    if shown.locked and not pin_gone:
         if j.pinned:
             out.append(f"{j.pin_origin or 'locked'} by the editor")
         else:
