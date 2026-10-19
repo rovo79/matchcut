@@ -162,6 +162,9 @@ class EditView(Vertical):
         if j is None:
             return None
         pair = (j.out_shot, j.in_shot)
+        # (the stage file may have been rewritten since the junctions were built: its clips there are not this junction's)
+        if tl is not None and j.index + 1 < len(tl.clips) and (tl.clips[j.index].id, tl.clips[j.index + 1].id) != (j.out_clip, j.in_clip):
+            tl = None
         origins = self._origins(tl, j.index)
         before = self.junctions[: j.index]
         return _Identity(pair, sum((o.out_shot, o.in_shot) == pair for o in before), j.index, origins,
@@ -408,6 +411,8 @@ class EditView(Vertical):
             self._preparing.discard(key)
 
     def _review_request(self, ab: bool) -> None:
+        if self._state is not None:
+            self.refresh_from_state(self._state)  # a cut rewritten outside the app (no run event behind it) is picked up before it is reviewed
         key, j, stage = self._review_key(), self.current_junction(), self.current_stage()
         if key is None or j is None or stage is None or self._state is None:
             self.app.notify("no junction selected", severity="warning")

@@ -307,6 +307,32 @@ def test_a_preparation_that_finishes_after_the_cut_changed_is_not_a_pair_to_togg
     run_async(body())
 
 
+def test_a_cut_rewritten_outside_the_app_after_the_pair_was_prepared_is_not_toggled(mock_workspace, tmp_path, fakes):
+    import os
+    from matchcut.pipeline.timeline import Timeline
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            await pilot.press("a")
+            await wait_for(pilot, lambda: view._ab_key is not None)
+            path = ws / "final.json"  # another process (the import CLI) rewrites the cut: no run event, so no refresh
+            tl = Timeline.load(path)
+            tl.clips[0].source_out -= 0.04
+            tl.save(path)
+            st = os.stat(path)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+            await pilot.pause(0.5)
+            await pilot.press("a")
+            ctl = fakes.controller()
+            await wait_for(pilot, lambda: len(fakes.prepared) == 2)
+            assert "toggle" not in ctl.calls, ctl.calls
+
+    run_async(body())
+
+
 def test_two_junctions_with_the_same_shot_pair_are_reviewed_separately(mock_workspace, tmp_path, fakes):
     from matchcut.pipeline.timeline import Timeline
     ws = own_copy(mock_workspace, tmp_path)

@@ -625,3 +625,87 @@ def test_switching_stages_follows_the_same_clip_instances_to_another_index(mock_
             assert view.selected == 0
 
     run_async(body())
+
+
+def _select_nth_repeat(view, pair, n):
+    repeats = [j.index for j in view.junctions if (j.out_shot, j.in_shot) == pair]
+    return repeats, repeats[n]
+
+
+def test_switching_stages_matches_the_shot_pair_occurrence_when_the_instances_differ(mock_workspace, tmp_path):
+    """Rule (b): the copies carry other origins in the pass than in the final cut, so only the occurrence finds the second one."""
+    ws = own_copy(mock_workspace, tmp_path)
+    _append_copies(ws / "final.json", [("c001", "c901", "fin-a"), ("c002", "c902", "fin-b")])
+    _append_copies(sorted((ws / "passes").glob("*.json"))[-1], [("c001", "c901", "pas-a"), ("c002", "c902", "pas-b")])
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            repeats, second = _select_nth_repeat(view, (view.junctions[0].out_shot, view.junctions[0].in_shot), 1)
+            assert len(repeats) == 2
+            while view.selected != second:
+                await pilot.press("right")
+            final = view.current_stage()
+            await pilot.press("left_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() != final)
+            assert view.selected == second
+            await pilot.press("right_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() == final)
+            assert view.selected == second
+
+    run_async(body())
+
+
+def test_switching_stages_takes_the_nearest_junction_with_the_shot_pair_when_the_occurrence_is_missing(mock_workspace, tmp_path):
+    """Rule (c): the third occurrence has no counterpart in the pass (which has two), so the pair's junction nearest the old index is kept."""
+    ws = own_copy(mock_workspace, tmp_path)
+    _append_copies(ws / "final.json", [("c001", "c901", "fin-a"), ("c002", "c902", "fin-b"), ("c001", "c903", "fin-c"), ("c002", "c904", "fin-d")])
+    _append_copies(sorted((ws / "passes").glob("*.json"))[-1], [("c001", "c901", "pas-a"), ("c002", "c902", "pas-b")])
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            repeats, third = _select_nth_repeat(view, (view.junctions[0].out_shot, view.junctions[0].in_shot), 2)
+            assert len(repeats) == 3
+            while view.selected != third:
+                await pilot.press("right")
+            await pilot.press("left_square_bracket")
+            await wait_for(pilot, lambda: view.current_stage() != view.stages[-1])
+            pair = (view.junctions[0].out_shot, view.junctions[0].in_shot)
+            earlier = [j.index for j in view.junctions if (j.out_shot, j.in_shot) == pair]
+            assert len(earlier) == 2 and earlier[1] < third
+            assert view.selected == earlier[1], (view.selected, earlier)  # the nearest, not the first
+
+    run_async(body())
+
+
+def test_the_identity_of_the_selection_ignores_a_stage_file_rewritten_since_the_junctions_were_built(mock_workspace, tmp_path):
+    import os
+    ws = own_copy(mock_workspace, tmp_path)
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: len(view.junctions) >= 3)
+            j, stage = view.current_junction(), view.current_stage()
+            built = view._state.timeline(stage)
+            instances = (clip_origin(built.clip_by_id(j.out_clip)), clip_origin(built.clip_by_id(j.in_clip)))
+            path = ws / "final.json"
+            tl = Timeline.load(path)
+            tl.clips = tl.clips[2:] + tl.clips[:2]  # rewritten behind the view's back: other clips now sit at j.index
+            tl.save(path)
+            st = os.stat(path)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+            ident = view._identity(view._state.timeline(stage))
+            assert ident.origins in (None, instances)  # never the instances of the clips that moved into j.index
+            assert ident.pair == (j.out_shot, j.in_shot)
+
+    run_async(body())
