@@ -272,6 +272,37 @@ def test_a_change_to_the_workspace_forgets_the_prepared_pair(mock_workspace, tmp
     run_async(body())
 
 
+def test_two_junctions_with_the_same_shot_pair_are_reviewed_separately(mock_workspace, tmp_path, fakes):
+    from matchcut.pipeline.timeline import Timeline
+    ws = own_copy(mock_workspace, tmp_path)
+    final = Timeline.load(ws / "final.json")
+    first, second = final.clips[0], final.clips[1]
+    for c, new_id in ((first, "c901"), (second, "c902")):  # the same two shots again at the end: one shot pair, two junctions
+        dup = type(c).from_dict(c.to_dict())
+        dup.id = new_id
+        final.clips.append(dup)
+    final.save(ws / "final.json")
+
+    async def body():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            view = await edit_ready(pilot, app)
+            pair = (view.current_junction().out_shot, view.current_junction().in_shot)
+            later = [j.index for j in view.junctions if (j.out_shot, j.in_shot) == pair and j.index != view.current_junction().index]
+            assert later, "the fixture must repeat the shot pair"
+            await pilot.press("a")
+            await wait_for(pilot, lambda: view._ab_key is not None and status_of(app).startswith("playing A"))
+            while view.current_junction().index != later[0]:
+                await pilot.press("right")
+            await pilot.press("a")
+            # the second junction is prepared and played, never toggled as if it were the first
+            await wait_for(pilot, lambda: len(fakes.prepared) == 2)
+            assert fakes.prepared[1]["index"] == later[0]
+            assert "toggle" not in fakes.controller().calls
+
+    run_async(body())
+
+
 class FakeSession:
     def __init__(self, sessions):
         self.open = True
