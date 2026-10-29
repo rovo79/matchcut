@@ -13,7 +13,12 @@ MODEL_IDS = re.compile(r"claude-(opus|sonnet|haiku)|\b(opus|sonnet|haiku)[- ]?\d
 
 def test_the_probe_doc_says_it_is_not_live_and_the_gates_are_pending():
     text = PROBE.read_text(encoding="utf-8")
-    assert text.count("not run against a live Resolve") >= 1 and "**M2c human gate: PENDING.**" in text
+    assert "**Status: run once against a live Resolve: DaVinci Resolve 21.0.2.4 free, macOS, from the Py3 console (2026-10-29).**" in text
+    assert "**M2c human gate: PENDING** for the bridge itself" in text and "## First live run (2026-10-29)" in text
+    for needle in ("one machine and one footage file", "Studio, other versions,\nreal camera footage, timecoded media and audio are not verified",
+                   "FCPXML 1.10 `Timeline.Export` failed", "0 of 4", "4 of 4", "90000 / 01:00:00:00", "frame 0 / 00:00:00:00",
+                   "reports the media's last frame", "no `ResolveMCP` binary file"):
+        assert needle in text, needle
     for gate in ("M2a human gate: PENDING", "M2b human gate: PENDING", "M1 human gate: PENDING"):
         assert gate in text, gate
     assert "lossless" not in text.lower() and not MODEL_IDS.search(text) and "File > Close Project" not in text
@@ -54,7 +59,7 @@ def test_interop_and_readme_point_to_the_probe():
     interop = (DOCS / "INTEROP.md").read_text(encoding="utf-8")
     assert "### Resolve capability probe (M2c-0)" in interop and "[M2C-PROBE.md](M2C-PROBE.md)" in interop
     readme = (DOCS.parent / "README.md").read_text(encoding="utf-8")
-    assert "python -m matchcut.resolve probe WORKSPACE" in readme and "docs/M2C-PROBE.md" in readme and "not run against a live Resolve" in readme
+    assert "python -m matchcut.resolve probe WORKSPACE" in readme and "docs/M2C-PROBE.md" in readme and "run once against a live Resolve, 21.0.2.4 free" in readme
 
 
 def test_the_console_line_in_the_doc_is_what_probe_prints():

@@ -56,6 +56,7 @@ class RouteResult:
     markers: str = "-"
     markers_by_id: str = "untested"  # yes | no | untested (the file's markers or the probe's own)
     own_markers: str = "untested"  # yes | no | untested: the markers the probe added itself (build, import-otio)
+    file_markers: str = "untested"  # yes | no | untested: the markers the imported file brought
     navigation: str = "-"
     navigation_ok: Optional[bool] = None
     transition_items: int = 0
@@ -168,10 +169,30 @@ def _reimport(scratch: Path, cfg: PipelineConfig, path: Path, stage: str) -> Tup
 
 
 # -- one route -----------------------------------------------------------------------------------------------------------------
-def _track(rb: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """(clips, transition items) of video track 1: an item whose recorded type is "transition" is not a clip."""
+def _spans_cut(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[int]:
+    """The record frame (from the timeline start) of an expected cut that ``v`` lies across (start < cut < end), or None."""
+    start = rb.get("start_frame")
+    if not (_num(v.get("start")) and _num(v.get("end")) and _num(start)):
+        return None
+    return next((c["rec_in"] for c in exp["clips"][1:] if v["start"] < start + c["rec_in"] < v["end"]), None)
+
+
+def _is_transition(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[str]:
+    """Why ``v`` is a transition item, or None. Its recorded type says so when GetType was called; without GetType, an item with no
+    source frames at all that lies across a cut of the expected clip list is one (its name is recorded, never relied on)."""
+    if v.get("type") == "transition":
+        return "GetType() is \"transition\""
+    if v.get("type") in (None, NOT_CALLED) and v.get("source_start_frame") is None and v.get("source_end_frame") is None:
+        cut = _spans_cut(v, rb, exp)
+        if cut is not None:
+            return f"no source frames, spans the cut at {cut}; name {v.get('name')!r}"
+    return None
+
+
+def _track(rb: Dict[str, Any], exp: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(clips, transition items) of video track 1: a transition item (``_is_transition``) is not a clip."""
     items = [v or {} for v in ((rb.get("video") or [[]])[0] if rb.get("video") else [])]
-    return [v for v in items if v.get("type") != "transition"], [v for v in items if v.get("type") == "transition"]
+    return [v for v in items if not _is_transition(v, rb, exp)], [v for v in items if _is_transition(v, rb, exp)]
 
 
 def _uniform(deltas: Optional[List[int]], value: int) -> bool:
@@ -180,10 +201,11 @@ def _uniform(deltas: Optional[List[int]], value: int) -> bool:
 
 def _frames(r: RouteResult, rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[bool]:
     clips = exp["clips"]
-    video, transitions = _track(rb)
+    video, transitions = _track(rb, exp)
     r.transition_items = len(transitions)
     if transitions:
-        r.notes.append(f"{len(transitions)} transition items read back (type \"transition\"), counted apart from the clips")
+        r.notes.append(f"{len(transitions)} transition items read back, counted apart from the clips; identified by: "
+                       + "; ".join(_is_transition(v, rb, exp) for v in transitions))
     if len(video) != len(clips):
         r.lost.append(f"clip count {len(video)}, expected {len(clips)}")
         return False
@@ -207,6 +229,18 @@ def _frames(r: RouteResult, rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional
     exact = lambda label: deltas[label] is not None and not any(deltas[label])  # noqa: E731
     explained: set = set()
     n = len(clips)
+    # a clip that ends at the media's last frame: GetSourceEndFrame reports that frame (inclusive) where it is exclusive elsewhere
+    media = int(exp["source"].get("duration_frames") or 0)
+    so = deltas["source out"]
+    if so is not None and not _uniform(so, -1) and media:
+        at_end = [k for k, (v, c) in enumerate(zip(video, clips))
+                  if so[k] == -1 and c["vis_out"] == media and v.get("source_end_frame") == v.get("source_start_frame") + v.get("duration") - 1
+                  and (deltas["record start"] or [None] * n)[k] == 0 and (deltas["duration"] or [None] * n)[k] == 0]
+        for k in at_end:
+            so[k] = 0
+        if at_end:
+            r.notes.append(f"GetSourceEndFrame reports the media's last frame for a clip that ends at the media's end (exclusive elsewhere): "
+                           f"clip {', '.join(str(k + 1) for k in at_end)} ({media} frames of media)")
     # AppendToTimeline's endFrame taken as inclusive: every built clip one frame longer, with the source in and the record start exact
     if r.route in BUILD_ROUTES and exact("record start") and exact("source in") and _uniform(deltas["duration"], 1) and \
             (deltas["source out"] is None or _uniform(deltas["source out"], 1) or _uniform(deltas["source out"], 0)):
@@ -253,7 +287,7 @@ def _dissolves(r: RouteResult, rb: Dict[str, Any], exp: Dict[str, Any], back: Ba
         r.dissolves = "none in the cut"
         r.notes.append("the cut has no dissolves: what Resolve does with them was not measured")
         return
-    _, transitions = _track(rb)
+    _, transitions = _track(rb, exp)
     start = rb.get("start_frame")
     if transitions or install_lists:  # the read-back shows transitions on this install: judge from it
         r.dissolves_from = "the read-back (transition items)"
@@ -267,7 +301,7 @@ def _dissolves(r: RouteResult, rb: Dict[str, Any], exp: Dict[str, Any], back: Ba
         shifts = {s - w for (s, _), (w, _) in zip(items, sorted(wanted))}  # against a dissolve centred as matchcut writes it
         if hit == total and len(transitions) == total:
             r.dissolves = "kept"
-            r.preserved.append(f"dissolves: {total} of {total} read back as transition items at the expected frames and length")
+            r.preserved.append(f"dissolves read back: {total} of {total}, exact length and centred (transition items)")
         elif same_lengths and (starts == {0} or ends == {0} or (total > 1 and (len(starts) == 1 or len(ends) == 1 or len(shifts) == 1))):
             # (one dissolve alone cannot show a convention, except starting or ending exactly at the cut)
             # the right number and lengths, all placed alike against the cut: where this install puts a transition, not a loss
@@ -330,6 +364,7 @@ def _markers(r: RouteResult, m: Optional[Dict[str, Any]], exp: Dict[str, Any]) -
         (r.preserved if carried == n else r.lost).append(f"junction markers from the file: {carried} of {n} found by id")
         parts.append(f"file {carried}/{n}")
         states.append(carried == n)
+        r.file_markers = "yes" if carried == n else "no"
     if m.get("added"):
         own = sum(1 for v in (m.get("found_after") or {}).values() if v)
         yes = sum(1 for a in m["added"].values() if a.get("add_marker") is True or a.get("update_marker_custom_data") is True)
@@ -482,6 +517,8 @@ def _pick(routes: Dict[str, RouteResult], order: Tuple[str, ...], verdicts: Tupl
 def _qualify(name: str, routes: Dict[str, RouteResult]) -> List[str]:
     r = routes[name]
     out = []
+    if r.file_markers == "no" and r.own_markers == "yes":
+        out.append("junction markers must be added by id after import: the markers the file carries are not found by id, the probe's own are")
     if r.markers_by_id != "yes":
         others = [n for n in ROUTES if routes[n].markers_by_id == "yes"]
         if r.markers_by_id == "untested":
@@ -519,6 +556,10 @@ def edition(doc: Dict[str, Any]) -> Optional[str]:
     if not isinstance(product, str) or not product or product == FAKE_PRODUCT:
         return None
     return "Studio" if "Studio" in product else "free edition"
+
+
+def _n(count: Any, word: str) -> str:
+    return f"{count} {word}{'' if count == 1 else 's'}" if isinstance(count, int) else f"? {word}s"
 
 
 def _source_line(doc: Dict[str, Any]) -> str:
@@ -575,7 +616,8 @@ def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: D
     lines.append(f"- Resolve MCP binary: {mcp.get('observed', 'not checked')} (observed only; never started)")
     counts = safety.get("counts") or {}
     lines.append(f"- projects: the open project at the start was {proj.get('user_current_project')!r}"
-                 + (f" ({counts.get('timelines')} timelines, {counts.get('clips')} clips, {counts.get('subfolders')} media pool folders)" if counts else "")
+                 + (f" ({_n(counts.get('timelines'), 'timeline')}, {_n(counts.get('clips'), 'clip')} in "
+                    f"{_n(counts['folders'] + 1 if counts.get('folders') is not None else None, 'media pool folder')})" if counts else "")
                  + f"; the probe's project: {proj.get('name')!r} in the folder {proj.get('folder')!r}"
                  + (f"; frame rate setting {proj.get('frame_rate_setting')!r} (asked {proj.get('frame_rate_requested')!r})" if proj.get("frame_rate_requested") else ""))
     lines += ["", "## Recommendation", "", recommendation]
@@ -596,9 +638,13 @@ def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: D
             lines.append("- not tried")
     fails = doc.get("failures") or []
     lines += ["", f"## Failed steps ({len(fails)})", ""]
-    for f in fails:
+    groups: Dict[Tuple[str, str], List[str]] = {}
+    for f in fails:  # the same call with the same outcome is one line, counted, with where it happened
         what = f"raised {f['error']}" if f.get("error") else f"returned {json.dumps(f.get('return'))}"
-        lines.append(f"- {f.get('where')}: `{f.get('call')}` {what}")
+        groups.setdefault((str(f.get("call")), what[:200]), []).append(str(f.get("where")))
+    for (call, what), wheres in groups.items():
+        places = list(dict.fromkeys(w.split(":")[0] for w in wheres))
+        lines.append(f"- `{call}` {what}: {len(wheres)} time{'s' if len(wheres) != 1 else ''} ({', '.join(places[:6])}{', ...' if len(places) > 6 else ''})")
     if not fails:
         lines.append("- none")
     if notes or doc.get("notes"):
@@ -643,7 +689,7 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
                     path = bundle / e.get("file", "")
                     if e.get("ok") and path.is_file():
                         back[route][fmt] = _reimport(scratch, scfg, path, stage)
-    install_lists = any(_track(e.get("readback") or {})[1] for e in timelines.values())
+    install_lists = any(_track(e.get("readback") or {}, exp)[1] for e in timelines.values())
     routes = {name: _route(name, doc, exp, back.get(name, {}), install_lists) for name in ROUTES}
     asked, got = (doc.get("project") or {}).get("frame_rate_requested"), (doc.get("project") or {}).get("frame_rate_setting")
     if asked and got is not None and str(got) != str(asked):

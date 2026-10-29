@@ -1,11 +1,13 @@
 # M2c-0: the DaVinci Resolve Studio capability probe
 
-**Status: not run against a live Resolve.** matchcut's authors have no Resolve Studio here. The probe has run only
-against a fake of the documented scripting API (`tests/resolve/fake_resolve.py`), which is matchcut's model of the
-documentation and not evidence about Resolve. This changes only when a real `resolve_probe.json` comes back.
+**Status: run once against a live Resolve: DaVinci Resolve 21.0.2.4 free, macOS, from the Py3 console (2026-10-29).** That is one machine and one footage file; see "First live run" below. Studio, other versions,
+real camera footage, timecoded media and audio are not verified. Everything else rests on a fake of the documented
+scripting API (`tests/resolve/fake_resolve.py`). The fake is matchcut's model of the documentation and not evidence about
+Resolve, apart from the variant "resolve 21.0.2 free (observed)", which reproduces that run's read-back.
 
-- **M2c human gate: PENDING.** You run the probe once in Resolve Studio and send back that run's folder,
-  `runs/<UTC time>/` (its `resolve_probe.json` and `exports/`; see below).
+- **M2c human gate: PENDING** for the bridge itself (M2c-1). The probe has answered its questions once. More runs
+  (Studio, other versions, camera footage) are welcome: send back the run's folder `runs/<UTC time>/` (its
+  `resolve_probe.json` and `exports/`; see below).
 - **M2a human gate: PENDING** ([M2A-ACCEPTANCE.md](M2A-ACCEPTANCE.md)). **M2b human gate: PENDING**
   ([M2B-ACCEPTANCE.md](M2B-ACCEPTANCE.md)). **M1 human gate: PENDING** ([M1-ACCEPTANCE.md](M1-ACCEPTANCE.md)).
 
@@ -264,6 +266,64 @@ and records `scripting.mode = "in-app console"`.
 
 Studio-only calls may return False or None on the free edition. They are recorded as failed steps, and the report says
 "free edition" when `GetProductName()` does not contain "Studio".
+
+## First live run (2026-10-29)
+
+**What was run:**
+
+- DaVinci Resolve **21.0.2.4, free edition**, macOS.
+- The probe ran from Resolve's own **Py3 console** (in-app mode). From Terminal the module loaded, but
+  `scriptapp("Resolve")` returned None: external scripting did not connect on this free install.
+- The installed catalogue was a README.txt, "Last Updated: 26 May 2026", without `GetType` or `AddTransition`.
+- Status complete, on matchcut's synthetic demo cut: 5 clips, 2 dissolves (8 and 18 frames), 25 fps, 462 frames of media.
+
+**What came back:**
+
+- **Imports (OTIO, FCPXML 1.10, EDL): frame-exact, with the dissolves.**
+  - All three gave the same video track 1. Every clip's record start, duration and source in/out matched
+    `expected.json`.
+  - Each dissolve came back as an item of its own, named "Cross Dissolve", with no source frames. It has the
+    dissolve's exact length and is centred on the cut, as matchcut writes it: 61-69 across the cut at 65, 105-123 across
+    114.
+  - There was no `GetType` on this install. The report identifies these items by having no source frames and spanning
+    an expected cut; the name is recorded but not relied on.
+- **Two read-back conventions:**
+  - `GetSourceEndFrame` is exclusive (start + duration), except for the clip that ends at the media's end. There it
+    reports the media's last frame (461 for 462 frames).
+  - `GetLeftOffset` and `GetRightOffset` returned None on every imported item.
+- **Timeline start:** imported timelines start at frame 0 / 00:00:00:00. Timelines made with `CreateEmptyTimeline`
+  start at 90000 / 01:00:00:00. Record frames are the same relative to the start.
+- **Build route:** `AppendToTimeline` placed every clip exactly (relative to the 01:00:00:00 start). The dissolves are
+  lost by construction, and `AddTransition` is not on this install.
+- **Exports:**
+  - OTIO and EDL `Timeline.Export` worked for every timeline. They read back through M2a with no differences from the
+    stage for the imports; for the build routes the only differences are the 2 dissolves, which are cuts there.
+  - FCPXML 1.10 `Timeline.Export` failed (returned False) on every route.
+- **Markers:**
+  - The markers the files carry were not found by `GetMarkerByCustomData` (0 of 4).
+  - The probe's own `AddMarker` with the junction id as `customData` was found by id 4 of 4.
+  - `GetMarkerByCustomData` returned the marker's information without its frame.
+- **Navigation:** `SetCurrentTimecode` from the start timecode plus the record frame put the playhead on the incoming
+  clip for 4 of 4 junctions, on every route.
+- **MCP:** no `ResolveMCP` binary file (observed only).
+
+**What the report concludes:**
+
+- The imports are usable: frames exact, dissolves kept.
+- The build routes are usable without the dissolves.
+- Recommended for M2c-1: **import-otio**, with junction markers added by id after the import (the file's own markers
+  are not found by id).
+
+**Not verified by this run:**
+
+- Studio, and Resolve versions other than 21.0.2.4.
+- Windows and Linux.
+- Real camera footage, timecoded or drop-frame media, other frame rates.
+- Audio (only read back, not compared).
+- FCPXML export by other means, and whether the free edition's in-app result holds for external scripting on Studio.
+
+The fake variant "resolve 21.0.2 free (observed)" reproduces this read-back, and `tests/resolve/test_live_run.py` holds
+the report to these verdicts.
 
 ## What to send back
 

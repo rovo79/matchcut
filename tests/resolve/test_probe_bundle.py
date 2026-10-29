@@ -48,7 +48,7 @@ def test_probe_cli_prints_the_one_command_and_says_it_is_not_live(wsp, capsys):
     assert code == 0 and (out_dir / "roughcut.otio").exists() and (out_dir / "resolve_probe.py").exists()
     script = out_dir / "resolve_probe.py"
     assert f'  python3 "{script}" --dry-run' in out.splitlines() and f'  python3 "{script}"' in out.splitlines()
-    assert "not run against a live Resolve" in out and "External scripting using = Local" in out and "--yes" in out
+    assert "run once against a live Resolve (21.0.2.4 free" in out and "External scripting using = Local" in out and "--yes" in out
     assert f'python -m matchcut.resolve report "{wsp.ws}" "{out_dir}"' in out and f"{out_dir / 'runs'}/<UTC time>/" in out
     assert json.loads((out_dir / "expected.json").read_text())["stage"] == "roughcut"
 

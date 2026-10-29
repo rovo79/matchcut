@@ -22,7 +22,8 @@ that the open project is still its own. It writes files only inside
 this bundle (and --out). It calls only what the Resolve 21.0.4 scripting README documents, plus the calls the installed catalogue
 documents for their class (CALLS below). It never starts or connects to Resolve's MCP server; it only looks whether the file is there.
 Standard library plus Resolve's own DaVinciResolveScript module; Python 3.6+. It never imports matchcut.
-Status: not run against a live Resolve by matchcut's authors; matchcut tests it against a fake of the documented API only.
+Status: run once against a live Resolve (21.0.2.4 free, macOS, from the Py3 console, 2026-10-29); Studio, other versions and
+camera footage are not verified. matchcut's tests use a fake of the documented API.
 """
 import argparse
 import datetime

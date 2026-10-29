@@ -159,7 +159,7 @@ def test_transition_items_are_not_clips_and_judge_the_dissolves(wsp, bundle, mon
     assert sum(1 for v in items if v["type"] == "transition") == d and len(items) == n + d
     otio = rep.routes["import-otio"]
     assert otio.verdict == "usable" and otio.transition_items == d and otio.dissolves_from == "the read-back (transition items)"
-    assert f"dissolves: {d} of {d} read back as transition items at the expected frames and length" in otio.preserved
+    assert f"dissolves read back: {d} of {d}, exact length and centred (transition items)" in otio.preserved
     assert f"dissolves: {d} of {d} have no transition item in the read-back (the build route adds none)" in rep.routes["build"].lost
     assert rep.routes["build+transitions"].verdict == "usable"  # AddTransition made them, and the read-back shows them
 

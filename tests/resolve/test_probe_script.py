@@ -272,7 +272,7 @@ def test_the_script_is_python_3_6_and_imports_nothing_from_matchcut(bundle):
     imported |= {n.module.split(".")[0] for n in ast.walk(tree_) if isinstance(n, ast.ImportFrom) and n.module}
     assert imported == {"argparse", "datetime", "hashlib", "json", "os", "platform", "re", "sys", "traceback", "DaVinciResolveScript"}
     assert "matchcut." not in "".join(ast.unparse(n) for n in ast.walk(tree_) if isinstance(n, (ast.Import, ast.ImportFrom)))
-    assert "not run against a live Resolve" in text
+    assert "run once against a live Resolve (21.0.2.4 free" in text and "not verified" in text
 
 
 # -- failures are recorded and the run goes on -------------------------------------------------------------------------------------

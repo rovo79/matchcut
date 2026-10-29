@@ -179,7 +179,8 @@ Every value is observed or recorded; nothing is inferred in the script. Interpre
     from matchcut.
 - **Honesty:**
   - The fake is matchcut's model of the documentation, not evidence about Resolve.
-  - `docs/M2C-PROBE.md` and every output say "not run against a live Resolve" until a real
-    `resolve_probe.json` comes back.
+  - `docs/M2C-PROBE.md` and every output said "not run against a live Resolve" until a real `resolve_probe.json` came
+    back. The first came back on 2026-10-29 (21.0.2.4 free, macOS, from the Py3 console; see "First live run" in
+    `docs/M2C-PROBE.md`). The status now names that one run; Studio, other versions and camera footage stay unverified.
   - Human gate PENDING: you run the probe in Resolve Studio and send back the run's folder
     `runs/<UTC time>/` (its `resolve_probe.json` and `exports/`).

@@ -385,7 +385,8 @@ documents it. It then reads each timeline back, tests markers and the playhead, 
 It only starts from an empty Untitled Project (or an earlier probe project) and asks before it switches projects.
 `python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe` compares the latest run with the cut offline and
 recommends a route for M2c-1. Safety rules, the allow-list of calls, the per-OS commands, what to send back and how
-to delete the probe projects: [M2C-PROBE.md](M2C-PROBE.md). Status: not run against a live Resolve; human gate PENDING.
+to delete the probe projects: [M2C-PROBE.md](M2C-PROBE.md). Status: run once against a live Resolve (21.0.2.4 free, from its console, 2026-10-29: the imports came back frame-exact
+with their dissolves); Studio and other versions unverified; human gate PENDING for the bridge.
 
 ## Final Cut Pro
 

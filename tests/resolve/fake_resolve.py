@@ -86,6 +86,13 @@ class Variant:
     marker_info_plain: bool = False  # GetMarkerByCustomData returns the marker's information without its frame
     version: Tuple[Any, ...] = (21, 1, 0, 0, "")
     product: str = PRODUCT  # what GetProductName returns
+    version_string: str = ""  # what GetVersionString returns ("" : the version joined, with " (fake)")
+    catalogue_txt: str = ""  # a README.txt with this "Last Updated" line instead of the 21.1-style README.md + .pyi
+    import_start_tc: str = ""  # the start timecode of an imported timeline ("" : start_tc)
+    offsets_none: bool = False  # GetLeftOffset / GetRightOffset return None
+    src_end_media_last: bool = False  # GetSourceEndFrame reports the media's last frame (inclusive) for a clip that ends at the media's end
+    export_fails: Tuple[str, ...] = ()  # export constants (e.g. "EXPORT_FCPXML_1_10") for which Timeline.Export returns False
+    import_marker_custom_data: bool = True  # markers imported from an OTIO keep the junction id as customData
 
 
 VARIANTS = {
@@ -121,6 +128,12 @@ VARIANTS = {
     "transition items": Variant(name="transition items", transition_items=True),
     "transition items at the cut": Variant(name="transition items at the cut", transition_items=True, transition_at_cut=True),
     "marker info without frame": Variant(name="marker info without frame", marker_info_plain=True),
+    # the first live run: DaVinci Resolve 21.0.2.4 free on macOS, from the Py3 console (2026-10-29); the read-back as it came back
+    "resolve 21.0.2 free (observed)": Variant(
+        name="resolve 21.0.2 free (observed)", product="DaVinci Resolve", version=(21, 0, 2, 4, ""), version_string="21.0.2.4",
+        catalogue_txt="Last Updated: 26 May 2026", documents_add_transition=False, import_start_tc="00:00:00:00", start_tc="01:00:00:00",
+        transition_items=True, offsets_none=True, src_end_media_last=True, export_fails=("EXPORT_FCPXML_1_10",),
+        import_marker_custom_data=False, marker_info_plain=True),
     "Resolve 18.5": Variant(name="Resolve 18.5", version=(18, 5, 0, 0, ""), raise_on=("TimelineItem.GetSourceStartFrame", "TimelineItem.GetSourceEndFrame")),
 }
 
@@ -223,6 +236,11 @@ class World:
         folder.mkdir(parents=True, exist_ok=True)
         if not self.variant.catalogue:
             return folder
+        if self.variant.catalogue_txt:  # the 21.0.x layout: one README.txt, the README's own method list (no 21.1 calls)
+            lines = [self.variant.catalogue_txt, "-" * 25, ""] + [f"{cls}\n  " + "\n  ".join(f"{m}()" for m in sorted(names))
+                                                                    for cls, names in sorted(DOCUMENTED.items())]
+            (folder / "README.txt").write_text("\n".join(lines) + "\n")
+            return folder
         lines = ["# DaVinci Resolve scripting (fake catalogue written by matchcut's tests)", "", "Last Updated: fake 21.1.0", ""]
         lines += [f"{cls}.{m}()" for cls, names in sorted(DOCUMENTED.items()) for m in sorted(names)]
         (folder / "README.md").write_text("\n".join(lines) + "\n")
@@ -287,7 +305,7 @@ class FakeTimelineItem(_Api):
         return self._world.variant.shift
 
     def GetName(self):
-        return self.item.media.name
+        return "Cross Dissolve" if self.item.track == "transition" else self.item.media.name
 
     def GetStart(self, subframe_precision=False):
         return self.item.start
@@ -299,16 +317,21 @@ class FakeTimelineItem(_Api):
         return self.item.dur
 
     def GetLeftOffset(self, subframe_precision=False):
-        return self.item.src_in + self._shift()
+        return None if self._world.variant.offsets_none else self.item.src_in + self._shift()
 
     def GetRightOffset(self, subframe_precision=False):
-        return self.item.media.src.duration_frames - (self.item.src_in + self._shift() + self.item.dur)
+        return None if self._world.variant.offsets_none else self.item.media.src.duration_frames - (self.item.src_in + self._shift() + self.item.dur)
 
     def GetSourceStartFrame(self):
-        return self.item.src_in + self._shift()
+        return None if self.item.track == "transition" else self.item.src_in + self._shift()
 
     def GetSourceEndFrame(self):
-        return self.item.src_in + self._shift() + self.item.dur - (1 if self._world.variant.src_end_inclusive else 0)
+        if self.item.track == "transition":
+            return None
+        end = self.item.src_in + self._shift() + self.item.dur
+        if self._world.variant.src_end_media_last and end == self.item.media.src.duration_frames:
+            return end - 1  # the media's last frame
+        return end - (1 if self._world.variant.src_end_inclusive else 0)
 
     def GetMediaPoolItem(self):
         return FakeMediaPoolItem(self._world, self.item.media)
@@ -425,6 +448,8 @@ class FakeTimeline(_Api):
         consts = _constants()
         if exportType == consts["EXPORT_EDL"] and exportSubtype not in (consts["EXPORT_NONE"], consts["EXPORT_CDL"], consts["EXPORT_SDL"], consts["EXPORT_MISSING_CLIPS"]):
             return False
+        if any(exportType == consts[c] for c in self._world.variant.export_fails):
+            return False
         if exportType == consts["EXPORT_OTIO"]:
             text = json.dumps(_otio_of(self.tl, self._world), indent=1)
         elif exportType == consts["EXPORT_FCPXML_1_10"]:  # matchcut's writer, then without matchcut's metadata, as an editor writes it
@@ -520,12 +545,13 @@ class FakeMediaPool(_Api):
             out.append(FakeMediaPoolItem(self._world, self._add(p)))
         return out
 
-    def _new_timeline(self, name: str) -> Optional[TimelineModel]:
+    def _new_timeline(self, name: str, start_tc: str = "") -> Optional[TimelineModel]:
         if any(t.name == name for t in self.project.timelines):
             return None
         rate = _rate_of(self.project.settings.get("timelineFrameRate", "24"))
-        start = _frames(self._world.variant.start_tc, rate) or 0
-        tl = TimelineModel(name, start, self._world.variant.start_tc, rate, playhead=start)
+        tc = start_tc or self._world.variant.start_tc
+        start = _frames(tc, rate) or 0
+        tl = TimelineModel(name, start, tc, rate, playhead=start)
         self.project.timelines.append(tl)
         self.project.current_timeline = tl
         self.project.touched = True
@@ -570,7 +596,8 @@ class FakeMediaPool(_Api):
             for m in doc["tracks"]["children"][0].get("markers", []):
                 meta = (m.get("metadata") or {}).get("matchcut") or {}
                 markers.append((int(m["marked_range"]["start_time"]["value"]),
-                                {"color": "Green", "duration": 1.0, "note": m.get("comment", ""), "name": m.get("name", ""), "customData": str(meta.get("junction_id", ""))}))
+                                {"color": "Green", "duration": 1.0, "note": m.get("comment", ""), "name": m.get("name", ""),
+                                 "customData": str(meta.get("junction_id", "")) if self._world.variant.import_marker_custom_data else ""}))
         elif ext == ".fcpxml":
             cut, _ = import_fcpxml(text, None, None, src)  # the fake carries no FCPXML markers across
         elif ext == ".edl":
@@ -579,7 +606,7 @@ class FakeMediaPool(_Api):
             cut, _ = import_edl(text, src.rate, src.path, None, src)
         else:
             return None
-        tl = self._new_timeline(options.get("timelineName") or Path(filePath).stem)
+        tl = self._new_timeline(options.get("timelineName") or Path(filePath).stem, self._world.variant.import_start_tc)
         if tl is None:
             return None
         media = self._media(src.path) or (self._add(src.path) if options.get("importSourceClips", True) else None)
@@ -712,7 +739,7 @@ class FakeResolve(_Api):
         return list(self._world.variant.version)
 
     def GetVersionString(self):
-        return ".".join(str(x) for x in self._world.variant.version[:4]) + " (fake)"
+        return self._world.variant.version_string or ".".join(str(x) for x in self._world.variant.version[:4]) + " (fake)"
 
     def OpenPage(self, pageName):
         self._log("OpenPage", pageName)

@@ -12,7 +12,8 @@ from typing import List, Optional
 
 from . import ProbeError
 
-NOT_LIVE = "status: not run against a live Resolve (matchcut has tested the probe only against a fake of the documented API)"
+NOT_LIVE = ("status: run once against a live Resolve (21.0.2.4 free, macOS, from its console); Studio, other versions and camera footage "
+            "are not verified, so every run you send back counts")
 
 
 def _args(argv: Optional[List[str]]) -> argparse.Namespace:
