@@ -36,6 +36,12 @@ fidelity differences.
   environment variables and default install paths, and says exactly what to set when it cannot (and names a module
   file that exists but fails to import). Every run writes its own `DIR/runs/<UTC time>/` (`resolve_probe.json`,
   `exports/`), so no run replaces another's (review M6).
+- **Free edition (observed on 21.0.2.4: external scripting does not connect):** the same script runs inside Resolve's own
+  console (Workspace > Console, Py3, with a python.org Python 3), handed the console's `resolve` object. `probe` prints two
+  one-liners: a dry run, and a real run that passes `--yes` because the console has no input. The probe never calls `input()`
+  there and refuses the real run without `--yes` (exit 5). It returns the exit code instead of raising SystemExit into Resolve,
+  records `scripting.mode = "in-app console"`, writes the same `runs/<UTC time>/`, and keeps every guard. The report says
+  "free edition" when the product name has no "Studio".
 - `python -m matchcut.resolve report WS DIR` (the newest run that is complete or recorded timelines, else the newest real
   run, and it says which) or `... report WS DIR/runs/<UTC time>/resolve_probe.json`
   - prints, per route, what was preserved, approximated and lost, compared with `expected.json` and

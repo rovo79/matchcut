@@ -85,6 +85,7 @@ class Variant:
     transition_at_cut: bool = False  # ... and puts each one starting at the cut instead of centred on it
     marker_info_plain: bool = False  # GetMarkerByCustomData returns the marker's information without its frame
     version: Tuple[Any, ...] = (21, 1, 0, 0, "")
+    product: str = PRODUCT  # what GetProductName returns
 
 
 VARIANTS = {
@@ -705,7 +706,7 @@ class FakeResolve(_Api):
         return FakeProjectManager(self._world)
 
     def GetProductName(self):
-        return PRODUCT
+        return self._world.variant.product
 
     def GetVersion(self):
         return list(self._world.variant.version)

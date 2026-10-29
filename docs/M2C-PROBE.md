@@ -225,6 +225,46 @@ Exit codes of the script:
 | 5 | not confirmed |
 | 1 | an error of the probe itself (also recorded in the JSON) |
 
+## Free edition: run it from Resolve's console
+
+**Observed on one machine, not a guarantee:** on DaVinci Resolve 21.0.2.4 (free, macOS), external scripting from Terminal did
+not connect: the module loaded, but `scriptapp("Resolve")` returned None. In Resolve's own console, Lua
+`print(resolve:GetVersionString())` printed `21.0.2.4`, so in-app scripting works there. The probe can therefore run inside
+Resolve's console with the same safety rules. It is handed Resolve's `resolve` object instead of connecting from outside,
+and records `scripting.mode = "in-app console"`.
+
+1. **Install Python 3 from python.org.** Use <https://www.python.org/downloads/macos/>: the "macOS 64-bit universal2
+   installer". Resolve's Py3 console looks for a python.org framework install, so Homebrew or a venv is not enough (the
+   console said "Python 3 was not found" with only those). The README asks for Python 3.6 or later, 64-bit.
+   - **Which version:** 3.10, 3.11 or 3.12 are the likeliest to work, and 3.11 is the safe choice. This is UNVERIFIED for
+     Resolve 21.0.2. A third-party report says Resolve before 21 failed with 3.12 for external scripting.
+   - **If the Py3 tab still says Python 3 was not found,** try 3.11.
+   - **The probe itself** needs only Python 3.6 syntax and the standard library.
+2. **Restart Resolve**, open **Workspace > Console**, and select **Py3**.
+3. **Check:** `print(resolve.GetVersionString())`. It should print the version. (UNVERIFIED: that the Py3 console defines
+   `resolve` as the Lua console does. If it says `resolve` is not defined, send that back.)
+4. **Have an empty project open**: no timeline, no clip.
+   - First paste the **dry-run line** that `python -m matchcut.resolve probe WORKSPACE` printed. It creates nothing.
+   - Then paste the **real-run line** ("this switches to a new probe project"). Paste each line whole, without leading
+     spaces.
+   - Each prints `matchcut probe exit <code>` (the codes below).
+
+   The lines look like this, with your bundle's path:
+
+   ```python
+   _mc_p = '/Users/you/…/resolve_probe/resolve_probe.py'; _mc_g = {"__file__": _mc_p, "__name__": "resolve_probe_console"}; exec(compile(open(_mc_p, encoding="utf-8").read(), _mc_p, "exec"), _mc_g); print("matchcut probe exit", _mc_g["console"](resolve, ['--dry-run']))
+   ```
+
+   - **No question is asked:** the console has no input, so the real-run line passes `--yes`. Without it the probe
+     refuses (exit 5) and never asks.
+   - **Every guard still runs:** the empty-project check, the check again right before `CreateProject`, the check
+     before every write, and saving only its own project.
+   - **Nothing escapes into Resolve:** a SystemExit is turned into the printed exit code.
+5. **Send back** the `runs/<UTC time>/` folder from the bundle, as for the Terminal run.
+
+Studio-only calls may return False or None on the free edition. They are recorded as failed steps, and the report says
+"free edition" when `GetProductName()` does not contain "Studio".
+
 ## What to send back
 
 From the bundle directory: the run's folder **`runs/<UTC time>/`**, which holds `resolve_probe.json`, `exports/`, and

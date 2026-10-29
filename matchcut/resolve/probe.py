@@ -15,7 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from matchcut.interchange import MATCHCUT_VERSION, InterchangeError
 from matchcut.interchange.common import export_timeline, junction_ids, layout, record_frames, truncate
@@ -122,6 +122,18 @@ def command(script: Path, platform: Optional[str] = None) -> str:
     ``py -3`` (the Python launcher) on Windows, ``python3`` elsewhere."""
     plat = platform or sys.platform
     return f'py -3 "{script}"' if plat.startswith("win") else f'python3 "{script}"'
+
+
+def console_lines(script: Path) -> Tuple[str, str]:
+    """(dry run, real run): the lines to paste into Resolve's own console (Workspace > Console, Py3), where ``resolve`` is Resolve's app
+    object. Each runs the script with an explicit globals dict whose ``__file__`` is the script, so the bundle and the runs/ folder
+    resolve; it does not touch ``sys.argv`` (runpy would, and the console may have none). ``console`` returns the exit code instead of
+    raising SystemExit into Resolve and never asks a question, so the real run passes --yes."""
+    def line(args: List[str]) -> str:
+        return (f'_mc_p = {str(script)!r}; _mc_g = {{"__file__": _mc_p, "__name__": "resolve_probe_console"}}; '
+                f'exec(compile(open(_mc_p, encoding="utf-8").read(), _mc_p, "exec"), _mc_g); '
+                f'print("matchcut probe exit", _mc_g["console"](resolve, {args!r}))')
+    return line(["--dry-run"]), line(["--yes"])
 
 
 def run_script(script: Path, extra: Optional[List[str]] = None, python: str = sys.executable) -> int:

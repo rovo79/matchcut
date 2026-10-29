@@ -513,6 +513,14 @@ def _recommend(routes: Dict[str, RouteResult]) -> Tuple[Optional[str], str]:
     return None, "None of the routes is usable on this install: no timeline came back with the cut's frames."
 
 
+def edition(doc: Dict[str, Any]) -> Optional[str]:
+    """"Studio" or "free edition", from the product name Resolve reported (None when it reported none)."""
+    product = (doc.get("resolve") or {}).get("product")
+    if not isinstance(product, str) or not product or product == FAKE_PRODUCT:
+        return None
+    return "Studio" if "Studio" in product else "free edition"
+
+
 def _source_line(doc: Dict[str, Any]) -> str:
     product = (doc.get("resolve") or {}).get("product")
     if product == FAKE_PRODUCT:
@@ -520,8 +528,9 @@ def _source_line(doc: Dict[str, Any]) -> str:
     if not (doc.get("scripting") or {}).get("connected"):
         return f"Status: {NOT_LIVE}: the probe did not connect to Resolve ({doc.get('status')})."
     version = (doc.get("resolve") or {}).get("version_string")
-    return (f"Status: measured by resolve_probe.py on {product} {version}, as Resolve reported itself. matchcut's own tests ran the probe "
-            "only against a fake of the documented API.")
+    where = " from Resolve's own console" if (doc.get("scripting") or {}).get("mode") == "in-app console" else ""
+    return (f"Status: measured by resolve_probe.py{where} on {product} {version} ({edition(doc)}), as Resolve reported itself. "
+            "matchcut's own tests ran the probe only against a fake of the documented API.")
 
 
 def _table(routes: Dict[str, RouteResult]) -> List[str]:
@@ -546,7 +555,11 @@ def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: D
              f"- stage `{exp['stage']}`: {len(exp['clips'])} clips, {len(exp['junctions'])} junctions, "
              f"{sum(1 for c in exp['clips'][1:] if c['transition_in']['frames'])} dissolves, {exp['rate'][0]}/{exp['rate'][1]} fps",
              f"- Resolve: {product}; {plat.get('system')} {plat.get('release')}; Python {plat.get('python')}",
-             f"- scripting: connected {(doc.get('scripting') or {}).get('connected')}; module {(doc.get('scripting') or {}).get('module_path')}"]
+             f"- scripting: {(doc.get('scripting') or {}).get('mode') or 'external'}; connected {(doc.get('scripting') or {}).get('connected')}; "
+             f"module {(doc.get('scripting') or {}).get('module_path')}"]
+    if edition(doc):
+        lines.append(f"- edition: {edition(doc)} (GetProductName() {'contains' if edition(doc) == 'Studio' else 'does not contain'} \"Studio\"); "
+                     "calls the free edition does not offer may return False or None, recorded as failed steps")
     for e in (doc.get("scripting") or {}).get("module_errors") or []:
         lines.append(f"- found {e.get('file') or e.get('where')} but it failed to import: {e.get('error')}")
     files = cat.get("files") or []

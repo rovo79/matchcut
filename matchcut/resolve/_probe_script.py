@@ -878,10 +878,14 @@ def recheck(rec, doc, pm):
 
 
 def confirm(args, doc, planned):
-    """The person running the probe says yes before it switches projects (--yes says it in advance; a dry run never gets here)."""
+    """The person running the probe says yes before it switches projects (--yes says it in advance; a dry run never gets here).
+    In Resolve's console there is no input: only --yes confirms there, and the probe never asks."""
     if args.yes:
         doc["safety"]["confirmed"] = "--yes"
         return True
+    if doc["scripting"].get("mode") == "in-app console":
+        doc["safety"]["confirmed"] = False
+        return False
     try:
         answer = input(CONFIRM % (doc["safety"]["current_project"], planned, FOLDER))
     except EOFError:
@@ -1010,8 +1014,10 @@ def run_directory(stamp, dry_run):
     return path
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description="matchcut's DaVinci Resolve Studio capability probe (see the top of this file)")
+def main(argv=None, app=None):
+    """The probe. ``app``: a Resolve object handed in by Resolve's own console (see ``console``); without it the probe connects from
+    outside with DaVinciResolveScript.scriptapp("Resolve"), which needs Studio and External scripting = Local."""
+    parser = argparse.ArgumentParser(prog="resolve_probe.py", description="matchcut's DaVinci Resolve capability probe (see the top of this file)")
     parser.add_argument("--dry-run", action="store_true", help="connect, record the environment and the safety check, create nothing")
     parser.add_argument("--yes", action="store_true", help="do not ask before switching to the probe's own project")
     parser.add_argument("--out", default=None, help="where to write the JSON (default: runs/<UTC time>/resolve_probe.json in the bundle)")
@@ -1023,7 +1029,7 @@ def main(argv=None):
     doc = new_doc(args)
     doc["run_dir"] = os.path.relpath(run_dir, BUNDLE)
     try:
-        return probe(args, doc, out, run_dir, stamp)
+        return probe(args, doc, out, run_dir, stamp, app)
     except Exception as exc:  # the probe's own failure: the JSON still gets written
         doc["status"] = "crashed"
         doc["failures"].append({"where": "probe", "call": "(probe)", "error": "%s: %s" % (type(exc).__name__, exc),
@@ -1031,6 +1037,19 @@ def main(argv=None):
         write(doc_for_disk(doc), out)
         print("the probe stopped on an error of its own (recorded in %s): %s: %s" % (out, type(exc).__name__, exc))
         return 1
+
+
+def console(app, args=()):
+    """Run the probe from Resolve's own console (Workspace > Console, Py3), where ``resolve`` is the app object:
+
+        _mc_p = "<bundle>/resolve_probe.py"; _mc_g = {"__file__": _mc_p, "__name__": "resolve_probe_console"}; exec(compile(open(_mc_p, encoding="utf-8").read(), _mc_p, "exec"), _mc_g); print("matchcut probe exit", _mc_g["console"](resolve, ["--dry-run"]))
+
+    It returns the exit code instead of raising SystemExit into Resolve, and it never asks a question (there is no input in the
+    console): the real run needs --yes in ``args``."""
+    try:
+        return main(list(args), app=app)
+    except SystemExit as exc:  # argparse on bad arguments, or anything else that exits: never into Resolve
+        return exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 2)
 
 
 def finish(doc, out, status, lines, code):
@@ -1042,10 +1061,14 @@ def finish(doc, out, status, lines, code):
     return code
 
 
-def probe(args, doc, out, run_dir, stamp):
+def probe(args, doc, out, run_dir, stamp, app=None):
     doc["catalogue"] = find_catalogue()
     doc["mcp"] = mcp_presence()
     rec = Recorder(doc, dict(doc["catalogue"]["gated"]))
+    if app is not None:  # inside Resolve's console: the app object is handed in, nothing is imported or connected from outside
+        doc["scripting"].update(mode="in-app console", connected=True, module_found=None, module_path=None, module_errors=[])
+        return measure(args, doc, out, run_dir, stamp, rec, app)
+    doc["scripting"]["mode"] = "external"
     dvr = load_module(doc["scripting"])
     errors = doc["scripting"]["module_errors"]
     if args.check_module:
@@ -1065,6 +1088,11 @@ def probe(args, doc, out, run_dir, stamp):
     doc["scripting"]["connected"] = bool(resolve)
     if not resolve:
         return finish(doc, out, "not connected", [CONNECT_HELP], 2)
+    return measure(args, doc, out, run_dir, stamp, rec, resolve)
+
+
+def measure(args, doc, out, run_dir, stamp, rec, resolve):
+    """Everything after the connection, the same in both modes."""
     doc["resolve"] = {"product": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetProductName")),
                       "version": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetVersion")),
                       "version_string": summary(rec.call(doc["steps"], "environment", resolve, "Resolve.GetVersionString"))}
@@ -1084,7 +1112,10 @@ def probe(args, doc, out, run_dir, stamp):
         return finish(doc, out, "dry-run", ["dry run: the safety check passes; nothing was created."], 0)
     planned = PROJECT_PREFIX + stamp
     if not confirm(args, doc, planned):
-        return finish(doc, out, "not confirmed", ["Not confirmed: nothing was created and the open project was not switched."], 5)
+        lines = ["Not confirmed: nothing was created and the open project was not switched."]
+        if doc["scripting"].get("mode") == "in-app console":
+            lines.append("In Resolve's console the probe cannot ask: use the real-run line, which passes --yes.")
+        return finish(doc, out, "not confirmed", lines, 5)
     changed = recheck(rec, doc, pm)  # the answer can take any time: look again right before the switch
     if changed:
         doc["safety"]["allowed_after_confirm"] = False

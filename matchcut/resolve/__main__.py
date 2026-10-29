@@ -48,7 +48,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         cfg = _config(ws)
         if args.command == "probe":
-            from .probe import RUNS, build_bundle, command, run_script
+            from .probe import RUNS, build_bundle, command, console_lines, run_script
 
             b = build_bundle(ws, cfg, args.stage, Path(args.out) if args.out else None)
             print(f"probe bundle for stage {args.stage}: {b.dir}")
@@ -61,6 +61,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("project open (no timeline, no clip); try --dry-run first. It asks before it switches projects (--yes skips the question):")
             print(f"  {command(b.script)} --dry-run")
             print(f"  {command(b.script)}")
+            dry, real = console_lines(b.script)
+            print("or, for the free edition (or without external scripting), from Resolve's own console (Workspace > Console, Py3):")
+            print("(paste each line whole, as printed: no leading spaces)")
+            print("# dry run (creates nothing):")
+            print(dry)
+            print("# real run (this switches to a new probe project):")
+            print(real)
             print(f"each run writes {b.dir / RUNS}/<UTC time>/ (resolve_probe.json and exports/): send back that folder, or read it here:")
             print(f'  python -m matchcut.resolve report "{ws}" "{b.dir}"     # the newest run that measured something; or give a run\'s resolve_probe.json')
             if args.run:

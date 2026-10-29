@@ -39,7 +39,10 @@ def test_the_probe_doc_names_the_safety_rules_the_commands_and_what_to_send():
                    "External scripting using = Local", "Python 3.6 or later", "DaVinci Resolve Studio", "`runs/<UTC time>/`", "`exports/`",
                    "python -m matchcut.resolve probe WORKSPACE", "python -m matchcut.resolve report WORKSPACE WORKSPACE/resolve_probe", "--dry-run",
                    "## Deleting the probe projects", "py -3 WORKSPACE\\resolve_probe\\resolve_probe.py", "found <path>\n  but it failed to import",
-                   "eb2b4ebc578655a627baeccdc68b194afb0cd7c96f819acd331125e8d699e5b5", "not in the 18.5 README"):
+                   "eb2b4ebc578655a627baeccdc68b194afb0cd7c96f819acd331125e8d699e5b5", "not in the 18.5 README",
+                   "## Free edition: run it from Resolve's console", "https://www.python.org/downloads/macos/", "universal2",
+                   "Workspace > Console", "print(resolve.GetVersionString())", "this switches to a new probe project",
+                   "did\nnot connect", "UNVERIFIED for\n     Resolve 21.0.2", "`runs/<UTC time>/` folder"):
         assert needle in text, needle
     # the per-OS setup lines are the ones the script prints
     for line in script.SETUP_HELP.splitlines():
@@ -52,3 +55,10 @@ def test_interop_and_readme_point_to_the_probe():
     assert "### Resolve capability probe (M2c-0)" in interop and "[M2C-PROBE.md](M2C-PROBE.md)" in interop
     readme = (DOCS.parent / "README.md").read_text(encoding="utf-8")
     assert "python -m matchcut.resolve probe WORKSPACE" in readme and "docs/M2C-PROBE.md" in readme and "not run against a live Resolve" in readme
+
+
+def test_the_console_line_in_the_doc_is_what_probe_prints():
+    from matchcut.resolve.probe import console_lines
+
+    dry, _ = console_lines(Path("/Users/you/…/resolve_probe/resolve_probe.py"))
+    assert dry in PROBE.read_text(encoding="utf-8")
