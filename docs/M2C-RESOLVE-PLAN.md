@@ -1,6 +1,8 @@
 # M2c: DaVinci Resolve integration — proposed plan (for approval)
 
-Status: proposal, 2026-10-19. Nothing is implemented. Builds on M2a (`matchcut/interchange/`) and on the
+Status: proposal, 2026-10-19; updated 2026-10-30 after the probe's first live run. M2c-0 (the probe) is done;
+M2c-1 is specified in `docs/superpowers/specs/2026-10-30-m2c1-resolve-bridge.md` (not implemented). The free-edition
+finding below supersedes this plan's original "Studio is required". Builds on M2a (`matchcut/interchange/`) and on the
 Resolve research in `docs/M2-INTEGRATION-FEASIBILITY.md`. Human gates for M1, M2b and M2a stay PENDING.
 
 ## What M2c is for
@@ -18,8 +20,10 @@ Three outcomes, in priority order:
 
 - Resolve stays **optional**. Without it, M2a's files and manual GUI import/export keep working
   (free edition included). The engine never imports the Resolve bridge.
-- **Studio is required for the bridge.** External scripting is Studio-only in 21.1, and must be
-  set to Local in Preferences. Free users keep the M2a file route.
+- **The free edition is supported from Resolve's own console.** Measured on DaVinci Resolve 21.0.2.4 free
+  (2026-10-29): scripts run from Terminal could not connect (external scripting is Studio-only), but the same
+  probe ran from Workspace › Console › Py3. The bridge therefore runs from the console on the free edition, and
+  from Terminal on Studio (external scripting = Local; untested). Free users also keep the M2a file route.
 - **Scripting API, not MCP.** Resolve's MCP server (Studio 21.1, stdio, about 14 tools, mostly
   `run_script`) only wraps the same API in a sandbox with a 60 s limit per call. It has no
   timeline tools of its own. MCP stays out unless a later milestone wants an agent driving Resolve.
