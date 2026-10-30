@@ -779,6 +779,9 @@ def exports(rec, route, resolve, tl, run_dir):
         entry["exists"] = os.path.isfile(path)
         entry["size"] = os.path.getsize(path) if entry["exists"] else None
         entry["sha256"] = sha256(path) if entry["exists"] else None
+        if not entry["exists"]:  # where did it go, if anywhere: files under this route's name other than the probe's own exports
+            own = set(stem + x[3] for x in EXPORTS)
+            entry["nearby"] = sorted(n for n in os.listdir(folder) if n.startswith(stem) and n not in own)
         out[fmt] = entry
     return out
 
@@ -1139,7 +1142,7 @@ def measure(args, doc, out, run_dir, stamp, rec, resolve):
     status = "aborted" if doc.get("stopped") else "complete"
     return finish(doc, out, status, [
         "timelines made: %s" % (", ".join(made) or "none"),
-        "%d failed steps recorded (they are measurements, not errors of the probe)" % len(doc["failures"]),
+        "%d steps returned nothing or failed: recorded; the report sorts them into outcomes" % len(doc["failures"]),
         "this run's files: %s (resolve_probe.json and exports/)" % run_dir,
         "send back that folder; the project %s stays in Resolve for you to look at" % doc["project"]["name"]], 0 if status == "complete" else 4)
 

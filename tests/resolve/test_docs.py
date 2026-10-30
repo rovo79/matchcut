@@ -16,7 +16,8 @@ def test_the_probe_doc_says_it_is_not_live_and_the_gates_are_pending():
     assert "**Status: run once against a live Resolve: DaVinci Resolve 21.0.2.4 free, macOS, from the Py3 console (2026-10-29).**" in text
     assert "**M2c human gate: PENDING** for the bridge itself" in text and "## First live run (2026-10-29)" in text
     for needle in ("one machine and one footage file", "Studio, other versions,\nreal camera footage, timecoded media and audio are not verified",
-                   "FCPXML 1.10 `Timeline.Export` failed", "0 of 4", "4 of 4", "90000 / 01:00:00:00", "frame 0 / 00:00:00:00",
+                   "- **Failed:** FCPXML 1.10 `Timeline.Export`", "- **Unsupported:** 32 reads", "- **Not preserved by Resolve:**",
+                   "- **Not tested:**", "- **Passed:**", "0 of 4", "4 of 4", "90000 /\n      01:00:00:00", "frame 0 / 00:00:00:00",
                    "reports the media's last frame", "no `ResolveMCP` binary file"):
         assert needle in text, needle
     for gate in ("M2a human gate: PENDING", "M2b human gate: PENDING", "M1 human gate: PENDING"):

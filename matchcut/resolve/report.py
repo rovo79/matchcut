@@ -27,6 +27,7 @@ from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.junctions import stage_timeline_paths
 
 from . import ProbeError
+from . import outcomes as oc
 from .probe import EXPECTED, REPORT, RESULT, RUNS
 
 SCHEMA = "matchcut.resolve_probe/1"
@@ -64,6 +65,7 @@ class RouteResult:
     approximated: List[str] = field(default_factory=list)
     lost: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    untested: List[str] = field(default_factory=list)  # what this route could not measure (an export that never came back, ...)
 
 
 @dataclass
@@ -73,6 +75,7 @@ class Report:
     routes: Dict[str, RouteResult]
     recommended: Optional[str]
     notes: List[str] = field(default_factory=list)
+    outcomes: Dict[str, List[Tuple[str, str, str, str]]] = field(default_factory=dict)  # category -> (kind, what, route, evidence)
 
 
 def _load(path: Path) -> Dict[str, Any]:
@@ -433,7 +436,15 @@ def _exports(r: RouteResult, back: Back, entry: Dict[str, Any]) -> None:
     for fmt, e in (entry.get("exports") or {}).items():
         name = FORMAT_NAMES.get(fmt, fmt)
         if not e.get("ok") or not e.get("exists"):
-            r.lost.append(f"{name} export: Timeline.Export failed" + (f" ({e['error']})" if e.get("error") else ""))
+            if e.get("error"):
+                why = f"failed ({e['error']})"
+            elif e.get("ok"):
+                near = e.get("nearby")
+                why = "returned True but no file is at the path given" + (f" (files under this name: {', '.join(near)})" if near else "")
+            else:
+                why = "returned False"
+            r.lost.append(f"{name} export: Timeline.Export {why}")
+            r.untested.append(f"{name} export not re-read by matchcut: no file came back")
             continue
         decisions, notes, error = back.get(fmt, (None, [], "not read back"))
         if decisions is None:
@@ -545,7 +556,7 @@ def _recommend(routes: Dict[str, RouteResult]) -> Tuple[Optional[str], str]:
             return name, f"Recommended default route for M2c-1: **{name}** ({why})" + ("; " + "; ".join(extra) if extra else "") + "."
     unread = [n for n in ROUTES if routes[n].verdict == "not measured"]
     if unread:
-        return None, ("No route could be judged: the frames of " + ", ".join(unread) + " could not be read back (see Failed steps); "
+        return None, ("No route could be judged: the frames of " + ", ".join(unread) + " could not be read back (see Outcomes); "
                       "none of the others is usable on this install.")
     return None, "None of the routes is usable on this install: no timeline came back with the cut's frames."
 
@@ -582,8 +593,53 @@ def _table(routes: Dict[str, RouteResult]) -> List[str]:
     return out
 
 
+def _headline(doc: Dict[str, Any]) -> str:
+    res = doc.get("resolve") or {}
+    if res.get("product") == FAKE_PRODUCT:
+        return f"From {FAKE_PRODUCT} (a test of matchcut's side), not from Resolve."
+    if not (doc.get("scripting") or {}).get("connected"):
+        return f"Nothing measured: the probe did not connect to Resolve ({doc.get('status')})."
+    where = ", from Resolve's own console" if (doc.get("scripting") or {}).get("mode") == "in-app console" else ""
+    return f"Measured once, on one install: {res.get('product')} {res.get('version_string')} ({edition(doc)}){where}."
+
+
+def classify_run(doc: Dict[str, Any], exp: Dict[str, Any], routes: Dict[str, RouteResult]) -> Tuple[List[Tuple[oc.Item, str, str]], List[Tuple[oc.Item, str, str]], int]:
+    """Every finding of every route and every recorded call that did not simply succeed, each with its category (``outcomes.classify``)."""
+    timelines = doc.get("timelines") or {}
+    old = next((str((doc.get("resolve") or {}).get("version_string")) for _ in doc.get("version_notes") or []), None)
+    ctx = oc.Context(old_version=old, media_found_in_pool=bool((doc.get("media") or {}).get("found_in_pool_by")),
+                     transition_called={r: any(a.get("called") for a in (e.get("transitions") or []) if isinstance(a, dict)) for r, e in timelines.items()})
+    items: List[oc.Item] = []
+    cat = doc.get("catalogue") or {}
+    for call, documented in (cat.get("gated") or {}).items():
+        if not documented:
+            items.append(oc.Item("finding", "", f"{call}: not documented on this install, so never called", "untested"))
+    if doc.get("mcp"):
+        items.append(oc.Item("finding", "", f"Resolve's MCP server: never started by the probe (binary file {'present' if doc['mcp'].get('found') else 'absent'})",
+                             "untested"))
+    for name in ROUTES:
+        r = routes[name]
+        for group in ("preserved", "approximated", "lost", "notes", "untested"):
+            items += [oc.Item("finding", name, text, group) for text in getattr(r, group)]
+    findings = [(it,) + oc.classify(it, ctx)[:2] for it in items]
+    # which item fields read None on every clip item of the run (read-back and the item under the playhead)
+    seen: Dict[str, List[Any]] = {}
+    for e in timelines.values():
+        rb = e.get("readback") or {}
+        pool = [v for track in (rb.get("video") or []) + (rb.get("audio") or []) for v in (track or []) if v]
+        pool += [a.get("current_item") for a in ((e.get("navigation") or {}).get("attempts") or []) if a.get("current_item")]
+        for v in pool:
+            if not _is_transition(v, rb, exp):
+                for fld in oc.ITEM_FIELDS.values():
+                    seen.setdefault(fld, []).append(v.get(fld))
+    uniform = {fld: bool(vals) and all(x is None for x in vals) for fld, vals in seen.items()}
+    call_items, ok_calls = oc.calls(doc, lambda v, rb: bool(_is_transition(v, rb, exp)), uniform)
+    return findings, [(it,) + oc.classify(it, ctx)[:2] for it in call_items], ok_calls
+
+
 def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: Dict[str, RouteResult], recommendation: str,
             notes: List[str]) -> str:
+    findings, call_items, ok_calls = classify_run(doc, exp, routes)
     plat = doc.get("platform") or {}
     res = doc.get("resolve") or {}
     cat = doc.get("catalogue") or {}
@@ -600,7 +656,7 @@ def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: D
              f"module {(doc.get('scripting') or {}).get('module_path')}"]
     if edition(doc):
         lines.append(f"- edition: {edition(doc)} (GetProductName() {'contains' if edition(doc) == 'Studio' else 'does not contain'} \"Studio\"); "
-                     "calls the free edition does not offer may return False or None, recorded as failed steps")
+                     "calls the free edition does not offer may return False or None (see Outcomes)")
     for e in (doc.get("scripting") or {}).get("module_errors") or []:
         lines.append(f"- found {e.get('file') or e.get('where')} but it failed to import: {e.get('error')}")
     files = cat.get("files") or []
@@ -630,25 +686,17 @@ def _render(doc: Dict[str, Any], exp: Dict[str, Any], json_path: Path, routes: D
         r = routes[name]
         lines += ["", f"### {name}: {r.verdict}", ""]
         if r.dissolves_from:
-            lines.append(f"- dissolves judged from {r.dissolves_from}")
-        for title, items in (("preserved", r.preserved), ("approximated", r.approximated), ("lost", r.lost), ("notes", r.notes)):
-            for item in items:
-                lines.append(f"- {title}: {item}")
-        if not (r.preserved or r.approximated or r.lost or r.notes):
+            lines.append(f"(dissolves judged from {r.dissolves_from})")
+            lines.append("")
+        mine = sorted(((oc.CATEGORIES.index(c), k, it, ev) for k, (it, c, ev) in enumerate(findings) if it.route == name), key=lambda x: x[:2])
+        for ci, _k, it, ev in mine:
+            lines.append(f"- {oc.LABELS[oc.CATEGORIES[ci]]}: {it.text}" + (f" ({ev})" if ev else ""))
+        if not mine:
             lines.append("- not tried")
-    fails = doc.get("failures") or []
-    lines += ["", f"## Failed steps ({len(fails)})", ""]
-    groups: Dict[Tuple[str, str], List[str]] = {}
-    for f in fails:  # the same call with the same outcome is one line, counted, with where it happened
-        what = f"raised {f['error']}" if f.get("error") else f"returned {json.dumps(f.get('return'))}"
-        groups.setdefault((str(f.get("call")), what[:200]), []).append(str(f.get("where")))
-    for (call, what), wheres in groups.items():
-        places = list(dict.fromkeys(w.split(":")[0] for w in wheres))
-        lines.append(f"- `{call}` {what}: {len(wheres)} time{'s' if len(wheres) != 1 else ''} ({', '.join(places[:6])}{', ...' if len(places) > 6 else ''})")
-    if not fails:
-        lines.append("- none")
+    lines += [""] + oc.render(findings, call_items, ok_calls, _headline(doc))
     if notes or doc.get("notes"):
-        lines += ["", "## Notes", ""] + [f"- {n}" for n in notes + list(doc.get("notes") or [])]
+        lines += ["## Notes", ""] + [f"- {n}" for n in notes + list(doc.get("notes") or [])] + [""]
+    lines += oc.raw_steps(doc)
     return "\n".join(lines) + "\n"
 
 
@@ -703,9 +751,15 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
     else:
         recommended, recommendation = None, "No route was tried, so there is nothing to recommend."
     text = _render(doc, exp, json_path, routes, recommendation, notes)
+    findings, call_items, _ = classify_run(doc, exp, routes)
+    by_cat: Dict[str, List[Tuple[str, str, str, str]]] = {c: [] for c in oc.CATEGORIES}
+    for it, c, ev in findings:
+        by_cat[c].append(("finding", it.text, it.route, ev))
+    for it, c, ev in call_items:
+        by_cat[c].append(("call", f"{it.step.get('call')} {oc._outcome(it.step)}", it.route, ev))
     out = json_path.parent / REPORT
     try:
         out.write_text(text, encoding="utf-8")
     except OSError as exc:
         raise ProbeError(f"cannot write {out}: {exc.strerror or exc}") from exc
-    return Report(text, out, routes, recommended, notes)
+    return Report(text, out, routes, recommended, notes, by_cat)

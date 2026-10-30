@@ -220,7 +220,7 @@ Exit codes of the script:
 
 | code | meaning |
 |---|---|
-| 0 | done (failed steps are measurements and are recorded) |
+| 0 | done (steps that returned nothing or failed are recorded; the report sorts them into outcomes) |
 | 2 | the module was not found or failed to import, or Resolve did not answer |
 | 3 | refused by the safety check (also when the open project changed while it waited for your answer) |
 | 4 | the probe could not make its own project, or the open project changed while it ran (it stops before the next write) |
@@ -264,7 +264,7 @@ and records `scripting.mode = "in-app console"`.
    - **Nothing escapes into Resolve:** a SystemExit is turned into the printed exit code.
 5. **Send back** the `runs/<UTC time>/` folder from the bundle, as for the Terminal run.
 
-Studio-only calls may return False or None on the free edition. They are recorded as failed steps, and the report says
+Studio-only calls may return False or None on the free edition. The report's Outcomes section sorts them, and the report says
 "free edition" when `GetProductName()` does not contain "Studio".
 
 ## First live run (2026-10-29)
@@ -277,42 +277,48 @@ Studio-only calls may return False or None on the free edition. They are recorde
 - The installed catalogue was a README.txt, "Last Updated: 26 May 2026", without `GetType` or `AddTransition`.
 - Status complete, on matchcut's synthetic demo cut: 5 clips, 2 dissolves (8 and 18 frames), 25 fps, 462 frames of media.
 
-**What came back:**
+**What came back, in the report's five categories.** Every finding and every recorded call is in exactly one of them.
+The rules are one table in `matchcut/resolve/outcomes.py`.
 
-- **Imports (OTIO, FCPXML 1.10, EDL): frame-exact, with the dissolves.**
-  - All three gave the same video track 1. Every clip's record start, duration and source in/out matched
-    `expected.json`.
-  - Each dissolve came back as an item of its own, named "Cross Dissolve", with no source frames. It has the
+- **Passed:**
+  - **Imports (OTIO, FCPXML 1.10, EDL): frame-exact, with the dissolves.** All three gave the same video track 1, and
+    every clip's record start, duration and source in/out matched `expected.json`.
+  - **Dissolves:** each came back as an item of its own, named "Cross Dissolve", with no source frames. It has the
     dissolve's exact length and is centred on the cut, as matchcut writes it: 61-69 across the cut at 65, 105-123 across
-    114.
-  - There was no `GetType` on this install. The report identifies these items by having no source frames and spanning
-    an expected cut; the name is recorded but not relied on.
-- **Two read-back conventions:**
-  - `GetSourceEndFrame` is exclusive (start + duration), except for the clip that ends at the media's end. There it
-    reports the media's last frame (461 for 462 frames).
-  - `GetLeftOffset` and `GetRightOffset` returned None on every imported item.
-- **Timeline start:** imported timelines start at frame 0 / 00:00:00:00. Timelines made with `CreateEmptyTimeline`
-  start at 90000 / 01:00:00:00. Record frames are the same relative to the start.
-- **Build route:** `AppendToTimeline` placed every clip exactly (relative to the 01:00:00:00 start). The dissolves are
-  lost by construction, and `AddTransition` is not on this install.
-- **Exports:**
-  - OTIO and EDL `Timeline.Export` worked for every timeline. They read back through M2a with no differences from the
-    stage for the imports; for the build routes the only differences are the 2 dissolves, which are cuts there.
-  - FCPXML 1.10 `Timeline.Export` failed (returned False) on every route.
-- **Markers:**
-  - The markers the files carry were not found by `GetMarkerByCustomData` (0 of 4).
-  - The probe's own `AddMarker` with the junction id as `customData` was found by id 4 of 4.
-  - `GetMarkerByCustomData` returned the marker's information without its frame.
-- **Navigation:** `SetCurrentTimecode` from the start timecode plus the record frame put the playhead on the incoming
-  clip for 4 of 4 junctions, on every route.
-- **MCP:** no `ResolveMCP` binary file (observed only).
+    114. With no `GetType` on this install, the report identifies these items by having no source frames and spanning an
+    expected cut (the name is recorded, not relied on).
+  - **Build:** `AppendToTimeline` placed every clip exactly.
+  - **Exports:** OTIO and EDL `Timeline.Export` worked for every timeline, and read back through M2a with no clip or frame
+    differences.
+  - **Markers:** the probe's own `AddMarker` (junction id as `customData`) was found by id 4 of 4, on build and
+    import-otio.
+  - **Navigation:** the playhead landed on the incoming clip 4 of 4 on every route.
+  - **Conventions it measured:**
+    - `GetSourceEndFrame` is exclusive (start + duration), except for the clip that ends at the media's end, where it
+      reports the media's last frame (461 for 462 frames);
+    - imported timelines start at frame 0 / 00:00:00:00, timelines made with `CreateEmptyTimeline` at 90000 /
+      01:00:00:00;
+    - `GetMarkerByCustomData` returns the marker's information without its frame.
+  - **Nothing-to-find lookups:** 8 `GetMarkerByCustomData` lookups returned None where there was nothing to find yet: the
+    4 on import-edl (an EDL carries no markers) and the 4 on build before the probe added its own.
+- **Failed:** FCPXML 1.10 `Timeline.Export` on all 5 routes. It returned True, but no file was at the path given. The
+  reason is not reported by Resolve; it may be edition- or version-specific (unverified). The probe now records which
+  files with that route's name are in the exports folder, to see where it went.
+- **Unsupported:** 32 reads returned None on transition items: `GetLeftOffset`, `GetRightOffset`,
+  `GetSourceStartFrame` and `GetSourceEndFrame`, 8 each. Those are 2 transition items on video track 1 of each import,
+  plus 2 on import-otio's audio track: matchcut's OTIO puts the same transitions on A1. These reads do not apply to a
+  transition. On clips they returned numbers.
+- **Not preserved by Resolve:** the junction markers the OTIO and the FCPXML carry were not found by
+  `GetMarkerByCustomData`: 0 of 4 on each, 8 null lookups. M2c-1 adds its own markers by id after the import.
+- **Not tested:**
+  - `TimelineItem.AddTransition` and `TimelineItem.GetType`: not documented on this install (README.txt "Last Updated: 26
+    May 2026"), so never called. The build routes' dissolves therefore stay untested.
+  - The MCP server: never started; no `ResolveMCP` binary file.
+  - The FCPXML exports: not re-read, since no file came back.
+  - The EDL's markers: a CMX3600 EDL carries none.
 
-**What the report concludes:**
-
-- The imports are usable: frames exact, dissolves kept.
-- The build routes are usable without the dissolves.
-- Recommended for M2c-1: **import-otio**, with junction markers added by id after the import (the file's own markers
-  are not found by id).
+The raw steps stay in `resolve_probe.json` unchanged, and the report's appendix "Raw steps" lists each of the 48 null
+steps exactly as observed.
 
 **Not verified by this run:**
 

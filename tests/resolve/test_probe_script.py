@@ -564,3 +564,12 @@ def test_a_switch_just_before_create_project_creates_nothing(bundle, monkeypatch
     assert code == 3 and doc["status"] == "refused" and world.calls("ProjectManager.CreateProject") == []
     assert world.projects.get(("matchcut-probe",), {}) == {} and world.current.name == "Client job v2"
     assert "The open project changed just before the switch: it was 'Untitled Project', it is now 'Client job v2'. Nothing was created" in out
+
+
+def test_an_export_that_writes_elsewhere_is_traced(bundle, monkeypatch):
+    """Export says yes but nothing is at the path: the probe records what else is under the route's name (not its own exports)."""
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["resolve 21.0.2 free (observed)"])
+    run = bundle.dir / doc["run_dir"] / "exports"
+    x = doc["timelines"]["build"]["exports"]["fcpxml"]
+    assert x["ok"] is True and x["exists"] is False and (run / "build.otio").exists()
+    assert x["nearby"] == []  # the probe's own build.otio and build.edl are not counted as where the FCPXML went

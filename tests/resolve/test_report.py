@@ -54,7 +54,7 @@ def test_a_fake_that_keeps_everything(wsp, bundle, monkeypatch):
     assert rep.path == last_run(bundle).parent / "probe_report.md"
     assert text == rep.text and "Recommended default route for M2c-1: **import-otio** (frames exact and dissolves as expected, as measured)." in text
     assert "not run against a live Resolve" in text and "matchcut fake of the documented Resolve API" in text
-    assert "| build+transitions | usable |" in text and f"- dissolves judged from {FROM_EXPORTS}" in text
+    assert "| build+transitions | usable |" in text and f"(dissolves judged from {FROM_EXPORTS})" in text
 
 
 def test_a_fake_that_loses_dissolves(wsp, bundle, monkeypatch):
@@ -279,3 +279,52 @@ def test_bad_input_is_one_line(wsp, bundle, tmp_path):
     with pytest.raises(ProbeError) as err:
         build_report(wsp.ws, wsp.cfg, bad)
     assert "no expected.json next to" in str(err.value)
+
+
+def _cats(rep, kind=None):
+    return {c: [(k, w, r) for k, w, r, _ in items if kind in (None, k)] for c, items in rep.outcomes.items()}
+
+
+def test_the_outcomes_of_a_fake_that_keeps_everything(wsp, bundle, monkeypatch):
+    rep, _ = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["keeps everything"])
+    o = _cats(rep)
+    assert o["Failed"] == [] and o["Unsupported"] == []
+    # this fake carries no FCPXML markers across (a model choice); an EDL carries none at all
+    assert o["Not preserved by Resolve"] == [("finding", "junction markers from the file: 0 of 4 found by id", "import-fcpxml")]
+    passed_calls = [w for k, w, r in o["Passed"] if k == "call"]
+    assert "MediaPool.ImportMedia returned []" in passed_calls and passed_calls.count("Timeline.AddMarker returned false") == 4
+    assert [w for k, w, r in o["Not tested"]] == ["Resolve's MCP server: never started by the probe (binary file absent)",
+                                                  "junction markers from the file: 0 of 4 found by id",
+                                                  "dissolves: 2 of 2 are cuts (the OTIO, FCPXML and EDL exports; the read-back does not show transitions) "
+                                                  "(the build route adds none)",
+                                                  "OTIO export reads back with 2 transition changes and no clip or frame differences",
+                                                  "FCPXML export reads back with 2 transition changes and no clip or frame differences",
+                                                  "EDL export reads back with 2 transition changes and no clip or frame differences"]
+
+
+@pytest.mark.parametrize("variant, category, expect", [
+    ("loses dissolves", "Not preserved by Resolve", [("finding", "dissolves: 2 of 2 are cuts", r) for r in ("import-otio", "import-fcpxml", "import-edl")]),
+    ("loses dissolves", "Failed", [("finding", "dissolves: 2 of 2 are cuts", "build+transitions"),
+                                   ("finding", "AddTransition: called for 2 dissolves, returned None 2 times", "build+transitions"),
+                                   ("call", "TimelineItem.AddTransition returned null", "build+transitions"),
+                                   ("call", "TimelineItem.AddTransition returned null", "build+transitions")]),
+    ("shifts frames by 1", "Failed", [("finding", "source in differs on 5 of 5 clips", r) for r in ("build", "build+transitions")]
+     + [("finding", "source out differs on 5 of 5 clips", r) for r in ("build", "build+transitions")]),
+    ("drops markers", "Failed", [("finding", "junction markers added by the probe: 0 of 4 found by id", r) for r in ("import-otio", "build")]),
+    ("AddTransition not documented", "Not tested", [("finding", "TimelineItem.AddTransition: not documented on this install, so never called", ""),
+                                                    ("finding", "TimelineItem.GetType: not documented on this install, so never called", "")]),
+    ("Resolve 18.5", "Unsupported", [("call", "TimelineItem.GetSourceStartFrame raised RuntimeError", r) for r in ROUTES]),
+])
+def test_each_fake_variant_gets_a_sensible_classification(wsp, bundle, monkeypatch, variant, category, expect):
+    rep, _ = probe_and_report(wsp, bundle, monkeypatch, VARIANTS[variant])
+    got = _cats(rep)[category]
+    for kind, start, route in expect:
+        assert any(k == kind and w.startswith(start) and r == route for k, w, r in got), (kind, start, route, got[:6])
+
+
+def test_a_real_exception_is_failed(wsp, bundle, monkeypatch):
+    rep, _ = probe_and_report(wsp, bundle, monkeypatch, Variant(raise_on=("MediaPool.ImportTimelineFromFile",)))
+    failed = _cats(rep, "call")["Failed"]
+    assert [(w, r) for k, w, r in failed if w.startswith("MediaPool.ImportTimelineFromFile")] == [
+        ("MediaPool.ImportTimelineFromFile raised RuntimeError: fake failure in MediaPool.ImportTimelineFromFile", r) for r in ("import-otio", "import-fcpxml", "import-edl")]
+    assert any(w.startswith("no timeline: MediaPool.ImportTimelineFromFile raised") for k, w, r in _cats(rep, "finding")["Failed"])

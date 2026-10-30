@@ -93,6 +93,10 @@ class Variant:
     src_end_media_last: bool = False  # GetSourceEndFrame reports the media's last frame (inclusive) for a clip that ends at the media's end
     export_fails: Tuple[str, ...] = ()  # export constants (e.g. "EXPORT_FCPXML_1_10") for which Timeline.Export returns False
     import_marker_custom_data: bool = True  # markers imported from an OTIO keep the junction id as customData
+    import_markers: bool = True  # an OTIO import brings its markers at all
+    marker_lookup_none: bool = False  # GetMarkerByCustomData returns None (not {}) when no marker has that customData
+    audio_transition_items_from: Tuple[str, ...] = ()  # file extensions whose import also lists transition items on audio track 1
+    export_silent: Tuple[str, ...] = ()  # export constants for which Timeline.Export returns True and writes no file
 
 
 VARIANTS = {
@@ -129,11 +133,15 @@ VARIANTS = {
     "transition items at the cut": Variant(name="transition items at the cut", transition_items=True, transition_at_cut=True),
     "marker info without frame": Variant(name="marker info without frame", marker_info_plain=True),
     # the first live run: DaVinci Resolve 21.0.2.4 free on macOS, from the Py3 console (2026-10-29); the read-back as it came back
+    # the first live run: DaVinci Resolve 21.0.2.4 free on macOS, from the Py3 console (2026-10-29), as it came back. Its 48 null steps:
+    # GetMarkerByCustomData x16 (the 4 lookups before adding markers, on the 3 imports and on build) and, x8 each, GetLeft/RightOffset and
+    # GetSourceStart/EndFrame on transition items (2 per import on video track 1, and 2 more on import-otio's audio track, whose OTIO A1
+    # carries the same transitions). The FCPXML export reported success but no file came back.
     "resolve 21.0.2 free (observed)": Variant(
         name="resolve 21.0.2 free (observed)", product="DaVinci Resolve", version=(21, 0, 2, 4, ""), version_string="21.0.2.4",
         catalogue_txt="Last Updated: 26 May 2026", documents_add_transition=False, import_start_tc="00:00:00:00", start_tc="01:00:00:00",
-        transition_items=True, offsets_none=True, src_end_media_last=True, export_fails=("EXPORT_FCPXML_1_10",),
-        import_marker_custom_data=False, marker_info_plain=True),
+        transition_items=True, src_end_media_last=True, export_silent=("EXPORT_FCPXML_1_10",), import_markers=False,
+        marker_lookup_none=True, marker_info_plain=True, import_media_dupes=True, audio_transition_items_from=(".otio",)),
     "Resolve 18.5": Variant(name="Resolve 18.5", version=(18, 5, 0, 0, ""), raise_on=("TimelineItem.GetSourceStartFrame", "TimelineItem.GetSourceEndFrame")),
 }
 
@@ -165,6 +173,7 @@ class TimelineModel:
     audio: List[Item] = field(default_factory=list)
     transitions: Dict[int, Tuple[int, int]] = field(default_factory=dict)  # incoming video item index -> (frames, head before the cut)
     markers: Dict[int, Dict[str, Any]] = field(default_factory=dict)  # frame from the timeline start -> marker
+    audio_transitions: bool = False  # audio track 1 lists the transitions too (as items)
     playhead: int = 0
 
     @property
@@ -317,10 +326,14 @@ class FakeTimelineItem(_Api):
         return self.item.dur
 
     def GetLeftOffset(self, subframe_precision=False):
-        return None if self._world.variant.offsets_none else self.item.src_in + self._shift()
+        if self.item.track == "transition" or self._world.variant.offsets_none:
+            return None
+        return self.item.src_in + self._shift()
 
     def GetRightOffset(self, subframe_precision=False):
-        return None if self._world.variant.offsets_none else self.item.media.src.duration_frames - (self.item.src_in + self._shift() + self.item.dur)
+        if self.item.track == "transition" or self._world.variant.offsets_none:
+            return None
+        return self.item.media.src.duration_frames - (self.item.src_in + self._shift() + self.item.dur)
 
     def GetSourceStartFrame(self):
         return None if self.item.track == "transition" else self.item.src_in + self._shift()
@@ -391,7 +404,8 @@ class FakeTimeline(_Api):
         items = {"video": self.tl.video, "audio": self.tl.audio}.get(trackType, []) if index == 1 else []
         out = []
         for k, i in enumerate(items):
-            if trackType == "video" and self._world.variant.transition_items and k in self.tl.transitions:
+            listed = trackType == "video" or (trackType == "audio" and self.tl.audio_transitions)
+            if listed and self._world.variant.transition_items and k in self.tl.transitions:
                 frames, head = self.tl.transitions[k]
                 at = i.start if self._world.variant.transition_at_cut else i.start - head
                 out.append(FakeTimelineItem(self._world, self.tl, Item(i.media, at, frames, 0, "transition")))
@@ -416,7 +430,7 @@ class FakeTimeline(_Api):
         for f, m in sorted(self.tl.markers.items()):
             if m["customData"] == customData:
                 return dict(m) if self._world.variant.marker_info_plain else {float(f): dict(m)}
-        return {}
+        return None if self._world.variant.marker_lookup_none else {}
 
     def UpdateMarkerCustomData(self, frameId, customData):
         self._log("UpdateMarkerCustomData", frameId, customData)
@@ -450,6 +464,8 @@ class FakeTimeline(_Api):
             return False
         if any(exportType == consts[c] for c in self._world.variant.export_fails):
             return False
+        if any(exportType == consts[c] for c in self._world.variant.export_silent):
+            return True  # says it worked, writes nothing at that path
         if exportType == consts["EXPORT_OTIO"]:
             text = json.dumps(_otio_of(self.tl, self._world), indent=1)
         elif exportType == consts["EXPORT_FCPXML_1_10"]:  # matchcut's writer, then without matchcut's metadata, as an editor writes it
@@ -618,8 +634,9 @@ class FakeMediaPool(_Api):
                 tl.audio.append(Item(media, tl.start + row.cut, row.dur, row.vis_in, "audio"))
             if row.tr and not self._world.variant.lose_dissolves:
                 tl.transitions[k] = (row.tr, row.head)
-        if not self._world.variant.drop_markers:
+        if not self._world.variant.drop_markers and self._world.variant.import_markers:
             tl.markers.update(dict(markers))
+        tl.audio_transitions = ext in self._world.variant.audio_transition_items_from
         return FakeTimeline(self._world, self.project, tl)
 
 
