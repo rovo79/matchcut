@@ -8,7 +8,9 @@ installation with synthetic footage:
 - importing matchcut's OTIO gives a timeline whose clips are frame-exact;
 - both dissolves came through as 8- and 18-frame "Cross Dissolve" items centred on their cuts;
 - junction markers added by script with `AddMarker` are found again by their `customData` (4 of 4). The
-  markers carried in the OTIO were not imported: Resolve's read-back showed none;
+  markers carried in the OTIO were not found by their ids. That Resolve imported none of them is an
+  inference: `AddMarker` succeeded at those same frames, 4 of 4, and the user's report showed no marker
+  failure. Phase 1's read-back of `GetMarkers()` settles it;
 - `SetCurrentTimecode(start timecode + record frame)` lands the playhead on the incoming clip of every
   junction;
 - Resolve's own OTIO and EDL exports of that timeline read back through M2a with no clip or frame
@@ -150,6 +152,9 @@ Terminal command, for Studio.
      - That writes the OTIO and the stage snapshot `WS/exports/.stages/<stage>-<sha12>.json`, which is
        where M2a's import looks for snapshots.
      - M2a merges provenance and fidelity per stage and format, so other exports there are kept.
+     - Like any M2a export of that stage, push overwrites `WS/exports/<stage>.otio`. It also regenerates
+       `open_in_resolve.py` if that script targets the stage. The command says so, and the OTIO's sha256
+       is recorded in `plan.json` and `result.json`.
   2. Writes `plan.json`, holding:
      - the expected clip list (frames), the junctions (id, record frame, name, note, colour, `customData`)
        and the rate;
@@ -201,18 +206,26 @@ safety, records, and writes nothing in Resolve.
      `LoadProject`, then verify the id before any write.
    - If it does not exist, the open project must be empty. Then create the owned project in the `matchcut`
      folder, the same way the probe creates its project, and record its id.
+     - If `GetUniqueId` returns None or empty right after `CreateProject`, push stops before importing
+       (exit 4) and records the finding. The new, empty project is left in place for open question 3.
+       Nothing else is written.
    - Otherwise refuse (exit 3) and say which project to open.
 3. **A timeline of that name already exists.** If a timeline named `matchcut <stage> <sha12>` exists, the
    script imports nothing and changes nothing.
-   - It records the timeline's read-back (items, markers, unique id) and exits with 0 and the message
+   - The pushed timeline is found by the unique id recorded in `pushes.json` first, then by name, so a
+    timeline the user renamed is still recognised and not imported a second time.
+  - It records the timeline's read-back (items, markers, unique id) and exits with 0 and the message
      "a timeline for this stage already exists: run `python -m matchcut.resolve check WS`".
    - The script makes no judgement about whether that timeline was edited. `check` decides, in matchcut,
      and reports one of:
-     - matches the plan;
-     - matches, but these junction markers are missing;
-     - edited in Resolve since it was pushed.
+     - whether the clips and transitions match the plan or were edited in Resolve since the push;
+     - and, independently, which junction markers are missing or not at their planned frames.
+
+     Both are reported, so an edited timeline with a deleted marker reports both.
    - Re-placing missing markers is a separate, explicit step: `push --add-missing-markers` after `check`
      has listed them. A marker the user deleted is therefore never put back silently.
+     - On a timeline `check` reported as edited, `--add-missing-markers` places a marker only where that
+       junction's two clips are unchanged. Other junctions are reported, not marked.
    - `--as-new` imports to `matchcut <stage> <sha12> (2)` and so on, never replacing the existing one.
 4. **Import.** `MediaPool.ImportTimelineFromFile(otio, {"timelineName": name, "importSourceClips": True})`.
    - A None result fails (exit 4), and nothing is saved.
@@ -258,8 +271,8 @@ safety, records, and writes nothing in Resolve.
 
 ### pull.py (Phase 2)
 
-1. Connect. The owned project must be open (goto's rule). Find the timeline by unique id and check its
-   name.
+1. Connect. The owned project must be open (goto's rule). Find the timeline by unique id. If it has been
+   renamed, proceed and report the new name.
 2. `Timeline.Export(path, EXPORT_OTIO, EXPORT_NONE)` into `WS/resolve/runs/<UTC>-pull/timeline.otio`.
    Record the timeline's read-back alongside, as evidence.
 3. Change nothing in Resolve, and save nothing.
@@ -277,8 +290,9 @@ safety, records, and writes nothing in Resolve.
      - **`base_sha256=`**: when given, diff against the snapshot of exactly that stage sha. A missing or
        damaged snapshot is M2a's existing one-line error. Today the snapshot is chosen only from a
        fingerprint inside the file, which Resolve's export drops.
-     - **`record_extra=`**: a dict merged into `human_import.json` in the same atomic write, for the
-       Resolve source and the pull run.
+     - **`record_extra=`**: a dict written into `human_import.json` in the same atomic write, under one
+       key, `"resolve": {...}`, for the Resolve source and the pull run. It can never overwrite M2a's own
+       keys.
      - Both parameters are optional, so existing calls behave as today. M2a's tests are extended.
 2. **Protect the existing human stage.** If `human.json` exists:
    - **It came from this same pushed timeline** (its `human_import.json` records the push's timeline id
@@ -379,8 +393,8 @@ Setup:
    again.
    - Expect "already exists" with nothing changed.
    - Then `check` should report "edited in Resolve since it was pushed", with your trim intact.
-   - Delete one junction marker, push again, and run `check`. Expect "marker J2 missing". It is not put
-     back unless you run `push --add-missing-markers`.
+   - Delete one junction marker, push again, and run `check`. Expect both "edited" and "marker J2
+     missing". The marker is not put back unless you run `push --add-missing-markers`.
 8a. **Switch into the owned project.** Open a new, empty project (the owned project exists), then paste the
     push line.
     - Expect the confirmation, then a switch into `matchcut-…` by `LoadProject` with its id verified,
