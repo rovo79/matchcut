@@ -173,12 +173,21 @@ def _reimport(scratch: Path, cfg: PipelineConfig, path: Path, stage: str) -> Tup
 
 # -- one route -----------------------------------------------------------------------------------------------------------------
 def _spans_cut(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[int]:
-    """The record frame (from the timeline start) of an expected cut that ``v`` lies across, or None. The edges count (start <= cut <= end):
-    it is only asked of items with no source frames, and an install may place a transition starting or ending at the cut."""
+    """The record frame (from the timeline start) of an expected cut that ``v`` lies across, or None. It is only asked of items with no
+    source frames. An item strictly across a cut (start < cut < end) is a transition. One that only touches a cut at an edge (an install
+    may place a transition starting or ending at the cut) counts too, unless its record range is exactly an expected clip's: every clip
+    touches the cuts at its own edges, and a clip whose source reads failed must stay a clip."""
     start = rb.get("start_frame")
     if not (_num(v.get("start")) and _num(v.get("end")) and _num(start)):
         return None
-    return next((c["rec_in"] for c in exp["clips"][1:] if v["start"] <= start + c["rec_in"] <= v["end"]), None)
+    lo, hi = v["start"] - start, v["end"] - start
+    cuts = [c["rec_in"] for c in exp["clips"][1:]]
+    strict = next((c for c in cuts if lo < c < hi), None)
+    if strict is not None:
+        return strict
+    if any((lo, hi) == (c["rec_in"], c["rec_in"] + c["dur"]) for c in exp["clips"]):
+        return None
+    return next((c for c in cuts if lo <= c <= hi), None)
 
 
 def _is_transition(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[str]:
@@ -440,8 +449,11 @@ def _exports(r: RouteResult, back: Back, entry: Dict[str, Any]) -> None:
             inside = e.get("dir_entries") or []
             r.notes.append(f"{name} export: Timeline.Export wrote a directory at the path, not a file (an FCPXML bundle?): "
                            + (", ".join(inside[:8]) if inside else "empty"))
-            if "Info.fcpxml" not in inside:
-                r.untested.append(f"{name} export not re-read by matchcut: the directory has no Info.fcpxml")
+            if not e.get("ok") or "Info.fcpxml" not in inside:  # only a readable bundle that Export reported as done is not a failure
+                r.lost.append(f"{name} export: Timeline.Export " + ("returned False (a directory is at the path)" if not e.get("ok")
+                                                                     else "wrote a directory with no Info.fcpxml"))
+                r.untested.append(f"{name} export not re-read by matchcut: " + ("Export returned False" if not e.get("ok")
+                                                                                 else "the directory has no Info.fcpxml"))
                 continue
         elif not e.get("ok") or not e.get("exists"):
             if e.get("error"):
@@ -611,6 +623,16 @@ def _headline(doc: Dict[str, Any]) -> str:
     return f"Measured once, on one install: {res.get('product')} {res.get('version_string')} ({edition(doc)}){where}."
 
 
+def _unread_reason(doc: Dict[str, Any], route: str) -> str:
+    """Why a timeline that exists was never read back: the read-back's own recorded error, else the run's stop."""
+    err = next((f.get("error") for f in doc.get("failures") or [] if f.get("where") == f"{route}: readback" and f.get("call") == "(probe)"), None)
+    if err:
+        return f"the read-back raised {err}"
+    if doc.get("stopped") or doc.get("status") == "aborted":
+        return "the run stopped"
+    return "no read-back was recorded"
+
+
 def classify_run(doc: Dict[str, Any], exp: Dict[str, Any], routes: Dict[str, RouteResult]) -> Tuple[List[Tuple[oc.Item, str, str]], List[Tuple[oc.Item, str, str]], int]:
     """Every finding of every route and every recorded call that did not simply succeed, each with its category (``outcomes.classify``)."""
     timelines = doc.get("timelines") or {}
@@ -619,8 +641,9 @@ def classify_run(doc: Dict[str, Any], exp: Dict[str, Any], routes: Dict[str, Rou
     ctx = oc.Context(old_version=old, media_found_in_pool=bool((doc.get("media") or {}).get("found_in_pool_by")),
                      transition_called={r: any(a.get("called") for a in at) for r, at in attempts.items()},
                      transition_made={r: any(a.get("called") and a.get("result") not in (None, False) for a in at) for r, at in attempts.items()},
-                     readback_markers={r: (len((e.get("readback") or {}).get("markers") or {}) if e.get("readback") else None) for r, e in timelines.items()},
-                     unread=tuple(r for r, e in timelines.items() if e.get("created") and not e.get("readback")))
+                     readback_markers={r: (None if not e.get("readback") or e["readback"].get("markers") is None else len(e["readback"]["markers"]))
+                                       for r, e in timelines.items()},
+                     unread={r: _unread_reason(doc, r) for r, e in timelines.items() if e.get("created") and not e.get("readback")})
     items: List[oc.Item] = []
     cat = doc.get("catalogue") or {}
     for call, documented in (cat.get("gated") or {}).items():

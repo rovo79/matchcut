@@ -60,7 +60,7 @@ class Context:
     transition_made: Dict[str, bool] = field(default_factory=dict)  # route -> AddTransition returned something for at least one dissolve
     media_found_in_pool: bool = False
     readback_markers: Dict[str, Optional[int]] = field(default_factory=dict)  # route -> markers its read-back shows (None: not read)
-    unread: Tuple[str, ...] = ()  # routes whose timeline exists but was never read back (the run stopped first)
+    unread: Dict[str, str] = field(default_factory=dict)  # route -> why its timeline, which exists, was never read back
 
 
 def _call(it: Item) -> str:
@@ -74,6 +74,11 @@ def _ret(it: Item) -> Any:
 # -- the rules: (what it recognises, test, category, evidence) - tried in order, the first that matches decides ---------------------------
 Rule = Tuple[str, Callable[[Item, Context], bool], str, Callable[[Item, Context], str]]
 
+# the findings that come from a timeline's read-back: frames, dissolves, navigation
+MEASURED_FROM_READBACK = ("clip count", "record start", "duration", "source in", "source out", "dissolves", "navigation", "2 transition items",
+                          "transition items", "GetSourceEndFrame reports")
+
+
 def _otio_markers(i: Item, c: Context) -> str:
     n = c.readback_markers.get(i.route)
     if not n:
@@ -83,8 +88,10 @@ def _otio_markers(i: Item, c: Context) -> str:
 
 FINDING_RULES: List[Rule] = [
     ("not made: gated off, never started, or nothing to re-read", lambda i, c: i.group == "untested", NOT_TESTED, lambda i, c: ""),
-    ("a timeline the run stopped before reading", lambda i, c: i.route in c.unread and i.group == "lost" and (
-        i.text.startswith("clip count") or "differs on" in i.text), NOT_TESTED, lambda i, c: "not measured: the run stopped"),
+    ("a timeline that was never read back", lambda i, c: i.route in c.unread and i.group != "untested" and (
+        i.text.startswith(MEASURED_FROM_READBACK) or "differs on" in i.text), NOT_TESTED, lambda i, c: f"never read back ({c.unread[i.route]})"),
+    ("file markers on a timeline that was never read back", lambda i, c: i.text.startswith("junction markers from the file")
+     and c.readback_markers.get(i.route, 0) is None, NOT_TESTED, lambda i, c: "the read-back was not taken"),
     ("what came back as written", lambda i, c: i.group in ("preserved", "approximated"), PASSED, lambda i, c: ""),
     ("an export Resolve did not write", lambda i, c: i.group == "lost" and bool(re.match(r"^\w+ export: Timeline\.Export", i.text)), FAILED,
      lambda i, c: FCPXML_NOTE if i.text.startswith("FCPXML") else "reason not reported by Resolve"),
@@ -134,6 +141,8 @@ CALL_RULES: List[Rule] = [
      lambda i, c: f"Resolve {c.old_version}: not in the 18.5 README as the probe calls it"),
     ("the file's markers, looked up before the probe added its own", lambda i, c: i.note == "marker-before-file" and i.route in NO_CUSTOM_DATA,
      NOT_TESTED, lambda i, c: NO_CUSTOM_DATA[i.route]),
+    ("the OTIO's markers, with no read-back to tell", lambda i, c: i.note == "marker-before-file" and c.readback_markers.get(i.route, 0) is None,
+     NOT_TESTED, lambda i, c: "the read-back was not taken"),
     ("the OTIO's markers, looked up before the probe added its own", lambda i, c: i.note == "marker-before-file", NOT_PRESERVED, _otio_markers),
     ("the negative control: a built timeline before the probe's markers", lambda i, c: i.note == "marker-before-none", PASSED,
      lambda i, c: "nothing to find yet: a built timeline carries no file markers"),

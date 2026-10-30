@@ -781,10 +781,16 @@ def exports(rec, route, resolve, tl, run_dir):
         entry["sha256"] = sha256(path) if entry["exists"] else None
         if not entry["exists"]:  # where did it go, if anywhere: files under this route's name other than the probe's own exports
             own = set(stem + x[3] for x in EXPORTS)
-            entry["nearby"] = sorted(n for n in os.listdir(folder) if n.startswith(stem) and n not in own)
+            try:
+                entry["nearby"] = sorted(n for n in os.listdir(folder) if n.startswith(stem) and n not in own)
+            except OSError as exc:  # a listing that fails is recorded; the other exports go on
+                entry["nearby_error"] = "%s: %s" % (type(exc).__name__, exc)
             entry["is_dir"] = os.path.isdir(path)  # e.g. an FCPXML bundle (.fcpxmld layout) at the path: list it, read only
             if entry["is_dir"]:
-                entry["dir_entries"] = sorted(os.listdir(path))
+                try:
+                    entry["dir_entries"] = sorted(os.listdir(path))
+                except OSError as exc:
+                    entry["dir_entries_error"] = "%s: %s" % (type(exc).__name__, exc)
         out[fmt] = entry
     return out
 

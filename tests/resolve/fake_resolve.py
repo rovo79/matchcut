@@ -98,6 +98,10 @@ class Variant:
     audio_transition_items_from: Tuple[str, ...] = ()  # file extensions whose import also lists transition items on audio track 1
     export_silent: Tuple[str, ...] = ()  # export constants for which Timeline.Export returns True and writes no file
     fcpxml_bundle: bool = False  # the FCPXML export is written as a bundle: a directory at the path holding Info.fcpxml
+    fcpxml_bundle_files: Tuple[str, ...] = ("Info.fcpxml",)  # ... with these files in it
+    fcpxml_bundle_ok: bool = True  # ... and Export returns this
+    null_clip: Tuple[str, int] = ()  # (file extension, clip index): that imported clip's source and offset reads return None
+    bad_item_list: str = ""  # timeline name suffix whose GetItemListInTrack returns a number (the probe's read-back then raises)
 
 
 VARIANTS = {
@@ -162,6 +166,7 @@ class Item:
     dur: int
     src_in: int  # source start frame (from the media's frame 0)
     track: str = "video"
+    nulls: bool = False  # its source and offset reads return None (a clip whose reads fail)
 
 
 @dataclass
@@ -327,20 +332,20 @@ class FakeTimelineItem(_Api):
         return self.item.dur
 
     def GetLeftOffset(self, subframe_precision=False):
-        if self.item.track == "transition" or self._world.variant.offsets_none:
+        if self.item.track == "transition" or self._world.variant.offsets_none or self.item.nulls:
             return None
         return self.item.src_in + self._shift()
 
     def GetRightOffset(self, subframe_precision=False):
-        if self.item.track == "transition" or self._world.variant.offsets_none:
+        if self.item.track == "transition" or self._world.variant.offsets_none or self.item.nulls:
             return None
         return self.item.media.src.duration_frames - (self.item.src_in + self._shift() + self.item.dur)
 
     def GetSourceStartFrame(self):
-        return None if self.item.track == "transition" else self.item.src_in + self._shift()
+        return None if self.item.track == "transition" or self.item.nulls else self.item.src_in + self._shift()
 
     def GetSourceEndFrame(self):
-        if self.item.track == "transition":
+        if self.item.track == "transition" or self.item.nulls:
             return None
         end = self.item.src_in + self._shift() + self.item.dur
         if self._world.variant.src_end_media_last and end == self.item.media.src.duration_frames:
@@ -402,6 +407,8 @@ class FakeTimeline(_Api):
 
     def GetItemListInTrack(self, trackType, index):
         assert trackType in ("audio", "video", "subtitle") and isinstance(index, int) and index >= 1
+        if self._world.variant.bad_item_list and self.tl.name.endswith(self._world.variant.bad_item_list):
+            return 7  # not a list: the probe's read-back of this timeline raises
         items = {"video": self.tl.video, "audio": self.tl.audio}.get(trackType, []) if index == 1 else []
         out = []
         for k, i in enumerate(items):
@@ -479,8 +486,9 @@ class FakeTimeline(_Api):
             return False
         if exportType == consts["EXPORT_FCPXML_1_10"] and self._world.variant.fcpxml_bundle:
             Path(fileName).mkdir()
-            (Path(fileName) / "Info.fcpxml").write_text(text, encoding="utf-8")
-            return True
+            for f in self._world.variant.fcpxml_bundle_files:
+                (Path(fileName) / f).write_text(text if f == "Info.fcpxml" else "junk", encoding="utf-8")
+            return self._world.variant.fcpxml_bundle_ok
         Path(fileName).write_text(text, encoding="utf-8")
         return True
 
@@ -642,6 +650,8 @@ class FakeMediaPool(_Api):
         if not self._world.variant.drop_markers and self._world.variant.import_markers:
             tl.markers.update(dict(markers))
         tl.audio_transitions = ext in self._world.variant.audio_transition_items_from
+        if self._world.variant.null_clip and ext == self._world.variant.null_clip[0]:
+            tl.video[self._world.variant.null_clip[1]].nulls = True
         return FakeTimeline(self._world, self.project, tl)
 
 

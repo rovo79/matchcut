@@ -337,7 +337,7 @@ def test_an_aborted_run_does_not_blame_resolve_for_what_it_never_read(wsp, bundl
     assert doc["status"] == "aborted" and doc["timelines"]["import-otio"]["readback"] is None
     o = _cats(rep, "finding")
     assert not any(w.startswith("clip count") for k, w, r in o["Not preserved by Resolve"])
-    assert [r for k, w, r, ev in rep.outcomes["Not tested"] if w.startswith("clip count") and ev == "not measured: the run stopped"] == [
+    assert [r for k, w, r, ev in rep.outcomes["Not tested"] if w.startswith("clip count") and ev == "never read back (the run stopped)"] == [
         "import-otio", "import-fcpxml", "import-edl"]
 
 
@@ -357,3 +357,67 @@ def test_an_fcpxml_bundle_at_the_export_path_is_listed_and_read(wsp, bundle, mon
     r = rep.routes["import-otio"]
     assert "FCPXML export: Timeline.Export wrote a directory at the path, not a file (an FCPXML bundle?): Info.fcpxml" in r.notes
     assert "FCPXML export reads back with no differences from the stage" in r.preserved and not any(x.startswith("FCPXML export") for x in r.lost)
+
+
+# -- the re-review of 98143cf: failures that must stay visible -------------------------------------------------------------------
+def test_a_real_clip_whose_reads_fail_is_not_taken_for_a_transition(wsp, bundle, monkeypatch):
+    """Review A: import-otio's clip 3 (65-114) returns None for its source and offset reads. It touches the cuts at 65 and 114 with its
+    own edges, but its record range is an expected clip's: it stays a clip, its nulls are Failed and no clip count goes to Not preserved."""
+    import dataclasses
+
+    v = dataclasses.replace(VARIANTS["resolve 21.0.2 free (observed)"], null_clip=(".otio", 2))
+    _, real = __import__("matchcut.resolve.probe", fromlist=["console_lines"]).console_lines(bundle.script)
+    from .test_console import console
+
+    doc, _ = console(bundle, monkeypatch, real, v)
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    clip3 = doc["timelines"]["import-otio"]["readback"]["video"][0][3]
+    assert (clip3["start"], clip3["end"], clip3["source_start_frame"]) == (65, 114, None)
+    r = rep.routes["import-otio"]
+    assert r.transition_items == 2 and r.verdict == "not measured" and not any(x.startswith("clip count") for x in r.lost)
+    failed = [(w, rt) for k, w, rt, ev in rep.outcomes["Failed"] if k == "call"]
+    for call in ("TimelineItem.GetLeftOffset", "TimelineItem.GetRightOffset", "TimelineItem.GetSourceStartFrame", "TimelineItem.GetSourceEndFrame"):
+        assert (f"{call} returned null", "import-otio") in failed, call
+    assert not any(w.startswith("clip count") for k, w, rt, ev in rep.outcomes["Not preserved by Resolve"])
+    # the other routes keep their transition-item reads Unsupported
+    assert sum(1 for k, w, rt, ev in rep.outcomes["Unsupported"] if rt == "import-fcpxml") == 8
+
+
+@pytest.mark.parametrize("files, ok, wording", [((), True, "wrote a directory with no Info.fcpxml"),
+                                                (("junk.txt",), False, "returned False (a directory is at the path)")])
+def test_a_directory_that_is_not_a_readable_bundle_stays_failed(wsp, bundle, monkeypatch, files, ok, wording):
+    """Review B: only a readable bundle that Export reported as done is a note; anything else at the path stays Failed."""
+    run_probe(bundle, monkeypatch, Variant(fcpxml_bundle=True, fcpxml_bundle_files=files, fcpxml_bundle_ok=ok))
+    rep = build_report(wsp.ws, wsp.cfg, last_run(bundle))
+    failed = [(w, r) for k, w, r, ev in rep.outcomes["Failed"] if k == "finding"]
+    assert [r for w, r in failed if w == f"FCPXML export: Timeline.Export {wording}"] == ROUTES
+    assert any(x.startswith("FCPXML export: Timeline.Export wrote a directory at the path, not a file") for x in rep.routes["build"].notes)
+
+
+def test_a_read_back_that_raised_in_a_complete_run_is_never_read_back_not_stopped(wsp, bundle, monkeypatch):
+    """Minor: the read-back of import-fcpxml raised (the run itself completed): its frame, dissolve and navigation findings are Not tested
+    with that error as the reason, never "the run stopped"; its file markers are Not tested, "the read-back was not taken"."""
+    import dataclasses
+
+    v = dataclasses.replace(VARIANTS["resolve 21.0.2 free (observed)"], bad_item_list="import-fcpxml")
+    code, doc, _ = run_probe(bundle, monkeypatch, v)
+    assert doc["status"] == "complete" and doc["timelines"]["import-fcpxml"]["readback"] is None
+    rep = build_report(wsp.ws, wsp.cfg, last_run(bundle))
+    mine = {c: [(w, ev) for k, w, r, ev in items if r == "import-fcpxml" and k == "finding"] for c, items in rep.outcomes.items()}
+    measured = [(w, ev) for w, ev in mine["Not tested"] if w.startswith(("clip count", "dissolves", "navigation"))]
+    assert {w.split(":")[0].split(" ")[0] for w, ev in measured} >= {"clip", "dissolves", "navigation"}
+    assert all(ev.startswith("never read back (the read-back raised TypeError") and "the run stopped" not in ev for w, ev in measured)
+    assert not any(w.startswith(("clip count", "dissolves", "navigation")) for c in ("Failed", "Not preserved by Resolve") for w, ev in mine[c])
+
+
+def test_otio_markers_without_a_read_back_are_not_tested(wsp, bundle, monkeypatch):
+    """Minor: the OTIO route's read-back is missing (None): its file markers were not read, which is not the same as none."""
+    import dataclasses
+
+    v = dataclasses.replace(VARIANTS["resolve 21.0.2 free (observed)"], bad_item_list="import-otio")
+    run_probe(bundle, monkeypatch, v)
+    rep = build_report(wsp.ws, wsp.cfg, last_run(bundle))
+    otio = [(c, k, ev) for c, items in rep.outcomes.items() for k, w, r, ev in items
+            if r == "import-otio" and (w.startswith("junction markers from the file") or w.startswith("Timeline.GetMarkerByCustomData returned null"))]
+    assert otio and all(c == "Not tested" and ev == "the read-back was not taken" for c, k, ev in otio)
+    assert not any(r == "import-otio" for k, w, r, ev in rep.outcomes["Not preserved by Resolve"])

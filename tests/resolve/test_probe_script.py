@@ -573,3 +573,23 @@ def test_an_export_that_writes_elsewhere_is_traced(bundle, monkeypatch):
     x = doc["timelines"]["build"]["exports"]["fcpxml"]
     assert x["ok"] is True and x["exists"] is False and (run / "build.otio").exists()
     assert x["nearby"] == []  # the probe's own build.otio and build.edl are not counted as where the FCPXML went
+
+
+def test_a_listing_that_fails_is_recorded_and_the_exports_go_on(bundle, monkeypatch):
+    """Minor: os.listdir of the exports folder raising (PermissionError) is recorded in the entry; exports() carries on for the route."""
+    import os as _os
+
+    real_listdir = _os.listdir
+
+    def listdir(path="."):
+        if str(path).endswith(_os.sep + "exports"):
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_listdir(path)
+
+    monkeypatch.setattr(_os, "listdir", listdir)
+    code, doc, world = run_probe(bundle, monkeypatch, VARIANTS["resolve 21.0.2 free (observed)"])
+    assert code == 0 and doc["status"] == "complete"
+    for route, e in doc["timelines"].items():
+        x = e["exports"]
+        assert x["fcpxml"]["nearby_error"].startswith("PermissionError") and "nearby" not in x["fcpxml"], route
+        assert x["edl"]["ok"] and x["edl"]["exists"], route  # the export after the failed listing still ran
