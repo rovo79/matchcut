@@ -84,7 +84,7 @@ headless through the CLI or the headless MCP server, both of which drive the sam
 demo project at start, and an import there merges into it; the headless server starts with an empty project. At launch
 the app also made an update check to GitHub (the proxy refused it), and it found no audio device.
 
-![The imported cut after the trim, in FilmCraft's Timeline (MCP bridge screenshot under Xvfb)](../prototypes/filmcraft/results/timeline_after_trim.jpg)
+![The imported cut after the trim, in FilmCraft's Timeline (MCP bridge screenshot under Xvfb)](../prototypes/filmcraft/recorded-run/timeline_after_trim.jpg)
 
 *The Timeline after the ripple trim (bridge `ui_screenshot`). V1 and A1 hold matchcut's five clips, with the J2 and J3
 dissolves as transitions. A2 holds the click track, now 5 frames longer than the picture. The junction markers sit on
@@ -95,7 +95,7 @@ the ruler; J3 and J4 did not ripple.*
 Fixture: `run --backend mock -t 8 --music click.wav` on matchcut's demo footage gives 5 clips. Junction 2 (s1-s3) is an
 8-frame dissolve and junction 3 an 18-frame dissolve, at 25 fps. Results are from `proof.py` (78 checks: 67 Passed,
 0 Failed, 1 Unsupported, 10 Not preserved) and `control_channel.py` (18 Passed); see
-[prototypes/filmcraft/results/](../prototypes/filmcraft/results/).
+[prototypes/filmcraft/recorded-run/](../prototypes/filmcraft/recorded-run/).
 
 | # | Step | Outcome | Evidence |
 |---|---|---|---|

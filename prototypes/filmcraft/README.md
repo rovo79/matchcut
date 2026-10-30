@@ -13,7 +13,7 @@ editor file into a **copy** of the workspace.
 | `proof.py` | The headless proof. It drives `filmcraft-cli mcp` (MCP over stdio) and `filmcraft-cli` (one process per command); no window, no GPU |
 | `control_channel.py` | The desktop app (`filmcraft --control PORT`) under Xvfb: the JSON-lines control channel and the MCP bridge |
 | `fcclient.py` | Minimal stdlib clients: MCP JSON-RPC on stdio, and the control channel over TCP |
-| `results/` | The run recorded in the report: `proof_results.md/.json`, `control_channel_results.md/.json` (scratch paths replaced by `$WORK`, `$APPWORK`, `$SCRATCH`), and two screenshots from the app under Xvfb |
+| `recorded-run/` | The run recorded in the report: `proof_results.md/.json`, `control_channel_results.md/.json` (scratch paths replaced by `$WORK`, `$APPWORK`, `$SCRATCH`), and two screenshots from the app under Xvfb |
 
 ## Requirements
 
