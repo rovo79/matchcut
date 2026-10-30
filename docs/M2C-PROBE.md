@@ -299,8 +299,8 @@ The rules are one table in `matchcut/resolve/outcomes.py`.
     - imported timelines start at frame 0 / 00:00:00:00, timelines made with `CreateEmptyTimeline` at 90000 /
       01:00:00:00;
     - `GetMarkerByCustomData` returns the marker's information without its frame.
-  - **Nothing-to-find lookups:** 8 `GetMarkerByCustomData` lookups returned None where there was nothing to find yet: the
-    4 on import-edl (an EDL carries no markers) and the 4 on build before the probe added its own.
+  - **The negative control:** the 4 `GetMarkerByCustomData` lookups on build, before the probe added its own markers,
+    returned None. A built timeline carries no file markers, so there was nothing to find.
 - **Failed:** FCPXML 1.10 `Timeline.Export` on all 5 routes. It returned True, but no file was at the path given. The
   reason is not reported by Resolve; it may be edition- or version-specific (unverified). The probe now records which
   files with that route's name are in the exports folder, to see where it went.
@@ -308,14 +308,16 @@ The rules are one table in `matchcut/resolve/outcomes.py`.
   `GetSourceStartFrame` and `GetSourceEndFrame`, 8 each. Those are 2 transition items on video track 1 of each import,
   plus 2 on import-otio's audio track: matchcut's OTIO puts the same transitions on A1. These reads do not apply to a
   transition. On clips they returned numbers.
-- **Not preserved by Resolve:** the junction markers the OTIO and the FCPXML carry were not found by
-  `GetMarkerByCustomData`: 0 of 4 on each, 8 null lookups. M2c-1 adds its own markers by id after the import.
+- **Not preserved by Resolve:** Resolve imported no markers from the OTIO: the read-back shows none, and its 4 junction
+  ids were not found by `GetMarkerByCustomData` (4 null lookups). M2c-1 adds its own markers by id after the import.
 - **Not tested:**
   - `TimelineItem.AddTransition` and `TimelineItem.GetType`: not documented on this install (README.txt "Last Updated: 26
     May 2026"), so never called. The build routes' dissolves therefore stay untested.
   - The MCP server: never started; no `ResolveMCP` binary file.
   - The FCPXML exports: not re-read, since no file came back.
-  - The EDL's markers: a CMX3600 EDL carries none.
+  - The file markers of the FCPXML and the EDL, 8 null lookups, 4 each. FCPXML markers have no customData field
+    (matchcut writes the junction id as the marker's value), and a CMX3600 EDL carries no markers, only comments. Neither
+    could be found by id, by design.
 
 The raw steps stay in `resolve_probe.json` unchanged, and the report's appendix "Raw steps" lists each of the 48 null
 steps exactly as observed.

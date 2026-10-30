@@ -173,11 +173,12 @@ def _reimport(scratch: Path, cfg: PipelineConfig, path: Path, stage: str) -> Tup
 
 # -- one route -----------------------------------------------------------------------------------------------------------------
 def _spans_cut(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[int]:
-    """The record frame (from the timeline start) of an expected cut that ``v`` lies across (start < cut < end), or None."""
+    """The record frame (from the timeline start) of an expected cut that ``v`` lies across, or None. The edges count (start <= cut <= end):
+    it is only asked of items with no source frames, and an install may place a transition starting or ending at the cut."""
     start = rb.get("start_frame")
     if not (_num(v.get("start")) and _num(v.get("end")) and _num(start)):
         return None
-    return next((c["rec_in"] for c in exp["clips"][1:] if v["start"] < start + c["rec_in"] < v["end"]), None)
+    return next((c["rec_in"] for c in exp["clips"][1:] if v["start"] <= start + c["rec_in"] <= v["end"]), None)
 
 
 def _is_transition(v: Dict[str, Any], rb: Dict[str, Any], exp: Dict[str, Any]) -> Optional[str]:
@@ -435,7 +436,14 @@ def _transitions(r: RouteResult, attempts: Optional[List[Dict[str, Any]]]) -> No
 def _exports(r: RouteResult, back: Back, entry: Dict[str, Any]) -> None:
     for fmt, e in (entry.get("exports") or {}).items():
         name = FORMAT_NAMES.get(fmt, fmt)
-        if not e.get("ok") or not e.get("exists"):
+        if e.get("is_dir") and not e.get("exists"):
+            inside = e.get("dir_entries") or []
+            r.notes.append(f"{name} export: Timeline.Export wrote a directory at the path, not a file (an FCPXML bundle?): "
+                           + (", ".join(inside[:8]) if inside else "empty"))
+            if "Info.fcpxml" not in inside:
+                r.untested.append(f"{name} export not re-read by matchcut: the directory has no Info.fcpxml")
+                continue
+        elif not e.get("ok") or not e.get("exists"):
             if e.get("error"):
                 why = f"failed ({e['error']})"
             elif e.get("ok"):
@@ -607,8 +615,12 @@ def classify_run(doc: Dict[str, Any], exp: Dict[str, Any], routes: Dict[str, Rou
     """Every finding of every route and every recorded call that did not simply succeed, each with its category (``outcomes.classify``)."""
     timelines = doc.get("timelines") or {}
     old = next((str((doc.get("resolve") or {}).get("version_string")) for _ in doc.get("version_notes") or []), None)
+    attempts = {r: [a for a in (e.get("transitions") or []) if isinstance(a, dict)] for r, e in timelines.items()}
     ctx = oc.Context(old_version=old, media_found_in_pool=bool((doc.get("media") or {}).get("found_in_pool_by")),
-                     transition_called={r: any(a.get("called") for a in (e.get("transitions") or []) if isinstance(a, dict)) for r, e in timelines.items()})
+                     transition_called={r: any(a.get("called") for a in at) for r, at in attempts.items()},
+                     transition_made={r: any(a.get("called") and a.get("result") not in (None, False) for a in at) for r, at in attempts.items()},
+                     readback_markers={r: (len((e.get("readback") or {}).get("markers") or {}) if e.get("readback") else None) for r, e in timelines.items()},
+                     unread=tuple(r for r, e in timelines.items() if e.get("created") and not e.get("readback")))
     items: List[oc.Item] = []
     cat = doc.get("catalogue") or {}
     for call, documented in (cat.get("gated") or {}).items():
@@ -735,7 +747,7 @@ def build_report(ws: Path, cfg: PipelineConfig, json_path: Path) -> Report:
                 back[route] = {}
                 for fmt, e in (entry.get("exports") or {}).items():
                     path = bundle / e.get("file", "")
-                    if e.get("ok") and path.is_file():
+                    if e.get("ok") and (path.is_file() or (path.is_dir() and (path / "Info.fcpxml").is_file())):  # (a .fcpxmld-style bundle)
                         back[route][fmt] = _reimport(scratch, scfg, path, stage)
     install_lists = any(_track(e.get("readback") or {}, exp)[1] for e in timelines.values())
     routes = {name: _route(name, doc, exp, back.get(name, {}), install_lists) for name in ROUTES}

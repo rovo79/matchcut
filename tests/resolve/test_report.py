@@ -289,11 +289,12 @@ def test_the_outcomes_of_a_fake_that_keeps_everything(wsp, bundle, monkeypatch):
     rep, _ = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["keeps everything"])
     o = _cats(rep)
     assert o["Failed"] == [] and o["Unsupported"] == []
-    # this fake carries no FCPXML markers across (a model choice); an EDL carries none at all
-    assert o["Not preserved by Resolve"] == [("finding", "junction markers from the file: 0 of 4 found by id", "import-fcpxml")]
+    # FCPXML markers have no customData field and an EDL carries no markers: neither is a loss by Resolve
+    assert o["Not preserved by Resolve"] == []
     passed_calls = [w for k, w, r in o["Passed"] if k == "call"]
     assert "MediaPool.ImportMedia returned []" in passed_calls and passed_calls.count("Timeline.AddMarker returned false") == 4
     assert [w for k, w, r in o["Not tested"]] == ["Resolve's MCP server: never started by the probe (binary file absent)",
+                                                  "junction markers from the file: 0 of 4 found by id",
                                                   "junction markers from the file: 0 of 4 found by id",
                                                   "dissolves: 2 of 2 are cuts (the OTIO, FCPXML and EDL exports; the read-back does not show transitions) "
                                                   "(the build route adds none)",
@@ -328,3 +329,31 @@ def test_a_real_exception_is_failed(wsp, bundle, monkeypatch):
     assert [(w, r) for k, w, r in failed if w.startswith("MediaPool.ImportTimelineFromFile")] == [
         ("MediaPool.ImportTimelineFromFile raised RuntimeError: fake failure in MediaPool.ImportTimelineFromFile", r) for r in ("import-otio", "import-fcpxml", "import-edl")]
     assert any(w.startswith("no timeline: MediaPool.ImportTimelineFromFile raised") for k, w, r in _cats(rep, "finding")["Failed"])
+
+
+def test_an_aborted_run_does_not_blame_resolve_for_what_it_never_read(wsp, bundle, monkeypatch):
+    """Review item 5: timelines made before the run stopped were never read back: 'clip count 0' there is not measured, not a loss."""
+    rep, doc = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["the open project changes mid-run"])
+    assert doc["status"] == "aborted" and doc["timelines"]["import-otio"]["readback"] is None
+    o = _cats(rep, "finding")
+    assert not any(w.startswith("clip count") for k, w, r in o["Not preserved by Resolve"])
+    assert [r for k, w, r, ev in rep.outcomes["Not tested"] if w.startswith("clip count") and ev == "not measured: the run stopped"] == [
+        "import-otio", "import-fcpxml", "import-edl"]
+
+
+def test_when_add_transition_fails_the_export_did_not_lose_dissolves(wsp, bundle, monkeypatch):
+    """Review item 6: AddTransition called and failed: the build+transitions exports never had dissolves to lose."""
+    rep, _ = probe_and_report(wsp, bundle, monkeypatch, VARIANTS["loses dissolves"])
+    bt = [(c, ev) for c, items in rep.outcomes.items() for k, w, r, ev in items if r == "build+transitions" and "transition changes and no clip" in w]
+    assert bt and all(c == "Not tested" and ev == "the dissolves never existed on this route" for c, ev in bt)
+
+
+def test_an_fcpxml_bundle_at_the_export_path_is_listed_and_read(wsp, bundle, monkeypatch):
+    """Review item 4: Resolve writing a directory (a bundle) at the FCPXML path is recorded, listed and, with an Info.fcpxml, re-read."""
+    code, doc, world = run_probe(bundle, monkeypatch, Variant(fcpxml_bundle=True))
+    x = doc["timelines"]["import-otio"]["exports"]["fcpxml"]
+    assert x["ok"] is True and x["exists"] is False and x["is_dir"] is True and x["dir_entries"] == ["Info.fcpxml"]
+    rep = build_report(wsp.ws, wsp.cfg, last_run(bundle))
+    r = rep.routes["import-otio"]
+    assert "FCPXML export: Timeline.Export wrote a directory at the path, not a file (an FCPXML bundle?): Info.fcpxml" in r.notes
+    assert "FCPXML export reads back with no differences from the stage" in r.preserved and not any(x.startswith("FCPXML export") for x in r.lost)

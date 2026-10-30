@@ -782,6 +782,9 @@ def exports(rec, route, resolve, tl, run_dir):
         if not entry["exists"]:  # where did it go, if anywhere: files under this route's name other than the probe's own exports
             own = set(stem + x[3] for x in EXPORTS)
             entry["nearby"] = sorted(n for n in os.listdir(folder) if n.startswith(stem) and n not in own)
+            entry["is_dir"] = os.path.isdir(path)  # e.g. an FCPXML bundle (.fcpxmld layout) at the path: list it, read only
+            if entry["is_dir"]:
+                entry["dir_entries"] = sorted(os.listdir(path))
         out[fmt] = entry
     return out
 

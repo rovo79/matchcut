@@ -97,6 +97,7 @@ class Variant:
     marker_lookup_none: bool = False  # GetMarkerByCustomData returns None (not {}) when no marker has that customData
     audio_transition_items_from: Tuple[str, ...] = ()  # file extensions whose import also lists transition items on audio track 1
     export_silent: Tuple[str, ...] = ()  # export constants for which Timeline.Export returns True and writes no file
+    fcpxml_bundle: bool = False  # the FCPXML export is written as a bundle: a directory at the path holding Info.fcpxml
 
 
 VARIANTS = {
@@ -476,6 +477,10 @@ class FakeTimeline(_Api):
                            if not ln.startswith("* MATCHCUT"))
         else:
             return False
+        if exportType == consts["EXPORT_FCPXML_1_10"] and self._world.variant.fcpxml_bundle:
+            Path(fileName).mkdir()
+            (Path(fileName) / "Info.fcpxml").write_text(text, encoding="utf-8")
+            return True
         Path(fileName).write_text(text, encoding="utf-8")
         return True
 

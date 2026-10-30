@@ -25,7 +25,11 @@ LABELS = {PASSED: "passed", FAILED: "failed", UNSUPPORTED: "unsupported", NOT_PR
 NOT_CALLED = "not documented on this install: not called"
 FCPXML_NOTE = "reason not reported by Resolve; may be edition- or version-specific (unverified)"
 IMPORTS = ("import-otio", "import-fcpxml", "import-edl")
-FILE_MARKERS = ("import-otio", "import-fcpxml")  # the routes whose file carries matchcut's junction markers (a CMX3600 EDL carries none)
+# what each import's file can carry of matchcut's junction ids in a marker Resolve could look up by customData: the OTIO has the markers
+# (with the id in their metadata); FCPXML markers have no customData field (matchcut writes the id as the marker's value); a CMX3600 EDL
+# carries no markers at all
+NO_CUSTOM_DATA = {"import-fcpxml": "FCPXML markers have no customData field (matchcut writes the junction id as the marker's value)",
+                  "import-edl": "a CMX3600 EDL carries no markers, only comments"}
 BUILDS = ("build", "build+transitions")
 ITEM_FIELDS = {"TimelineItem.GetName": "name", "TimelineItem.GetStart": "start", "TimelineItem.GetEnd": "end", "TimelineItem.GetDuration": "duration",
                "TimelineItem.GetLeftOffset": "left_offset", "TimelineItem.GetRightOffset": "right_offset",
@@ -53,7 +57,10 @@ class Context:
 
     old_version: Optional[str] = None  # the version string, when the Resolve major version is below 20
     transition_called: Dict[str, bool] = field(default_factory=dict)  # route -> AddTransition was called there
+    transition_made: Dict[str, bool] = field(default_factory=dict)  # route -> AddTransition returned something for at least one dissolve
     media_found_in_pool: bool = False
+    readback_markers: Dict[str, Optional[int]] = field(default_factory=dict)  # route -> markers its read-back shows (None: not read)
+    unread: Tuple[str, ...] = ()  # routes whose timeline exists but was never read back (the run stopped first)
 
 
 def _call(it: Item) -> str:
@@ -67,18 +74,27 @@ def _ret(it: Item) -> Any:
 # -- the rules: (what it recognises, test, category, evidence) - tried in order, the first that matches decides ---------------------------
 Rule = Tuple[str, Callable[[Item, Context], bool], str, Callable[[Item, Context], str]]
 
+def _otio_markers(i: Item, c: Context) -> str:
+    n = c.readback_markers.get(i.route)
+    if not n:
+        return "Resolve imported no markers from the OTIO (read-back shows none)"
+    return f"the read-back shows {n} marker{'s' if n != 1 else ''}, none with matchcut's junction id as customData"
+
+
 FINDING_RULES: List[Rule] = [
     ("not made: gated off, never started, or nothing to re-read", lambda i, c: i.group == "untested", NOT_TESTED, lambda i, c: ""),
+    ("a timeline the run stopped before reading", lambda i, c: i.route in c.unread and i.group == "lost" and (
+        i.text.startswith("clip count") or "differs on" in i.text), NOT_TESTED, lambda i, c: "not measured: the run stopped"),
     ("what came back as written", lambda i, c: i.group in ("preserved", "approximated"), PASSED, lambda i, c: ""),
     ("an export Resolve did not write", lambda i, c: i.group == "lost" and bool(re.match(r"^\w+ export: Timeline\.Export", i.text)), FAILED,
      lambda i, c: FCPXML_NOTE if i.text.startswith("FCPXML") else "reason not reported by Resolve"),
     ("an export matchcut cannot read", lambda i, c: i.group == "lost" and "export cannot be read back" in i.text, FAILED, lambda i, c: ""),
     ("an export that reads back with other clips or frames", lambda i, c: i.group == "lost" and "export reads back with" in i.text, NOT_PRESERVED,
      lambda i, c: "the timeline Resolve exported differs from the stage"),
-    ("markers a file of this kind cannot carry", lambda i, c: i.text.startswith("junction markers from the file") and i.route not in FILE_MARKERS,
-     NOT_TESTED, lambda i, c: "a CMX3600 EDL carries no markers, only comments"),
+    ("markers a file of this kind cannot carry by id", lambda i, c: i.text.startswith("junction markers from the file") and i.route in NO_CUSTOM_DATA,
+     NOT_TESTED, lambda i, c: NO_CUSTOM_DATA[i.route]),
     ("the file's junction markers", lambda i, c: i.group == "lost" and i.text.startswith("junction markers from the file"), NOT_PRESERVED,
-     lambda i, c: "the file carried them; GetMarkerByCustomData does not find them by id"),
+     _otio_markers),
     ("the probe's own markers", lambda i, c: i.group == "lost" and i.text.startswith("junction markers added by the probe"), FAILED, lambda i, c: ""),
     ("dissolves the build route never adds", lambda i, c: i.text.startswith("dissolves") and i.route == "build", NOT_TESTED,
      lambda i, c: "" if "the build route adds none" in i.text else "the build route adds no dissolves"),
@@ -98,8 +114,8 @@ FINDING_RULES: List[Rule] = [
     ("an experiment with nothing to measure", lambda i, c: i.group == "notes" and i.text.startswith(("the cut has no dissolves", "dissolves: not measured")),
      NOT_TESTED, lambda i, c: ""),
     ("export cuts where the build route made cuts", lambda i, c: i.group == "notes" and "transition changes and no clip" in i.text
-     and (i.route == "build" or (i.route == "build+transitions" and not c.transition_called.get(i.route))), NOT_TESTED,
-     lambda i, c: "the dissolves were never added on this route"),
+     and (i.route == "build" or (i.route == "build+transitions" and not c.transition_made.get(i.route))), NOT_TESTED,
+     lambda i, c: "the dissolves never existed on this route"),
     ("export cuts where an imported file had dissolves", lambda i, c: i.group == "notes" and "transition changes and no clip" in i.text, NOT_PRESERVED,
      lambda i, c: "the export lost the dissolves"),
     ("an observation", lambda i, c: i.group == "notes", PASSED, lambda i, c: ""),
@@ -116,10 +132,11 @@ CALL_RULES: List[Rule] = [
      lambda i, c: "None on every clip item read in this run"),
     ("a read an old version may not have", lambda i, c: c.old_version is not None and _call(i) in OLD_README, UNSUPPORTED,
      lambda i, c: f"Resolve {c.old_version}: not in the 18.5 README as the probe calls it"),
-    ("the file's markers, looked up before the probe added its own", lambda i, c: i.note == "marker-before-file", NOT_PRESERVED,
-     lambda i, c: "the file's junction markers are not found by customData"),
-    ("a lookup on a timeline that has no file markers", lambda i, c: i.note == "marker-before-none", PASSED,
-     lambda i, c: "nothing to find yet: " + ("an EDL carries no markers" if i.route == "import-edl" else "a built timeline carries no file markers")),
+    ("the file's markers, looked up before the probe added its own", lambda i, c: i.note == "marker-before-file" and i.route in NO_CUSTOM_DATA,
+     NOT_TESTED, lambda i, c: NO_CUSTOM_DATA[i.route]),
+    ("the OTIO's markers, looked up before the probe added its own", lambda i, c: i.note == "marker-before-file", NOT_PRESERVED, _otio_markers),
+    ("the negative control: a built timeline before the probe's markers", lambda i, c: i.note == "marker-before-none", PASSED,
+     lambda i, c: "nothing to find yet: a built timeline carries no file markers"),
     ("the probe's own marker, looked up after adding it", lambda i, c: i.note == "marker-after", FAILED,
      lambda i, c: "AddMarker said yes; the marker is not found by id"),
     ("a clip already in the pool", lambda i, c: _call(i) == "MediaPool.ImportMedia" and _ret(i) == [] and c.media_found_in_pool, PASSED,
@@ -171,9 +188,10 @@ def calls(doc: Dict[str, Any], is_transition: Callable[[Dict[str, Any], Dict[str
                 continue  # a gated call: one "not tested" finding says so for the whole run
             seen[_key(s)] += 1
             it = Item("call", route, step=s)
-            if s.get("call") == "Timeline.GetMarkerByCustomData":
+            if s.get("call") == "Timeline.GetMarkerByCustomData" and not s.get("error") and s.get("return") in (None, {}):
+                # an empty answer only: a lookup that raised is a failure whatever its position
                 before = marker_lookups <= n
-                it.note = ("marker-before-file" if route in FILE_MARKERS else "marker-before-none") if before else "marker-after"
+                it.note = ("marker-before-file" if route in IMPORTS else "marker-before-none") if before else "marker-after"
             elif s.get("call") == "Timeline.AddMarker" and s.get("return") is False:
                 nxt = steps[k + 1] if k + 1 < len(steps) else {}
                 if nxt.get("call") == "Timeline.UpdateMarkerCustomData" and nxt.get("return") is True:

@@ -100,14 +100,16 @@ def test_the_outcomes_of_the_live_run(live):
     assert Counter(w.split()[0] for k, w, _, _ in o[UNSUPPORTED]) == {c: 8 for c in OBSERVED_NULLS if c.startswith("TimelineItem")}
     assert all(k == "call" and r in IMPORTS and "on transition items (identified by: no source frames, spanning an expected cut)" == ev
                for k, w, r, ev in o[UNSUPPORTED])
-    # the 16 null marker lookups: 8 Not preserved (the OTIO's and the FCPXML's markers, 0 of 4 each), 8 with nothing to find (the EDL
-    # carries no markers; a built timeline has none before the probe adds its own)
-    assert [(k, r) for k, w, r, _ in o[NOT_PRESERVED] if k == "finding"] == [("finding", "import-otio"), ("finding", "import-fcpxml")]
-    marker_calls = [r for k, w, r, _ in o[NOT_PRESERVED] if k == "call"]
-    assert Counter(marker_calls) == {"import-otio": 4, "import-fcpxml": 4} and len(o[NOT_PRESERVED]) == 10
-    nothing = Counter(r for k, w, r, ev in o[PASSED] if k == "call" and w.startswith("Timeline.GetMarkerByCustomData"))
-    assert nothing == {"import-edl": 4, "build": 4}
-    assert ("finding", "junction markers from the file: 0 of 4 found by id", "import-edl") in [(k, w, r) for k, w, r, _ in o[NOT_TESTED]]
+    # the 16 null marker lookups: 4 Not preserved (Resolve imported no markers from the OTIO), 8 Not tested (FCPXML markers have no
+    # customData field; an EDL carries no markers), 4 Passed (the negative control: a built timeline before the probe's own markers)
+    assert [(k, r, ev) for k, w, r, ev in o[NOT_PRESERVED]] == [
+        ("finding", "import-otio", "Resolve imported no markers from the OTIO (read-back shows none)")] + [
+        ("call", "import-otio", "Resolve imported no markers from the OTIO (read-back shows none)")] * 4
+    lookups = lambda cat: Counter(r for k, w, r, ev in o[cat] if k == "call" and w.startswith("Timeline.GetMarkerByCustomData"))  # noqa: E731
+    assert lookups(NOT_TESTED) == {"import-fcpxml": 4, "import-edl": 4} and lookups(PASSED) == {"build": 4} and lookups(NOT_PRESERVED) == {"import-otio": 4}
+    evid = {r: ev for k, w, r, ev in o[NOT_TESTED] if k == "finding" and w.startswith("junction markers from the file")}
+    assert evid == {"import-fcpxml": "FCPXML markers have no customData field (matchcut writes the junction id as the marker's value)",
+                    "import-edl": "a CMX3600 EDL carries no markers, only comments"}
     # Not tested: AddTransition and GetType (gated off), the MCP server, the FCPXML files that never came back, the build routes' dissolves
     untested = [w for k, w, r, _ in o[NOT_TESTED]]
     for needle in ("TimelineItem.AddTransition: not documented on this install, so never called",
@@ -124,7 +126,8 @@ def test_the_report_text_has_the_five_headings_in_order_and_the_raw_steps(live):
     heads = [ln for ln in rep.text.splitlines() if ln.startswith("### ") and "(" in ln and "finding" in ln]
     assert [h.split(" (")[0][4:] for h in heads] == [PASSED, FAILED, UNSUPPORTED, NOT_PRESERVED, NOT_TESTED]
     assert "### Failed (5 findings, 0 calls)" in rep.text and "### Unsupported (0 findings, 32 calls)" in rep.text
-    assert "### Not preserved by Resolve (2 findings, 8 calls)" in rep.text and "## Failed steps" not in rep.text
+    assert "### Not preserved by Resolve (1 finding, 4 calls)" in rep.text and "## Failed steps" not in rep.text
+    assert "### Not tested (17 findings, 8 calls)" in rep.text and "### Passed (46 findings, 150 calls)" in rep.text
     assert ("- FCPXML export: Timeline.Export returned True but no file is at the path given "
             "(reason not reported by Resolve; may be edition- or version-specific (unverified)) "
             "(import-otio, import-fcpxml, import-edl, build, build+transitions)") in rep.text
@@ -135,3 +138,32 @@ def test_the_report_text_has_the_five_headings_in_order_and_the_raw_steps(live):
     assert len(rows) == 48
     assert rows[0] == "- import-otio: readback | `TimelineItem.GetLeftOffset` | args [false] | return null | error null"
     assert "- build: markers | `Timeline.GetMarkerByCustomData` | args [\"s0-s1\"] | return null | error null" in rows
+
+
+def test_transition_items_starting_at_the_cut_are_still_transitions(wsp, bundle, monkeypatch):
+    """Review item 7: an install that places a transition item starting at the cut (start == cut) is still read as a transition."""
+    import dataclasses
+
+    v = dataclasses.replace(VARIANTS["resolve 21.0.2 free (observed)"], transition_at_cut=True)
+    _, real = console_lines(bundle.script)
+    console(bundle, monkeypatch, real, v)
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    for route in IMPORTS:
+        r = rep.routes[route]
+        assert (r.verdict, r.frames, r.dissolves, r.transition_items) == ("usable", "exact", "kept", 2), route
+        assert any("the transition items start at the cut (they sit after it) on this install" in a for a in r.approximated)
+    assert rep.recommended == "import-otio" and [w.split(":")[0] for k, w, r, ev in rep.outcomes[FAILED]] == ["FCPXML export"] * 5
+
+
+@pytest.mark.parametrize("route_kind", ["import-edl", "build", "import-otio"])
+def test_a_marker_lookup_that_raised_is_failed_whatever_its_position(wsp, bundle, monkeypatch, route_kind):
+    """Review item 1: the before/after notes apply to an empty answer only; an exception is Failed on every route."""
+    import dataclasses
+
+    v = dataclasses.replace(VARIANTS["resolve 21.0.2 free (observed)"], raise_on=("Timeline.GetMarkerByCustomData",))
+    _, real = console_lines(bundle.script)
+    console(bundle, monkeypatch, real, v)
+    rep = build_report(wsp.ws, wsp.cfg, bundle.dir)
+    raised = lambda cat: [r for k, w, r, ev in rep.outcomes[cat] if k == "call" and w.startswith("Timeline.GetMarkerByCustomData raised")]  # noqa: E731
+    assert route_kind in raised(FAILED)
+    assert all(route_kind not in raised(c) for c in (PASSED, UNSUPPORTED, NOT_PRESERVED, NOT_TESTED))
