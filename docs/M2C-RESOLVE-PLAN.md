@@ -1,7 +1,8 @@
 # M2c: DaVinci Resolve integration — proposed plan (for approval)
 
 Status: proposal, 2026-10-19; updated 2026-10-30 after the probe's first live run. M2c-0 (the probe) is done;
-M2c-1 is specified in `docs/superpowers/specs/2026-10-30-m2c1-resolve-bridge.md` (not implemented). The free-edition
+M2c-1 is specified in `docs/superpowers/specs/2026-10-30-m2c1-resolve-bridge.md`, approved on 2026-10-31 as an
+optional integration design (not implemented, not scheduled). The free-edition
 finding below supersedes this plan's original "Studio is required". Builds on M2a (`matchcut/interchange/`) and on the
 Resolve research in `docs/M2-INTEGRATION-FEASIBILITY.md`. Human gates for M1, M2b and M2a stay PENDING.
 

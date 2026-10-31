@@ -1,6 +1,8 @@
 # M2c-1: DaVinci Resolve bridge (push, goto, pull) — design
 
-Status: specification for approval (2026-10-30). Nothing here is implemented.
+Status: approved (2026-10-31) as an optional integration design. Nothing here is implemented, and
+implementation has not been scheduled. Resolve stays optional: matchcut's canonical timeline, FFmpeg renderer,
+TUI and M2a file round trip never depend on it.
 
 Basis: M2c-0, the probe, and its first live run (DaVinci Resolve 21.0.2.4 free, macOS, run from Resolve's
 own console; `docs/M2C-PROBE.md`, "First live run"). That run established the following, on that one
