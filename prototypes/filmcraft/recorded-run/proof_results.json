@@ -1,0 +1,930 @@
+{
+ "env": {
+  "filmcraft_cli": "filmcraft-cli 0.14.0",
+  "filmcraft_commit": "fed0f42",
+  "matchcut_commit": "4b2e2df",
+  "python": "3.13.16",
+  "platform": "Linux-6.18.44-fc-v185-x86_64-with-glibc2.39",
+  "ffmpeg": "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+  "cpus": 4,
+  "binary_bytes": 43305368
+ },
+ "timings": {
+  "fixtures_and_matchcut_runs": 0.2051,
+  "mcp_start_and_initialize": 0.0088,
+  "otio_import": 0.0114,
+  "ripple_trim": 0.0004,
+  "render_frame_1080p_x2": 0.3225,
+  "export_h264_1080p_trimmed": 6.4713,
+  "export_h264_1080p_untrimmed": 6.436,
+  "export_otio": 0.0218,
+  "export_fcpxml": 0.0017,
+  "export_edl": 0.0015,
+  "export_wav_wav_before": 0.1018,
+  "export_wav_wav_after": 0.1029,
+  "export_wav_mp3_before": 0.1018,
+  "export_wav_mp3_after": 0.1018,
+  "export_wav_m4a_before": 0.1026,
+  "export_wav_m4a_after": 0.103,
+  "cli_route_total": 0.0394
+ },
+ "steps": [
+  {
+   "step": "2 MCP",
+   "check": "initialize + tools/list (headless, no window)",
+   "outcome": "Passed",
+   "detail": "17 tools: command_batch, command_list, command_run, doc_inspect, media_import, project_inspect, render_frame, render_preview, sequence_inspect, ui_click, ui_control, ui_drag, ui_elements, ui_inspect, ui_key, ui_screenshot, ui_type",
+   "data": {
+    "server": {
+     "name": "filmcraft",
+     "version": "0.14.0"
+    },
+    "protocol": "2025-06-18",
+    "tools": [
+     "command_batch",
+     "command_list",
+     "command_run",
+     "doc_inspect",
+     "media_import",
+     "project_inspect",
+     "render_frame",
+     "render_preview",
+     "sequence_inspect",
+     "ui_click",
+     "ui_control",
+     "ui_drag",
+     "ui_elements",
+     "ui_inspect",
+     "ui_key",
+     "ui_screenshot",
+     "ui_type"
+    ]
+   }
+  },
+  {
+   "step": "2 MCP",
+   "check": "command_list",
+   "outcome": "Passed",
+   "detail": "711 engine commands",
+   "data": null
+  },
+  {
+   "step": "2 MCP",
+   "check": "ui_* tools in headless mode",
+   "outcome": "Unsupported",
+   "detail": "ui_inspect: this tool drives the live app: run `filmcraft-cli mcp --bridge 127.0.0.1:<port>` with the app started as `filmcraft --control <port>`",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "file.import final.otio",
+   "outcome": "Passed",
+   "detail": "linked 2 media, report empty",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "sequence settings",
+   "outcome": "Passed",
+   "detail": "25/1 fps, 1920x1080 (OTIO carries no frame size: FilmCraft's default 1920x1080, the 320x180 clips sit unscaled in the centre)",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "V1 clips: names, source in, duration (frames)",
+   "outcome": "Passed",
+   "detail": "5 clips",
+   "data": {
+    "matchcut": [
+     [
+      "c001 shot0",
+      0.0,
+      50.0
+     ],
+     [
+      "c002 shot1",
+      104.0,
+      17.0
+     ],
+     [
+      "c003 shot3",
+      167.0,
+      43.0
+     ],
+     [
+      "c004 shot6",
+      359.0,
+      41.0
+     ],
+     [
+      "c005 shot7",
+      444.0,
+      18.0
+     ]
+    ],
+    "filmcraft": [
+     [
+      "c001 shot0",
+      0.0,
+      50
+     ],
+     [
+      "c002 shot1",
+      104.0,
+      17
+     ],
+     [
+      "c003 shot3",
+      167.0,
+      43
+     ],
+     [
+      "c004 shot6",
+      359.0,
+      41
+     ],
+     [
+      "c005 shot7",
+      444.0,
+      18
+     ]
+    ]
+   }
+  },
+  {
+   "step": "3 import",
+   "check": "A1 clips: names, source in, duration (frames)",
+   "outcome": "Passed",
+   "detail": "5 clips",
+   "data": {
+    "matchcut": [
+     [
+      "c001 shot0",
+      0.0,
+      50.0
+     ],
+     [
+      "c002 shot1",
+      104.0,
+      17.0
+     ],
+     [
+      "c003 shot3",
+      167.0,
+      43.0
+     ],
+     [
+      "c004 shot6",
+      359.0,
+      41.0
+     ],
+     [
+      "c005 shot7",
+      444.0,
+      18.0
+     ]
+    ],
+    "filmcraft": [
+     [
+      "c001 shot0",
+      0.0,
+      50
+     ],
+     [
+      "c002 shot1",
+      104.0,
+      17
+     ],
+     [
+      "c003 shot3",
+      167.0,
+      43
+     ],
+     [
+      "c004 shot6",
+      359.0,
+      41
+     ],
+     [
+      "c005 shot7",
+      444.0,
+      18
+     ]
+    ]
+   }
+  },
+  {
+   "step": "3 import",
+   "check": "A2 clips: names, source in, duration (frames)",
+   "outcome": "Passed",
+   "detail": "1 clips (music track)",
+   "data": {
+    "matchcut": [
+     [
+      "click.wav",
+      0.0,
+      169.0
+     ]
+    ],
+    "filmcraft": [
+     [
+      "click.wav",
+      0.0,
+      169
+     ]
+    ]
+   }
+  },
+  {
+   "step": "3 import",
+   "check": "V1 dissolves (kind, length, centred on the cut)",
+   "outcome": "Passed",
+   "detail": "cross_dissolve 63-71; cross_dissolve 101-119",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "A1 mirror transitions",
+   "outcome": "Passed",
+   "detail": "constant_power, constant_power (audio dissolves become Constant Power crossfades)",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "junction markers: names and record frames",
+   "outcome": "Passed",
+   "detail": "J1 s0->s1@50, J2 s1->s3@67, J3 s3->s6@110, J4 s6->s7@151",
+   "data": {
+    "matchcut": [
+     [
+      "J1 s0->s1",
+      50.0
+     ],
+     [
+      "J2 s1->s3",
+      67.0
+     ],
+     [
+      "J3 s3->s6",
+      110.0
+     ],
+     [
+      "J4 s6->s7",
+      151.0
+     ]
+    ],
+    "filmcraft": [
+     [
+      "J1 s0->s1",
+      50.0
+     ],
+     [
+      "J2 s1->s3",
+      67.0
+     ],
+     [
+      "J3 s3->s6",
+      110.0
+     ],
+     [
+      "J4 s6->s7",
+      151.0
+     ]
+    ]
+   }
+  },
+  {
+   "step": "3 import",
+   "check": "markers moved from the V1 track to the sequence",
+   "outcome": "Passed",
+   "detail": "FilmCraft keeps OTIO track markers as sequence markers (comment = the why line, colour kept)",
+   "data": null
+  },
+  {
+   "step": "3 import",
+   "check": "metadata.matchcut on clips, markers, timeline",
+   "outcome": "Not preserved",
+   "detail": "not visible through the agent API (sequence_inspect has no metadata field); see step 6 for the export",
+   "data": null
+  },
+  {
+   "step": "4 navigate",
+   "check": "marker J2 sits on the cut of junction 2",
+   "outcome": "Passed",
+   "detail": "marker 67, cut 67",
+   "data": null
+  },
+  {
+   "step": "4 navigate",
+   "check": "playhead.set to the marker",
+   "outcome": "Passed",
+   "detail": "playhead at frame 67",
+   "data": null
+  },
+  {
+   "step": "4 navigate",
+   "check": "clip at the playhead is the incoming clip (c003)",
+   "outcome": "Passed",
+   "detail": "selection [11, 19, 25]",
+   "data": null
+  },
+  {
+   "step": "4 navigate",
+   "check": "markers.goNext walks the junctions in order",
+   "outcome": "Passed",
+   "detail": "frames [50, 67, 110, 151]",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "ripple trim as imported (no links, every track sync-locked)",
+   "outcome": "Passed",
+   "detail": "refused, nothing changed: this edit would break sync: A1 is sync-locked and has a clip in the way (turn off its sync lock, or lock the track, to make this edit)",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "link V1/A1 pairs, A2 sync lock off, ripple trim c003 in +5f",
+   "outcome": "Passed",
+   "detail": "delta 50803200000 ticks; V1 [('c001', 0, 50, 0.0), ('c002', 50, 17, 104.0), ('c003', 67, 38, 172.0), ('c004', 105, 41, 359.0), ('c005', 146, 18, 444.0)]",
+   "data": {
+    "before": [
+     [
+      "c001",
+      0,
+      50,
+      0.0
+     ],
+     [
+      "c002",
+      50,
+      17,
+      104.0
+     ],
+     [
+      "c003",
+      67,
+      43,
+      167.0
+     ],
+     [
+      "c004",
+      110,
+      41,
+      359.0
+     ],
+     [
+      "c005",
+      151,
+      18,
+      444.0
+     ]
+    ],
+    "after": [
+     [
+      "c001",
+      0,
+      50,
+      0.0
+     ],
+     [
+      "c002",
+      50,
+      17,
+      104.0
+     ],
+     [
+      "c003",
+      67,
+      38,
+      172.0
+     ],
+     [
+      "c004",
+      105,
+      41,
+      359.0
+     ],
+     [
+      "c005",
+      146,
+      18,
+      444.0
+     ]
+    ]
+   }
+  },
+  {
+   "step": "5 trim",
+   "check": "A1 mirror trimmed with the picture (linked)",
+   "outcome": "Passed",
+   "detail": "A1 [('c001', 0, 50, 0.0), ('c002', 50, 17, 104.0), ('c003', 67, 38, 172.0), ('c004', 105, 41, 359.0), ('c005', 146, 18, 444.0)]",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "music (A2) stays at its offset",
+   "outcome": "Passed",
+   "detail": "start 0, sourceIn 0, 169 frames: now 5 frames past the picture's end",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "dissolves follow the edit",
+   "outcome": "Passed",
+   "detail": "[(63, 8), (96, 18)]",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "sequence markers after the ripple",
+   "outcome": "Not preserved",
+   "detail": "[('J1 s0->s1', 50), ('J2 s1->s3', 67), ('J3 s3->s6', 110), ('J4 s6->s7', 151)]: Ripple Sequence Markers is off by default, so J3/J4 stay 5 frames late (markers.rippleSequenceMarkers turns it on)",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "edit.undo / edit.redo of the trim",
+   "outcome": "Passed",
+   "detail": "undo restores, redo re-applies",
+   "data": null
+  },
+  {
+   "step": "5 trim",
+   "check": "slip and replace a shot",
+   "outcome": "Passed",
+   "detail": "see step 7b",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "render_frame at record 80 after the trim = source frame 185 (ffmpeg decode)",
+   "outcome": "Passed",
+   "detail": "PSNR 49.8 dB (shot 3 is static: this checks the shot, not the frame)",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "render_frame at record 150 after the ripple = source frame 448 (moving shot)",
+   "outcome": "Passed",
+   "detail": "PSNR 47.6 dB; neighbouring source frames {-2: 25.6, -1: 28.7, 1: 29.1, 2: 26.0}",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "file.exportMedia H.264 (1080p, whole sequence)",
+   "outcome": "Passed",
+   "detail": "169 frames in 6.43 s (26.3 fps)",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "untrimmed: FilmCraft frames 30, 60, 80, 120 vs ffmpeg's decode of the same source frames",
+   "outcome": "Passed",
+   "detail": "PSNR {30: 49.4, 60: 49.8, 80: 49.8, 120: 50.0}",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "untrimmed: the same frames vs matchcut's final.mp4 (hard-cut regions, outside the fades)",
+   "outcome": "Passed",
+   "detail": "PSNR {30: 49.4, 60: 32.4, 80: 38.4, 120: 42.8} (matchcut's render is a second H.264 generation)",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "inside the J2 dissolve (frame 66): FilmCraft vs matchcut's render",
+   "outcome": "Not preserved",
+   "detail": "PSNR 18.5 dB: same frames, different maths. FilmCraft's frame is a linear-light (sRGB) mix of source 120 and 166 at progress 0.375 (fit 48.9 dB; expected 3/8 for an 8-frame dissolve from 63); matchcut's ffmpeg render mixes in gamma-encoded RGB",
+   "data": null
+  },
+  {
+   "step": "6 preview",
+   "check": "matchcut's fades, music gain and ducking in a FilmCraft render",
+   "outcome": "Not preserved",
+   "detail": "not in the OTIO as anything FilmCraft reads (metadata.matchcut only)",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "file.exportInterchange otio / fcpxml / edl",
+   "outcome": "Passed",
+   "detail": "{\"otio\": [], \"fcpxml\": [\"FCPXML export keeps transitions on V1 only; transitions on other tracks were dropped\"], \"edl\": []}",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import otio: human decisions",
+   "outcome": "Passed",
+   "detail": "['human trimmed c003: in +5f']",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import otio: human.json vs final.json, frame for frame",
+   "outcome": "Passed",
+   "detail": "only c003 source_in moved, by +0.2 s (5 frames at 25 fps); cuts, dissolves (0.3 s, 0.75 s) and keys otherwise equal",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import fcpxml: human decisions",
+   "outcome": "Passed",
+   "detail": "['human trimmed c003: in +5f']",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import fcpxml: human.json vs final.json, frame for frame",
+   "outcome": "Passed",
+   "detail": "only c003 source_in moved, by +0.2 s (5 frames at 25 fps); cuts, dissolves (0.3 s, 0.75 s) and keys otherwise equal",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import edl: human decisions",
+   "outcome": "Passed",
+   "detail": "['human trimmed c003: in +5f']",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "matchcut import edl: human.json vs final.json, frame for frame",
+   "outcome": "Passed",
+   "detail": "only c003 source_in moved, by +0.2 s (5 frames at 25 fps); cuts, dissolves (0.3 s, 0.75 s) and keys otherwise equal",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "provenance: metadata.matchcut (clips, markers, timeline)",
+   "outcome": "Not preserved",
+   "detail": "exported OTIO metadata keys: timeline ['filmcraft'], clip ['filmcraft']",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "provenance: stage fingerprint (stage_sha256)",
+   "outcome": "Not preserved",
+   "detail": "matchcut notes: '... carries no stage fingerprint'; a re-run of the pipeline in between would show as human decisions",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "provenance: clip keys / clip ids in the files",
+   "outcome": "Not preserved",
+   "detail": "not in FilmCraft's files; matchcut re-derives them (5 clips matched by source range because the clip key was missing or unknown); human.json carries the canonical keys again: True",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "provenance: junction ids",
+   "outcome": "Passed",
+   "detail": "only as marker names ['J1 s0->s1', 'J2 s1->s3', 'J3 s3->s6', 'J4 s6->s7'] (OTIO stack markers, FCPXML marker values, EDL LOC comments); marker metadata.matchcut (why, history, pin) dropped, comment kept",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "media reference in the exported OTIO",
+   "outcome": "Not preserved",
+   "detail": "target_url '../../fx/demo.mp4' (relative to the export folder, not a file URL); matchcut falls back to the file name with a note",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "music track A2 in the exports",
+   "outcome": "Passed",
+   "detail": "OTIO A2, FCPXML lane -2 connected clip, EDL event on A2; matchcut ignores it on import (picture only); its gain/fade/duck metadata is gone",
+   "data": null
+  },
+  {
+   "step": "7 round trip",
+   "check": "FilmCraft's own export reports",
+   "outcome": "Passed",
+   "detail": "{\"otio\": [], \"fcpxml\": [\"FCPXML export keeps transitions on V1 only; transitions on other tracks were dropped\"], \"edl\": []}",
+   "data": null
+  },
+  {
+   "step": "7b more edits",
+   "check": "add a dissolve (J1, 10f), change one (J2 8f -> 12f), remove one (J3)",
+   "outcome": "Passed",
+   "detail": "['human changed transition cut -> dissolve 10f', 'human changed transition dissolve 8f -> dissolve 12f', 'human changed transition dissolve 18f -> cut']",
+   "data": null
+  },
+  {
+   "step": "7b more edits",
+   "check": "three undos restore the imported transitions",
+   "outcome": "Passed",
+   "detail": "[(63, 8), (101, 18)]",
+   "data": null
+  },
+  {
+   "step": "7b more edits",
+   "check": "slip c004 by +3f",
+   "outcome": "Passed",
+   "detail": "['human trimmed c004: in +3f, out +3f'] (matchcut has no slip decision: in and out move together)",
+   "data": null
+  },
+  {
+   "step": "7b more edits",
+   "check": "replace c005's shot (clip.replaceFromBin, the footage from its In)",
+   "outcome": "Passed",
+   "detail": "['human removed c005 (shot 7, 17.76-18.48s)', 'human added h001 (shot 0, 0.00-0.72s)']",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "music otio: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "music fcpxml: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "music edl: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "tc otio: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []; source start timecode of 90000 frames subtracted from the source times of 5 clips",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "tc fcpxml: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []; source start timecode of 90000 frames subtracted from the source times of 5 clips",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "tc edl: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "25/1 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc2997df otio: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "30000/1001 fps; []; source start timecode of 107862 frames subtracted from the source times of 5 clips",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc2997df fcpxml: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "30000/1001 fps; []; source start timecode of 107862 frames subtracted from the source times of 5 clips",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc2997df edl: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "30000/1001 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc23976 otio: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "24000/1001 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc23976 fcpxml: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "24000/1001 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "ntsc23976 edl: no edit -> no decisions",
+   "outcome": "Passed",
+   "detail": "24000/1001 fps; []",
+   "data": null
+  },
+  {
+   "step": "8 untouched",
+   "check": "29.97 drop-frame label",
+   "outcome": "Not preserved",
+   "detail": "matchcut writes 'FCM: DROP FRAME'; FilmCraft's sequence from OTIO is non-drop and writes 'FCM: NON-DROP FRAME' (frame counts exact, timecode labels differ; sequence.settings dropFrame=true would be needed)",
+   "data": null
+  },
+  {
+   "step": "9 audio",
+   "check": "music wav: click onsets vs the source file, before and after the trim",
+   "outcome": "Passed",
+   "detail": "14 clicks, offset -1.18..-1.18 samples at 48000 Hz (unchanged by the trim: True)",
+   "data": {
+    "before": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ],
+    "after": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ]
+   }
+  },
+  {
+   "step": "9 audio",
+   "check": "music gain (-8 dB in metadata.matchcut)",
+   "outcome": "Not preserved",
+   "detail": "peak 1.000 with A1 muted (source peak 1.000): played at 0 dB",
+   "data": null
+  },
+  {
+   "step": "9 audio",
+   "check": "music mp3: click onsets vs the source file, before and after the trim",
+   "outcome": "Passed",
+   "detail": "14 clicks, offset -1.18..-1.18 samples at 48000 Hz (unchanged by the trim: True)",
+   "data": {
+    "before": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ],
+    "after": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ]
+   }
+  },
+  {
+   "step": "9 audio",
+   "check": "music m4a: click onsets vs the source file, before and after the trim",
+   "outcome": "Passed",
+   "detail": "14 clicks, offset -1.18..-1.18 samples at 48000 Hz (unchanged by the trim: True)",
+   "data": {
+    "before": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ],
+    "after": [
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18,
+     -1.18
+    ]
+   }
+  },
+  {
+   "step": "10 CLI",
+   "check": "filmcraft-cli import / inspect / run (JSONL) / --save, then matchcut import",
+   "outcome": "Passed",
+   "detail": "exit 0; ['human trimmed c003: in +5f']",
+   "data": null
+  },
+  {
+   "step": "10 CLI",
+   "check": "filmcraft-cli render (one frame, from the saved project)",
+   "outcome": "Passed",
+   "detail": "rendered 1920x1080 in 45.7 ms \u2192 $WORK/fc/cli_80.png",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe demo.mp4",
+   "outcome": "Passed",
+   "detail": "MPEG-4: H.264 (High) 320x180 25/1; AAC 44100 Hz; start TC None",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe tc.mp4",
+   "outcome": "Passed",
+   "detail": "MPEG-4: H.264 (High) 320x180 25/1; AAC 44100 Hz; start TC 90000",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe click.wav",
+   "outcome": "Passed",
+   "detail": "WAV: - x ; PCM 22050 Hz; start TC None",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe click.mp3",
+   "outcome": "Passed",
+   "detail": "MP3: - x ; MP3 22050 Hz; start TC None",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe click.m4a",
+   "outcome": "Passed",
+   "detail": "MPEG-4: - x ; AAC 22050 Hz; start TC None",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe ntsc2997df.mp4",
+   "outcome": "Passed",
+   "detail": "MPEG-4: H.264 (High) 320x180 30000/1001; AAC 44100 Hz; start TC 107862",
+   "data": null
+  },
+  {
+   "step": "11 media",
+   "check": "probe ntsc23976.mp4",
+   "outcome": "Passed",
+   "detail": "MPEG-4: H.264 (High) 320x180 24000/1001; AAC 44100 Hz; start TC None",
+   "data": null
+  },
+  {
+   "step": "12 resources",
+   "check": "peak RSS of any child process (FilmCraft, ffmpeg or matchcut)",
+   "outcome": "Passed",
+   "detail": "1182 MB (ru_maxrss of the largest child)",
+   "data": null
+  },
+  {
+   "step": "12 resources",
+   "check": "timings (s)",
+   "outcome": "Passed",
+   "detail": "{\"fixtures_and_matchcut_runs\": 0.2051, \"mcp_start_and_initialize\": 0.0088, \"otio_import\": 0.0114, \"ripple_trim\": 0.0004, \"render_frame_1080p_x2\": 0.3225, \"export_h264_1080p_trimmed\": 6.4713, \"export_h264_1080p_untrimmed\": 6.436, \"export_otio\": 0.0218, \"export_fcpxml\": 0.0017, \"export_edl\": 0.0015, \"export_wav_wav_before\": 0.1018, \"export_wav_wav_after\": 0.1029, \"export_wav_mp3_before\": 0.1018, \"export_wav_mp3_after\": 0.1018, \"export_wav_m4a_before\": 0.1026, \"export_wav_m4a_after\": 0.103, \"cli_route_total\": 0.0394}",
+   "data": null
+  }
+ ]
+}
