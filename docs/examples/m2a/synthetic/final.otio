@@ -12,7 +12,7 @@
    "fade_out": 0.3,
    "provenance_file": "provenance.json",
    "matchcut_version": "dev",
-   "stage_sha256": "91f151f8efa00133829b2f598bc8297a277cb77ded4de18417319ac26de7efdf"
+   "stage_sha256": "42c81b5b7b6b5e1d90610a04205c0d3ff0b3c7f108a86988ea235b5ff3197143"
   }
  },
  "name": "demo - final",
@@ -81,13 +81,13 @@
         "history": [
          "roughcut: cut at out 5.00s / in 6.50s",
          "transitions: dissolve 0.30s",
-         "final: in +0.02s (+1f)"
+         "final: in +0.02s (+1f), dissolve 0.32s"
         ],
         "pinned": false,
         "pin_origin": null,
         "transition": {
          "kind": "dissolve",
-         "duration": 0.3
+         "duration": 0.32
         }
        }
       },
@@ -116,13 +116,14 @@
         "why": "transitions: beat b2 -> b3: dissolve 0.75s",
         "history": [
          "roughcut: cut at out 9.00s / in 14.00s",
-         "transitions: dissolve 0.75s"
+         "transitions: dissolve 0.75s",
+         "final: dissolve 0.72s"
         ],
         "pinned": false,
         "pin_origin": null,
         "transition": {
          "kind": "dissolve",
-         "duration": 0.75
+         "duration": 0.72
         }
        }
       },
@@ -232,7 +233,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -290,7 +291,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -302,7 +303,7 @@
       "metadata": {
        "matchcut": {
         "kind": "dissolve",
-        "duration": 0.3,
+        "duration": 0.32,
         "junction_id": "s1-s3"
        }
       },
@@ -370,7 +371,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -382,7 +383,7 @@
       "metadata": {
        "matchcut": {
         "kind": "dissolve",
-        "duration": 0.75,
+        "duration": 0.72,
         "junction_id": "s3-s6"
        }
       },
@@ -450,7 +451,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -508,7 +509,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -579,7 +580,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -637,7 +638,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -649,7 +650,7 @@
       "metadata": {
        "matchcut": {
         "kind": "dissolve",
-        "duration": 0.3,
+        "duration": 0.32,
         "junction_id": "s1-s3"
        }
       },
@@ -717,7 +718,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -729,7 +730,7 @@
       "metadata": {
        "matchcut": {
         "kind": "dissolve",
-        "duration": 0.75,
+        "duration": 0.72,
         "junction_id": "s3-s6"
        }
       },
@@ -797,7 +798,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
@@ -855,7 +856,7 @@
         "metadata": {
          "matchcut": {
           "size": 374723,
-          "mtime_ns": 1792411958702411417
+          "mtime_ns": 1793487418181989449
          }
         }
        }
