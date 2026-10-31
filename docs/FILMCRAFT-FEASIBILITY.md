@@ -6,6 +6,9 @@ Resolve (M2c) and mpv (M2b). It is not a plan to replace matchcut's FFmpeg rende
 timeline. No adapter was written, and nothing under `matchcut/` changed. The proof is a re-runnable script:
 [prototypes/filmcraft/](../prototypes/filmcraft/README.md).
 
+- **Decision (2026-10-31): findings accepted.** No production FilmCraft adapter will be built. The proof stays pinned
+  to the tested commit `fed0f42` and is re-run only when a FilmCraft capability relevant to this report changes
+  (OTIO metadata preservation, the headless CLI/MCP editing tools, or the control channel).
 - **M2a, M2b and M1 human gates: PENDING** (unchanged by this experiment).
 - **Labels used below.** **Observed** means seen by running it here, with the step of the proof that shows it.
   **Docs claim** means FilmCraft's own documentation says it and this experiment did not check it. **Not tested** is said
