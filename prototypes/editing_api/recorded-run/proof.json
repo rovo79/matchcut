@@ -1,0 +1,587 @@
+{
+  "checks": [
+    {
+      "step": "0 fixture",
+      "check": "the pin is applied: c001 out and c002 in are locked",
+      "outcome": "Passed",
+      "detail": "[{\"id\": \"c001\", \"shot_index\": 0, \"source_in\": 0.0, \"source_out\": 2.0, \"beat_id\": \"b1\", \"purpose\": \"mock\", \"transition_in\": {\"kind\": \"cut\", \"duration\": 0.0}, \"locked_in\": false, \"locked_out\": true, \"tags\": [\"pinned\"], \"notes\": [], \"origin\": \"0@0.000-2.000\", \"duration\": 2.0}, {\"id\": \"c002\", \"shot_index\": 1, \"source_in\": 4.16, \"source_out\": 5.0, \"beat_id\": \"b1\", \"purpose\": \"mock\", \"transition_in\": {\"kind\": \"cut\", \"duration\": 0.0}, \"locked_in\": true, \"locked_out\": false, \"tags\": [\"pinned\"], \"notes\": [], \"origin\": \"1@4.250-5.000\", \"duration\": 0.84}]"
+    },
+    {
+      "step": "1 start",
+      "check": "a session starts at r000 from final",
+      "outcome": "Passed",
+      "detail": "{\"resumed\": false, \"head\": \"r000\", \"base_stage\": \"final\", \"snap_notes\": []}"
+    },
+    {
+      "step": "1 start",
+      "check": "starting again resumes it",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "2 inspect",
+      "check": "5 clips, 4 junctions, junction 1 shown pinned",
+      "outcome": "Passed",
+      "detail": "[{\"n\": 1, \"id\": \"s0-s1\", \"out\": \"c001\", \"in\": \"c002\", \"record_frame\": 50, \"transition\": {\"kind\": \"cut\", \"frames\": 0}, \"beat_change\": false, \"match_cut\": false, \"pinned\": true, \"beat_offset_frames\": -1}, {\"n\": 2, \"id\": \"s1-s3\", \"out\": \"c002\", \"in\": \"c003\", \"record_frame\": 63, \"transition\": {\"kind\": \"dissolve\", \"frames\": 8}, \"beat_change\": true, \"match_cut\": false, \"pinned\": false, \"beat_offset_frames\": -1}, {\"n\": 3, \"id\": \"s3-s6\", \"out\": \"c003\", \"in\": \"c004\", \"record_frame\": 101, \"transition\": {\"kind\": \"dissolve\", \"frames\": 19}, \"beat_change\": true, \"match_cut\": false, \"pinned\": false, \"beat_offset_frames\": 0}, {\"n\": 4, \"id\": \"s6-s7\", \"out\": \"c004\", \"in\": \"c005\", \"record_frame\": 150, \"transition\": {\"kind\": \"cut\", \"frames\": 0}, \"beat_change\": false, \"match_cut\": false, \"pinned\": false, \"beat_offset_frames\": 0}]"
+    },
+    {
+      "step": "2 inspect",
+      "check": "unused shots are listed with their descriptions",
+      "outcome": "Passed",
+      "detail": "[2, 4, 5]"
+    },
+    {
+      "step": "2 inspect",
+      "check": "music beat offsets per junction",
+      "outcome": "Passed",
+      "detail": "[-1, -1, 0, 0]"
+    },
+    {
+      "step": "2 inspect",
+      "check": "story beats with target and actual length",
+      "outcome": "Passed",
+      "detail": "[{\"id\": \"b1\", \"title\": \"Setup\", \"pace\": \"medium\", \"target_s\": 2.67, \"actual_frames\": 67}, {\"id\": \"b2\", \"title\": \"Development\", \"pace\": \"medium\", \"target_s\": 2.67, \"actual_frames\": 43}, {\"id\": \"b3\", \"title\": \"Resolution\", \"pace\": \"medium\", \"target_s\": 2.67, \"actual_frames\": 58}]"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a pinned edge is not trimmed",
+      "outcome": "Passed",
+      "detail": "c001 out-point is held by an editor pin"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a pinned junction is not rolled",
+      "outcome": "Passed",
+      "detail": "c001 out-point is held by an editor pin"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a pinned junction keeps its transition",
+      "outcome": "Passed",
+      "detail": "junction 1 is held by an editor pin: its transition stays"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a pinned junction is not moved onto a beat",
+      "outcome": "Passed",
+      "detail": "c001 out-point is held by an editor pin"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a roll past the end of the shot is refused",
+      "outcome": "Passed",
+      "detail": "c002 would leave shot 1 (frames 104-128, shot is 50-125)"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a trim below the minimum length is refused",
+      "outcome": "Passed",
+      "detail": "c003 would be 17 frames, below the minimum clip length (19)"
+    },
+    {
+      "step": "2b refuse",
+      "check": "removing a pinned clip is refused",
+      "outcome": "Passed",
+      "detail": " breaks the editor pin s0->s1: clip removed (shot 1)"
+    },
+    {
+      "step": "2b refuse",
+      "check": "moving a pinned clip away is refused",
+      "outcome": "Passed",
+      "detail": " breaks the editor pin s0->s1: clips are no longer adjacent"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a batch with one refused op is refused whole",
+      "outcome": "Passed",
+      "detail": " c001 out-point is held by an editor pin"
+    },
+    {
+      "step": "2b refuse",
+      "check": "an unknown clip is named",
+      "outcome": "Passed",
+      "detail": "no clip c999"
+    },
+    {
+      "step": "2b refuse",
+      "check": "an unknown op is named",
+      "outcome": "Passed",
+      "detail": "unknown op explode (trim, roll, slip, replace, insert, remove, move, set_transition, snap_to_beat)"
+    },
+    {
+      "step": "2b refuse",
+      "check": "no revision was made by any refusal",
+      "outcome": "Passed",
+      "detail": "[\"r000.json\"]"
+    },
+    {
+      "step": "2b refuse",
+      "check": "a refused proposal cannot be applied",
+      "outcome": "Passed",
+      "detail": "proposal c8dd7b95552a was refused: breaks the editor pin s0->s1: clip removed (shot 1)"
+    },
+    {
+      "step": "3 roll",
+      "check": "exactly two edges move, by 3 frames each",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"dbb1c3c7f469\", \"base\": \"r000\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"roll\", \"junction\": 3, \"frames\": 3}, \"ok\": true, \"detail\": \"roll junction 3 (c003|c004) +3f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"c003: out +3f\", \"c004: in +3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 168]}}"
+    },
+    {
+      "step": "3 roll",
+      "check": "a roll keeps the running time",
+      "outcome": "Passed",
+      "detail": "{\"edits\": [\"c003: out +3f\", \"c004: in +3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 168]}"
+    },
+    {
+      "step": "3 roll",
+      "check": "clips not named are unchanged",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"dbb1c3c7f469\", \"base\": \"r000\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"roll\", \"junction\": 3, \"frames\": 3}, \"ok\": true, \"detail\": \"roll junction 3 (c003|c004) +3f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"c003: out +3f\", \"c004: in +3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 168]}}"
+    },
+    {
+      "step": "3 roll",
+      "check": "proposal accepted",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"dbb1c3c7f469\", \"base\": \"r000\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"roll\", \"junction\": 3, \"frames\": 3}, \"ok\": true, \"detail\": \"roll junction 3 (c003|c004) +3f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"c003: out +3f\", \"c004: in +3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 168]}}"
+    },
+    {
+      "step": "4 replace",
+      "check": "c004 is replaced by a new clip of shot 4, same length",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"26af5c9a4cd2\", \"base\": \"r001\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"replace\", \"clip\": \"c004\", \"shot\": 4}, \"ok\": true, \"detail\": \"replace c004 (shot 6) with e001 (shot 4 frames 239-285)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"removed c004 (shot 6, frames 353-399)\", \"added e001 (shot 4, frames 239-285)\"], \"junctions_removed\": 2, \"junctions_added\": 2, \"junctions_changed\": 0, \"duration_frames\": [168, 168]}}"
+    },
+    {
+      "step": "4 replace",
+      "check": "proposal accepted",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"26af5c9a4cd2\", \"base\": \"r001\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"replace\", \"clip\": \"c004\", \"shot\": 4}, \"ok\": true, \"detail\": \"replace c004 (shot 6) with e001 (shot 4 frames 239-285)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"removed c004 (shot 6, frames 353-399)\", \"added e001 (shot 4, frames 239-285)\"], \"junctions_removed\": 2, \"junctions_added\": 2, \"junctions_changed\": 0, \"duration_frames\": [168, 168]}}"
+    },
+    {
+      "step": "4 replace",
+      "check": "the replacement keeps c004's incoming dissolve",
+      "outcome": "Passed",
+      "detail": "{\"id\": \"e001\", \"shot_index\": 4, \"source_in\": 9.56, \"source_out\": 11.4, \"beat_id\": \"b3\", \"purpose\": \"replaces c004\", \"transition_in\": {\"kind\": \"dissolve\", \"duration\": 0.75}, \"locked_in\": false, \"locked_out\": false, \"tags\": [], \"notes\": [], \"origin\": \"edit:4@239-285\", \"duration\": 1.84}"
+    },
+    {
+      "step": "5 transition",
+      "check": "a dissolve longer than 40% of the shorter clip is refused",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"cb205df1fc1e\", \"base\": \"r002\", \"ok\": false, \"results\": [{\"op\": {\"op\": \"set_transition\", \"junction\": 4, \"kind\": \"dissolve\", \"frames\": 40}, \"ok\": false, \"reason\": \"a 40-frame dissolve is longer than 40% of the shorter clip (7 frames)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": null}"
+    },
+    {
+      "step": "5 transition",
+      "check": "junction 4 becomes a 6-frame dissolve",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"d1b0b00dcab5\", \"base\": \"r002\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"set_transition\", \"junction\": 4, \"kind\": \"dissolve\", \"frames\": 6}, \"ok\": true, \"detail\": \"junction 4 (e001|c005) -> dissolve 6f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"e001|c005: cut -> dissolve 6f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 162]}}"
+    },
+    {
+      "step": "5 transition",
+      "check": "proposal accepted",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"d1b0b00dcab5\", \"base\": \"r002\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"set_transition\", \"junction\": 4, \"kind\": \"dissolve\", \"frames\": 6}, \"ok\": true, \"detail\": \"junction 4 (e001|c005) -> dissolve 6f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"e001|c005: cut -> dissolve 6f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [168, 162]}}"
+    },
+    {
+      "step": "5 transition",
+      "check": "the dissolve starts c005 6 frames earlier on the record (a dissolve overlaps its clips): later cuts ripple",
+      "outcome": "Passed",
+      "detail": "{\"record_frame\": [150, 144], \"duration_frames\": [168, 162]}"
+    },
+    {
+      "step": "6 beat",
+      "check": "so junction 4, on the beat before, is now off it",
+      "outcome": "Passed",
+      "detail": "[-1, -1, 3, 6]"
+    },
+    {
+      "step": "6 beat",
+      "check": "junction 3 (3 frames late after the roll) is rolled back onto the beat",
+      "outcome": "Passed",
+      "detail": "{\"offsets_before\": [-1, -1, 3, 6], \"proposal\": {\"proposal\": \"957cd2803db0\", \"base\": \"r003\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"snap_to_beat\", \"junction\": 3}, \"ok\": true, \"detail\": \"junction 3 -3f onto the beat at 4.017s (roll)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"c003: out -3f\", \"e001: in -3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [162, 162]}}}"
+    },
+    {
+      "step": "6 beat",
+      "check": "proposal accepted",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"957cd2803db0\", \"base\": \"r003\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"snap_to_beat\", \"junction\": 3}, \"ok\": true, \"detail\": \"junction 3 -3f onto the beat at 4.017s (roll)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"c003: out -3f\", \"e001: in -3f\"], \"junctions_removed\": 0, \"junctions_added\": 0, \"junctions_changed\": 1, \"duration_frames\": [162, 162]}}"
+    },
+    {
+      "step": "6 beat",
+      "check": "only junction 3 moved (a roll ripples nothing)",
+      "outcome": "Passed",
+      "detail": "{\"before\": [-1, -1, 3, 6], \"after\": [-1, -1, 0, 6]}"
+    },
+    {
+      "step": "6 beat",
+      "check": "junction 2 (1 frame early) cannot reach its beat: its outgoing clip ends at the end of its shot",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"4faa65d582bf\", \"base\": \"r004\", \"ok\": false, \"results\": [{\"op\": {\"op\": \"snap_to_beat\", \"junction\": 2}, \"ok\": false, \"reason\": \"c002 would leave shot 1 (frames 104-126, shot is 50-125)\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": null}"
+    },
+    {
+      "step": "7 batch",
+      "check": "an insert and a dip to black in one proposal",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"f5699ec7bf23\", \"base\": \"r004\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"insert\", \"shot\": 5, \"in_frame\": 325, \"out_frame\": 350, \"after\": \"c005\"}, \"ok\": true, \"detail\": \"insert e002 (shot 5 frames 325-350) after c005\"}, {\"op\": {\"op\": \"set_transition\", \"junction\": 5, \"kind\": \"dip_to_black\", \"frames\": 6}, \"ok\": true, \"detail\": \"junction 5 (c005|e002) -> dip_to_black 6f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"added e002 (shot 5, frames 325-350)\"], \"junctions_removed\": 0, \"junctions_added\": 1, \"junctions_changed\": 0, \"duration_frames\": [162, 181]}}"
+    },
+    {
+      "step": "7 batch",
+      "check": "proposal accepted",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"f5699ec7bf23\", \"base\": \"r004\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"insert\", \"shot\": 5, \"in_frame\": 325, \"out_frame\": 350, \"after\": \"c005\"}, \"ok\": true, \"detail\": \"insert e002 (shot 5 frames 325-350) after c005\"}, {\"op\": {\"op\": \"set_transition\", \"junction\": 5, \"kind\": \"dip_to_black\", \"frames\": 6}, \"ok\": true, \"detail\": \"junction 5 (c005|e002) -> dip_to_black 6f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"added e002 (shot 5, frames 325-350)\"], \"junctions_removed\": 0, \"junctions_added\": 1, \"junctions_changed\": 0, \"duration_frames\": [162, 181]}}"
+    },
+    {
+      "step": "7 batch",
+      "check": "five revisions r001..r005",
+      "outcome": "Passed",
+      "detail": "[\"r001\", \"r002\", \"r003\", \"r004\", \"r005\"]"
+    },
+    {
+      "step": "8 undo",
+      "check": "undo moves the head to r004",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "8 undo",
+      "check": "redo comes back to r005",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "8 branch",
+      "check": "a move, a remove and a slip in one proposal, each reported",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"83d5f61f024f\", \"base\": \"r004\", \"ok\": true, \"results\": [{\"op\": {\"op\": \"move\", \"clip\": \"e001\", \"before\": \"c003\"}, \"ok\": true, \"detail\": \"move e001 before c003\"}, {\"op\": {\"op\": \"remove\", \"clip\": \"c005\"}, \"ok\": true, \"detail\": \"remove c005 (shot 7)\"}, {\"op\": {\"op\": \"slip\", \"clip\": \"c003\", \"frames\": 2}, \"ok\": true, \"detail\": \"slip c003 +2f\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": {\"edits\": [\"removed c005 (shot 7, frames 444-462)\", \"c003: slipped +2f\", \"order: c001 c002 e001 c003\"], \"junctions_removed\": 3, \"junctions_added\": 2, \"junctions_changed\": 0, \"duration_frames\": [162, 150]}}"
+    },
+    {
+      "step": "8 branch",
+      "check": "an edit after an undo makes a branch (r006 from r004); r005 is kept",
+      "outcome": "Passed",
+      "detail": "{\"head\": \"r006\", \"parent\": \"r004\", \"changes\": {\"edits\": [\"removed c005 (shot 7, frames 444-462)\", \"c003: slipped +2f\", \"order: c001 c002 e001 c003\"], \"junctions_removed\": 3, \"junctions_added\": 2, \"junctions_changed\": 0, \"duration_frames\": [162, 150]}}"
+    },
+    {
+      "step": "8 branch",
+      "check": "a proposal made before the head moved is refused",
+      "outcome": "Passed",
+      "detail": "proposal 30a119feddaa was made at r004, but the head is now r006: propose again"
+    },
+    {
+      "step": "8 branch",
+      "check": "redo from r004 takes the latest branch",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "8 branch",
+      "check": "checkout moves the head back to the r005 branch",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "8 undo",
+      "check": "the log lists every revision with its parent",
+      "outcome": "Passed",
+      "detail": "[{\"id\": \"r000\", \"parent\": null, \"ops\": [], \"timeline_sha256\": \"f104f2c9a5ff9ed23fdd2bea6e0ad3e005e7782b4ec1795ded9183733332bc4c\"}, {\"id\": \"r001\", \"parent\": \"r000\", \"ops\": [\"roll junction 3 (c003|c004) +3f\"], \"timeline_sha256\": \"39694a45db3ee20bceb34ef6d3beed2fb50cc14c6103f80f916c60208c58d53c\"}, {\"id\": \"r002\", \"parent\": \"r001\", \"ops\": [\"replace c004 (shot 6) with e001 (shot 4 frames 239-285)\"], \"timeline_sha256\": \"c28db3dea082e6dcf389411ec9d7f933d8196ac48bf6ea5393de54afede348e6\"}, {\"id\": \"r003\", \"parent\": \"r002\", \"ops\": [\"junction 4 (e001|c005) -> dissolve 6f\"], \"timeline_sha256\": \"6034f7925f64d121b7fe8d8205fa28c23956349eabd48260b14ee551dee57d11\"}, {\"id\": \"r004\", \"parent\": \"r003\", \"ops\": [\"junction 3 -3f onto the beat at 4.017s (roll)\"], \"timeline_sha256\": \"46bc90dacef791647490368bc10c2eeb3fda4dba3fe50147738828dd6b659a13\"}, {\"id\": \"r005\", \"parent\": \"r004\", \"ops\": [\"insert e002 (shot 5 frames 325-350) after c005\", \"junction 5 (c005|e002) -> dip_to_black 6f\"], \"timeline_sha256\": \"1b1602c6bcd7b1cf6c4cc1a05a4b83ddd7661af19f29794e13066ff87b9b6bba\"}, {\"id\": \"r006\", \"parent\": \"r004\", \"ops\": [\"move e001 before c003\", \"remove c005 (shot 7)\", \"slip c003 +2f\"], \"timeline_sha256\": \"04d7093250411850e4f41b4c42934ef9c1ed889bc6298cf9c01e4f28a34750e9\"}]"
+    },
+    {
+      "step": "9 compare",
+      "check": "r000 -> r004 nets out the roll that snap_to_beat undid: only the replace and the new dissolve remain",
+      "outcome": "Passed",
+      "detail": "{\"edits\": [\"removed c004 (shot 6, frames 350-399)\", \"added e001 (shot 4, frames 236-285)\", \"e001|c005: cut -> dissolve 6f\"], \"junctions_removed\": 2, \"junctions_added\": 2, \"junctions_changed\": 0, \"duration_frames\": [168, 162], \"a\": \"r000\", \"b\": \"r004\"}"
+    },
+    {
+      "step": "10 render",
+      "check": "the render has exactly the cut's frames",
+      "outcome": "Passed",
+      "detail": "{\"video_frames\": 181, \"video_s\": 7.24, \"audio_s\": 5.5, \"expected\": 181}"
+    },
+    {
+      "step": "10 render",
+      "check": "audio and video lengths agree within 2 frames",
+      "outcome": "Failed: matchcut core defect",
+      "detail": "{\"video_frames\": 181, \"video_s\": 7.24, \"audio_s\": 5.5}"
+    },
+    {
+      "step": "10 render",
+      "check": "r004 (every clip in source order) has audio as long as its video",
+      "outcome": "Passed",
+      "detail": "{\"video_frames\": 162, \"video_s\": 6.48, \"audio_s\": 6.5}"
+    },
+    {
+      "step": "10 render",
+      "check": "every decisive clip shows its exact source frames (offset 0, three frames each)",
+      "outcome": "Passed",
+      "detail": "[{\"clip\": \"c001\", \"shot\": 0, \"record_frames\": [24, 25, 26], \"source_frames\": [24, 25, 26], \"best_offsets\": [-2, -2, -2], \"decisive\": false, \"margin\": [0.0, 0.0, 0.0]}, {\"clip\": \"c002\", \"shot\": 1, \"record_frames\": [57, 58, 59], \"source_frames\": [111, 112, 113], \"best_offsets\": [0, 0, 0], \"decisive\": true, \"margin\": [2.55, 2.65, 2.86]}, {\"clip\": \"c003\", \"shot\": 3, \"record_frames\": [87, 88, 89], \"source_frames\": [187, 188, 189], \"best_offsets\": [-2, -2, -2], \"decisive\": false, \"margin\": [0.0, 0.0, 0.0]}, {\"clip\": \"e001\", \"shot\": 4, \"record_frames\": [127, 128, 129], \"source_frames\": [262, 263, 264], \"best_offsets\": [0, 0, 0], \"decisive\": true, \"margin\": [0.28, 0.27, 0.28]}, {\"clip\": \"c005\", \"shot\": 7, \"record_frames\": [152, 153, 154], \"source_frames\": [452, 453, 454], \"best_offsets\": [0, 0, 0], \"decisive\": true, \"margin\": [1.35, 1.65, 1.62]}, {\"clip\": \"e002\", \"shot\": 5, \"record_frames\": [169, 170, 171], \"source_frames\": [338, 339, 340], \"best_offsets\": [-2, -2, -2], \"decisive\": false, \"margin\": [0.0, 0.0, 0.0]}]"
+    },
+    {
+      "step": "10 render",
+      "check": "a junction's review window renders",
+      "outcome": "Passed",
+      "detail": "{\"path\": \"<work>/ws/edits/renders/r005-j3.mp4\", \"window_s\": [2.034, 6.784], \"cut_s\": 4.034}"
+    },
+    {
+      "step": "11 publish",
+      "check": "the head becomes the human stage, not stale",
+      "outcome": "Passed",
+      "detail": "{\"human\": \"<work>/ws/human.json\", \"revision\": \"r005\", \"decisions\": [\"human removed c004 (shot 6, 14.00-15.96s)\", \"human added h001 (shot 4, 9.44-11.40s)\", \"human added h002 (shot 5, 13.00-14.00s)\", \"human trimmed c005: in +3f, out -3f\"]}"
+    },
+    {
+      "step": "11 publish",
+      "check": "the editor pin is still applied in the human stage",
+      "outcome": "Passed",
+      "detail": "[[\"s0->s1\", \"applied\", \"\"]]"
+    },
+    {
+      "step": "11 publish",
+      "check": "matchcut junctions lists the human stage (5 junctions; the new clips renamed h001, h002 by M2a's builder)",
+      "outcome": "Passed",
+      "detail": "5 junctions in human (9 stages)\n  1  c001->c002  s0->s1  out    2.00  in    4.16  cut          score 0.20  locked pinned\n  2  c002->c003  s1->s3  out    5.00  in    6.52  dissolve     score 0.20  beat\n  3  c003->h001  s3->s4  out    8.80  in    9.44  dissolve     score 0.32  beat\n  4  h001->c005  s4->s7  out   11.40  in   17.76  dissolve     score 0.29\n  5  c005->h002  s7->s5  out   18.48  in   13.00  dip_to_black score 0.30\npin s0->s1: applied\n"
+    },
+    {
+      "step": "11 publish",
+      "check": "M2a's diff of the published stage finds the clips but reads the two new transitions on c005 as trims (its neighbours changed)",
+      "outcome": "Passed",
+      "detail": "[\"human removed c004 (shot 6, 14.00-15.96s)\", \"human added h001 (shot 4, 9.44-11.40s)\", \"human added h002 (shot 5, 13.00-14.00s)\", \"human trimmed c005: in +3f, out -3f\"]"
+    },
+    {
+      "step": "11 publish",
+      "check": "matchcut export refuses the human stage (M2a's rule: only canonical stages go out), so an edited cut cannot yet go to an NLE",
+      "outcome": "Passed: gap confirmed",
+      "detail": "the human stage is an import result, not a canonical stage: export one of the stages it was imported against\n"
+    },
+    {
+      "step": "12 mcp",
+      "check": "initialize and tools/list (11 tools)",
+      "outcome": "Passed",
+      "detail": "[\"edit_start\", \"edit_inspect\", \"edit_propose\", \"edit_apply\", \"edit_undo\", \"edit_redo\", \"edit_checkout\", \"edit_log\", \"edit_compare\", \"edit_render\", \"edit_publish\"]"
+    },
+    {
+      "step": "12 mcp",
+      "check": "edit_inspect over MCP equals the Python call",
+      "outcome": "Passed",
+      "detail": ""
+    },
+    {
+      "step": "12 mcp",
+      "check": "a refusal over MCP carries its reason",
+      "outcome": "Passed",
+      "detail": "{\"proposal\": \"9525046c65ed\", \"base\": \"r005\", \"ok\": false, \"results\": [{\"op\": {\"op\": \"roll\", \"junction\": 1, \"frames\": 1}, \"ok\": false, \"reason\": \"c001 out-point is held by an editor pin\"}], \"problems\": [], \"untouched_identical\": true, \"changes\": null}"
+    },
+    {
+      "step": "12 mcp",
+      "check": "an error is a tool result with isError",
+      "outcome": "Passed",
+      "detail": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"{\\\"error\\\": \\\"no proposal nope\\\"}\"}], \"isError\": true}}"
+    },
+    {
+      "step": "12 mcp",
+      "check": "the JSON CLI serves the same tools",
+      "outcome": "Passed",
+      "detail": "{\n  \"head\": \"r005\",\n  \"base_stage\": \"final\",\n  \"stale\": \"\",\n  \"revisions\": [\n    {\n      \"id\": \"r000\",\n      \"parent\": null,\n      \"ops\": [],\n      \"timeline_sha256\": \"f104f2c9a5ff9ed23fdd2bea6e0ad3e0"
+    },
+    {
+      "step": "13 stale",
+      "check": "the session sees that final changed",
+      "outcome": "Passed",
+      "detail": "final.json changed since this session started (the pipeline ran again): start a new session"
+    },
+    {
+      "step": "13 stale",
+      "check": "a stale session refuses to propose",
+      "outcome": "Passed",
+      "detail": "final.json changed since this session started (the pipeline ran again): start a new session"
+    },
+    {
+      "step": "13 stale",
+      "check": "the published human stage is stale too (the engine's own rule)",
+      "outcome": "Passed",
+      "detail": "human.json is stale: final.json changed since the import (re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
+    },
+    {
+      "step": "13 stale",
+      "check": "a new session moves the old one aside (kept) and starts at r000",
+      "outcome": "Passed",
+      "detail": "{\"resumed\": false, \"head\": \"r000\", \"base_stage\": \"final\", \"snap_notes\": []}"
+    },
+    {
+      "step": "14 determinism",
+      "check": "the same edits on a fresh copy make the same revisions, byte for byte",
+      "outcome": "Passed",
+      "detail": "{\"first\": [\"f104f2c9a5ff\", \"39694a45db3e\", \"c28db3dea082\", \"6034f7925f64\", \"46bc90dacef7\", \"1b1602c6bcd7\"], \"again\": [\"f104f2c9a5ff\", \"39694a45db3e\", \"c28db3dea082\", \"6034f7925f64\", \"46bc90dacef7\", \"1b1602c6bcd7\"]}"
+    },
+    {
+      "step": "14 determinism",
+      "check": "every check of the second run passed",
+      "outcome": "Passed",
+      "detail": "[]"
+    }
+  ],
+  "timings": {
+    "workspace (mock pipeline, twice)": 6.54,
+    "start": 0.0015,
+    "inspect": 0.0008,
+    "propose roll": 0.0017,
+    "apply": 0.0009,
+    "render full (r005, source size)": 0.8316,
+    "render junction window (r005, j3)": 0.8926,
+    "render again (cached)": 0.0005,
+    "mcp: 5 requests incl. start-up": 0.217
+  },
+  "frame_accuracy": [
+    {
+      "clip": "c001",
+      "shot": 0,
+      "record_frames": [
+        24,
+        25,
+        26
+      ],
+      "source_frames": [
+        24,
+        25,
+        26
+      ],
+      "best_offsets": [
+        -2,
+        -2,
+        -2
+      ],
+      "decisive": false,
+      "margin": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "clip": "c002",
+      "shot": 1,
+      "record_frames": [
+        57,
+        58,
+        59
+      ],
+      "source_frames": [
+        111,
+        112,
+        113
+      ],
+      "best_offsets": [
+        0,
+        0,
+        0
+      ],
+      "decisive": true,
+      "margin": [
+        2.55,
+        2.65,
+        2.86
+      ]
+    },
+    {
+      "clip": "c003",
+      "shot": 3,
+      "record_frames": [
+        87,
+        88,
+        89
+      ],
+      "source_frames": [
+        187,
+        188,
+        189
+      ],
+      "best_offsets": [
+        -2,
+        -2,
+        -2
+      ],
+      "decisive": false,
+      "margin": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "clip": "e001",
+      "shot": 4,
+      "record_frames": [
+        127,
+        128,
+        129
+      ],
+      "source_frames": [
+        262,
+        263,
+        264
+      ],
+      "best_offsets": [
+        0,
+        0,
+        0
+      ],
+      "decisive": true,
+      "margin": [
+        0.28,
+        0.27,
+        0.28
+      ]
+    },
+    {
+      "clip": "c005",
+      "shot": 7,
+      "record_frames": [
+        152,
+        153,
+        154
+      ],
+      "source_frames": [
+        452,
+        453,
+        454
+      ],
+      "best_offsets": [
+        0,
+        0,
+        0
+      ],
+      "decisive": true,
+      "margin": [
+        1.35,
+        1.65,
+        1.62
+      ]
+    },
+    {
+      "clip": "e002",
+      "shot": 5,
+      "record_frames": [
+        169,
+        170,
+        171
+      ],
+      "source_frames": [
+        338,
+        339,
+        340
+      ],
+      "best_offsets": [
+        -2,
+        -2,
+        -2
+      ],
+      "decisive": false,
+      "margin": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "summary": {
+    "Passed": 67,
+    "Passed: gap confirmed": 1,
+    "Failed: matchcut core defect": 1,
+    "Failed": 0
+  }
+}
