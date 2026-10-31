@@ -136,8 +136,8 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
     assert "[asrc]asplit[asrc0][asrc1]" in graph
     assert "[music][asrc1]sidechaincompress=threshold=0.05:ratio=6.0" in graph
     assert "[asrc0][ducked]amix=inputs=2:duration=longest:normalize=0[amixed]" in graph
-    assert "[amixed]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=48000[aout]" in graph
-    assert "[aout]" in graph and graph.count("[aout]") == 1
+    assert "[amixed]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=48000[apre]" in graph
+    assert graph.endswith("[apre]apad=whole_dur=5.480000,atrim=duration=5.480000[aout]") and graph.count("[aout]") == 1  # as long as the video
 
 
 def test_filter_graph_music_only_and_no_duck():
@@ -147,7 +147,7 @@ def test_filter_graph_music_only_and_no_duck():
     no_duck = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", duck=False, loudnorm=False))
     assert "sidechaincompress" not in no_duck
     assert "[asrc][music]amix=inputs=2:duration=longest:normalize=0[amixed]" in no_duck
-    assert "[amixed]anull[aout]" in no_duck
+    assert "[amixed]anull[apre]" in no_duck and no_duck.endswith("[aout]")
     silent = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=False)
     graph = build_filter_graph(_three_clip_timeline(), silent, PipelineConfig().render, music=MusicConfig(path="s.mp3"))
     assert not any(f"[{i}:a]" in graph for i in range(3)) and "[music]anull[amixed]" in graph and "[aout]" in graph

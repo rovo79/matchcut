@@ -193,12 +193,15 @@ def test_ntsc_rate_transitions_are_frame_exact(ntsc, tmp_path):
 
 @pytest.mark.parametrize("transitions", [False, True], ids=["cuts", "transitions"])
 def test_30_fps_is_frame_exact(tmp_path, transitions):
-    """At 30 fps the old renderer showed hard cuts a frame late too (its in-points and fps filter were rounded to 4 decimals)."""
+    """At 30 fps the old renderer showed cuts a frame late too: its in-points and fps filter were rounded to 4 decimals.  Points on frames
+    2 mod 3 (41/30 s is stored 1.3667, after the frame's time) are the ones that rounding moved."""
     coded = sig.make_coded_footage(tmp_path / "f30.mp4", seconds=12, rate="30")
     media = probe(str(coded))
     f = lambda n: round(n / 30, 4)  # noqa: E731
+    assert f(41) * 30 > 41 and f(101) * 30 > 101
     trs = [Transition(), Transition("dissolve", f(12)), Transition("dip_to_black", f(9))] if transitions else None
-    for name, ranges in (("source order", [(f(40), f(100)), (f(160), f(220)), (f(250), f(310))]), ("reverse order", [(f(250), f(310)), (f(160), f(220)), (f(40), f(100))])):
+    fwd = [(f(41), f(101)), (f(161), f(221)), (f(251), f(311))]
+    for name, ranges in (("source order", fwd), ("reverse order", fwd[::-1])):
         tl = timeline(str(coded), media.fps, ranges, trs)
         out = do_render(tl, media, tmp_path / f"f30_{name}.mp4")
         assert_video_exact(tl, out, media.fps)
@@ -341,4 +344,42 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
     tl = timeline(str(coded), media.fps, [(k * 0.5, k * 0.5 + 0.4) for k in range(20)])
     render(tl, media, RCFG, tmp_path / "long.mp4")
     assert "-filter_complex" not in seen["cmd"] and seen["graph"].endswith("[aout]")
+    assert not list(tmp_path.glob(".graph-*"))
+
+
+@pytest.mark.parametrize("rate", ["30", "30000/1001"])
+def test_many_fractional_dissolves_do_not_drift(tmp_path, rate):
+    """Eight 0.75 s dissolves (22.5 / 22.48 frames each): the renderer rounds the running total, as the exporters' layout does, so every clip
+    starts within half a frame of Timeline.record_start and the cut is round(duration) frames long (rounding each on its own drifted by
+    up to 8 frames after 15 dissolves)."""
+    coded = sig.make_coded_footage(tmp_path / "frac.mp4", seconds=40, rate=rate)
+    media = probe(str(coded))
+    fps = media.fps
+    f = lambda n: round(n / fps, 4)  # noqa: E731
+    tl = timeline(str(coded), fps, [(f(k * 130), f(k * 130 + 90)) for k in range(9)], [Transition()] + [Transition("dissolve", 0.75)] * 8)
+    from fractions import Fraction
+
+    from matchcut.interchange.common import layout, record_frames
+
+    rows = layout(tl, Fraction(rate))
+    assert all(abs(r.rec - tl.record_start(i) * fps) <= 0.5 + 1e-6 for i, r in enumerate(rows))  # the exporters stay on record_start
+    out = do_render(tl, media, tmp_path / "frac_out.mp4")
+    got = sig.frame_numbers(out)
+    assert len(got) == record_frames(rows) == round(tl.duration * fps)
+    for i, r in enumerate(rows):  # each clip alone (between its transitions) shows the frames the exported layout puts there
+        lo, hi = r.rec + r.tr, (rows[i + 1].rec if i + 1 < len(rows) else record_frames(rows))
+        wrong = [(k, got[k], r.in_f + (k - r.rec)) for k in range(lo, hi) if got[k] != r.in_f + (k - r.rec)]
+        assert not wrong, (i, wrong[:3])
+    assert_video_exact(tl, out, fps)
+    assert_av_lengths(out, fps)
+
+
+def test_the_graph_file_is_removed_when_ffmpeg_fails(monkeypatch, coded, tmp_path):
+    def failing_run(cmd, capture=True):
+        raise render_mod.MediaError("ffmpeg failed")
+    monkeypatch.setattr(render_mod, "run", failing_run)
+    monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)
+    media = probe(str(coded))
+    with pytest.raises(render_mod.MediaError):
+        render(timeline(str(coded), media.fps, [(1.0, 2.0), (3.0, 4.0)]), media, RCFG, tmp_path / "fail.mp4")
     assert not list(tmp_path.glob(".graph-*"))

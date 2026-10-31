@@ -124,11 +124,17 @@ and every decision each pass made.
 
 Each clip reads the source through its own ffmpeg input:
 
-- **Where it reads:** the input is seeked to a frame at or before 0.25 s ahead of the clip's in-point (or to 0), and reads to 0.5 s past
+- **Where it reads:** the input is seeked to the last frame at least 0.25 s before the clip's in-point (or to 0), and reads to 0.5 s past
   its out-point.
 - **Trims:** they are exact, made on the decoded frames and samples, relative to that seek. Video trims start 0.5 ms early, so a point
   stored to 4 decimals still selects its own frame at 29.97 and 30 fps.
 - **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).
+  - Their lengths are rounded over the running total, as the OTIO/FCPXML/EDL exporters' layout rounds them: the render shows the
+    exported frames, and every clip starts within half a frame of `Timeline.record_start`.
+  - A single fractional transition can therefore render one frame longer or shorter than its seconds; the whole cut is
+    `round(duration × fps)` frames.
+- **Audio length:** the audio is padded or cut to the video's length at the end of the chain, since mixing, ducking and `loudnorm` can
+  end it early or pad it.
 - **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
   - the audio of a reordered dissolve went missing;
   - a reordered cut under music lost its audio;
@@ -141,7 +147,8 @@ Each clip reads the source through its own ffmpeg input:
     source's index (about 10 MB for a one-hour MP4). Cuts of more than 8 clips decode each input with one thread to bound this. Measured
     peaks are still well below the shared input's.
   - **Decoding:** each clip decodes from the keyframe at or before its seek point, so up to one frame group plus 0.25 s before its in-point.
-  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file.
+  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file (`-filter_complex_script`, which ffmpeg 7.1 deprecates in favour of
+    `-/filter_complex`).
 - **Tested on:** ffmpeg 6.1 only. ffmpeg 7 adds threads per input.
 
 ## Music
@@ -165,7 +172,7 @@ Each clip reads the source through its own ffmpeg input:
 
 A dissolve starts on the beat: the cut point the pass aligns is where the
 incoming clip begins fading in (the render starts a dissolve `duration`
-seconds before the junction). Tempo is assumed constant across the track.
+seconds before the junction, rounded to whole frames over the running total as above). Tempo is assumed constant across the track.
 
 ## Events and checkpoints
 

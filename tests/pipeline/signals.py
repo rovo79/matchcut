@@ -101,7 +101,15 @@ def expected_frames(tl, fps: float) -> Dict[int, int]:
     def frames(seconds: float) -> int:
         return int(np.floor(seconds * fps + 0.5))
     n = [frames(c.duration) for c in tl.clips]
-    tr = [0] + [0 if c.transition_in.is_cut else frames(c.transition_in.duration) for c in tl.clips[1:]]
+    tr = [0]  # transition frames by error diffusion over the running total, as the exporters' layout and the renderer place them
+    cum, done = 0.0, 0
+    for c in tl.clips[1:]:
+        f = 0
+        if not c.transition_in.is_cut:
+            cum += c.transition_in.duration
+            f = max(frames(cum) - done, 0)
+            done += f
+        tr.append(f)
     total = sum(n) - sum(tr)
     fade_in, fade_out = frames(tl.fade_in), frames(tl.fade_out)
     out: Dict[int, int] = {}
@@ -129,5 +137,6 @@ def tone_window(tl, i: int, w: float = 0.2) -> Optional[Tuple[float, int]]:
 
 
 def av_tolerance(fps: float) -> float:
-    """How far audio and video lengths may differ: two AAC frames of priming/padding plus one video frame."""
-    return 2 * 1024 / SR + 1 / fps
+    """How far audio and video lengths may differ: the renderer cuts the audio to the video's length, so only the container's rounding
+    is left (measured: under 1 ms); two milliseconds."""
+    return 0.002

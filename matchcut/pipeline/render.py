@@ -92,10 +92,17 @@ def build_filter_graph(
     frames = lambda seconds: int(math.floor(seconds * fps + 0.5)) if fps > 0 else 0  # noqa: E731  (whole frames, as the trims select them)
     cur_v, cur_a = "[v0]", "[a0]"
     cur_frames = frames(tl.clips[0].duration)
+    # transition frames by error diffusion over the running total, as interchange.common.layout lays them out: rounding each one on its
+    # own would let the error add up along a cut of fractional dissolves (8 frames after 15 x 0.75 s at 30 fps)
+    cum, done = 0.0, 0
     for i, c in enumerate(tl.clips[1:], start=1):
         tr = c.transition_in
         nv, na = f"[xv{i}]", f"[xa{i}]"
-        tr_frames = 0 if tr.is_cut else frames(tr.duration)
+        tr_frames = 0
+        if not tr.is_cut:
+            cum += tr.duration
+            tr_frames = max(frames(cum) - done, 0)
+            done += tr_frames
         if not tr_frames:
             parts.append(f"{cur_v}[v{i}]concat=n=2:v=1:a=0{nv}")
             if audio:
@@ -123,10 +130,13 @@ def build_filter_graph(
         afilters.append(f"afade=t=out:st={st:.3f}:d={tl.fade_out:.3f}")
     parts.append(f"{cur_v}{','.join(vfilters) if vfilters else 'null'}[vout]")
     if audio:
-        label = "[asrc]" if has_music else "[aout]"
+        label = "[asrc]" if has_music else "[apre]"
         parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}{label}")
     if has_music:
         parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips))
+    if audio or has_music:
+        # the audio lasts exactly as long as the video: mixing, ducking and loudnorm can end it early or pad it to the next 100 ms
+        parts.append(f"[apre]apad=whole_dur={cur_dur:.6f},atrim=duration={cur_dur:.6f}[aout]")
     return ";".join(parts)
 
 
@@ -150,7 +160,11 @@ def _ensure_open_files(n_inputs: int) -> None:
     if hard != resource.RLIM_INFINITY and hard < need:
         raise MediaError(f"this cut has {n_inputs} clips and the renderer opens the source once per clip, but the open-file limit is {hard}: "
                          f"raise it (ulimit -n {need}) and render again")
-    resource.setrlimit(resource.RLIMIT_NOFILE, (need, hard))
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (need, hard))
+    except (ValueError, OSError) as exc:  # e.g. above macOS's kern.maxfilesperproc
+        raise MediaError(f"this cut has {n_inputs} clips and the renderer opens the source once per clip, but the open-file limit "
+                         f"({soft}) cannot be raised to {need}: {exc}") from exc
 
 
 def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1) -> List[str]:
@@ -175,7 +189,7 @@ def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_dur
     else:
         parts.append("[music]anull[amixed]")
     final = f"loudnorm=I={music.target_lufs:.1f}:TP=-1.5:LRA=11,aresample=48000" if music.loudnorm else "anull"
-    parts.append(f"[amixed]{final}[aout]")
+    parts.append(f"[amixed]{final}[apre]")
     return parts
 
 
