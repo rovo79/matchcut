@@ -177,15 +177,33 @@ def test_ntsc_rate_hard_cuts_are_frame_exact_in_any_order(ntsc, tmp_path):
         assert_source_tones(tl, sig.audio(out))
 
 
-@pytest.mark.xfail(strict=True, reason="known, older than this change and identical on main: at 29.97 fps each transition shows the incoming clip "
-                   "one frame early (one extra video frame per transition), because xfade offsets are written as rounded seconds and the fps "
-                   "filter as 29.9700; to be fixed with the transition frame normalisation, not here")
 def test_ntsc_rate_transitions_are_frame_exact(ntsc, tmp_path):
+    """Each transition starts on its own frame at 29.97 fps, in any order and in source order (rounded seconds started it a frame late)."""
     media = probe(str(ntsc))
     tl = _ntsc_timeline(ntsc, transitions=True)
-    out = do_render(tl, media, tmp_path / "ntsc_tr.mp4")
-    assert_av_lengths(out, media.fps)  # audio is present and within tolerance even here
-    assert_video_exact(tl, out, media.fps)
+    for name, clips in (("mixed order", list(tl.clips)), ("source order", sorted(tl.clips, key=lambda c: c.source_in))):
+        tl.clips = [Clip.from_dict(c.to_dict()) for c in clips]
+        tl.clips[0].transition_in = Transition()
+        tl.clips[1].transition_in, tl.clips[2].transition_in = Transition("dissolve", round(12 / media.fps, 4)), Transition("dip_to_black", round(10 / media.fps, 4))
+        tl.fade_in, tl.fade_out = 0.5, 0.5
+        out = do_render(tl, media, tmp_path / f"ntsc_tr_{name}.mp4")
+        assert_av_lengths(out, media.fps)
+        assert_video_exact(tl, out, media.fps)
+
+
+@pytest.mark.parametrize("transitions", [False, True], ids=["cuts", "transitions"])
+def test_30_fps_is_frame_exact(tmp_path, transitions):
+    """At 30 fps the old renderer showed hard cuts a frame late too (its in-points and fps filter were rounded to 4 decimals)."""
+    coded = sig.make_coded_footage(tmp_path / "f30.mp4", seconds=12, rate="30")
+    media = probe(str(coded))
+    f = lambda n: round(n / 30, 4)  # noqa: E731
+    trs = [Transition(), Transition("dissolve", f(12)), Transition("dip_to_black", f(9))] if transitions else None
+    for name, ranges in (("source order", [(f(40), f(100)), (f(160), f(220)), (f(250), f(310))]), ("reverse order", [(f(250), f(310)), (f(160), f(220)), (f(40), f(100))])):
+        tl = timeline(str(coded), media.fps, ranges, trs)
+        out = do_render(tl, media, tmp_path / f"f30_{name}.mp4")
+        assert_video_exact(tl, out, media.fps)
+        assert_av_lengths(out, media.fps)
+        assert_source_tones(tl, sig.audio(out))
 
 
 def test_a_source_with_a_start_offset_is_read_from_its_start(tmp_path):
@@ -267,6 +285,8 @@ def test_m2b_junction_window_of_a_reordered_junction(coded, ticks, tmp_path):
     in_second = int(tl.clips[1].source_in + (w.end - 0.4 - tl.record_start(1)))
     for t, second in ((0.2, int(tl.clips[0].source_in + w.start + 0.2)), (w.duration - 0.4, in_second)):
         assert sig.dominant_tone(y, t) == pytest.approx(sig.tone_hz(second), abs=10), (t, second)
+    for t in (0.1, w.duration - 0.6):  # the music plays under both clips (ducked under the source tone)
+        assert sig.band_rms(y, t, 0.5, sig.TICK_HZ - 100, sig.TICK_HZ + 100) > 0.0002, t
     assert sub_timeline(tl, w).clips[0].source_in >= tl.clips[0].source_in
 
 
@@ -274,10 +294,10 @@ def test_one_input_per_clip_seeked_on_the_frame_grid(monkeypatch, coded, ticks, 
     media = probe(str(coded))
     tl = timeline(str(coded), media.fps, [(9.0, 11.0), (0.4, 2.0), (5.0, 7.0)])
     inputs = clip_inputs(tl, media.fps)
-    assert [ci.seek for ci in inputs] == [8.0, 0.0, 4.0]  # 1 s before the in-point, never before the start
-    assert [(ci.start, ci.end) for ci in inputs] == [(1.0, 3.0), (0.4, 2.0), (1.0, 3.0)]
+    assert [ci.seek for ci in inputs] == [8.72, 0.12, 4.72]  # at or before in-point - 0.25 s, on the frame grid, never before the start
+    assert [(ci.start, ci.end) for ci in inputs] == [(0.28, 2.28), (0.28, 1.88), (0.28, 2.28)]
     assert all(abs(ci.seek * media.fps - round(ci.seek * media.fps)) < 1e-6 for ci in inputs)
-    assert SEEK_MARGIN_SECONDS == 1.0
+    assert SEEK_MARGIN_SECONDS == 0.25
     seen = {}
 
     def fake_run(cmd, capture=True):
@@ -290,3 +310,35 @@ def test_one_input_per_clip_seeked_on_the_frame_grid(monkeypatch, coded, ticks, 
     many = timeline(str(coded), media.fps, [(k * 0.5, k * 0.5 + 0.4) for k in range(SINGLE_THREAD_DECODE_ABOVE + 1)])
     render(many, media, RCFG, tmp_path / "y.mp4")
     assert seen["cmd"].count("-threads") == SINGLE_THREAD_DECODE_ABOVE + 1  # one decoder thread per input: memory grows per input
+
+
+def test_the_open_file_limit_is_raised_or_explained(monkeypatch, coded, tmp_path):
+    """One open file per clip: the soft limit is raised toward the hard one, and a hard limit too low is a one-line error."""
+    resource = pytest.importorskip("resource")
+    calls = []
+    monkeypatch.setattr(resource, "getrlimit", lambda what: (64, 4096))
+    monkeypatch.setattr(resource, "setrlimit", lambda what, value: calls.append(value))
+    monkeypatch.setattr(render_mod, "run", lambda cmd, capture=True: None)
+    media = probe(str(coded))
+    many = timeline(str(coded), media.fps, [(k * 0.1, k * 0.1 + 0.08) for k in range(100)])
+    render(many, media, RCFG, tmp_path / "many.mp4")
+    assert calls == [(100 + render_mod.FILES_PER_RENDER, 4096)]
+    monkeypatch.setattr(resource, "getrlimit", lambda what: (64, 100))
+    with pytest.raises(render_mod.MediaError, match="open-file limit is 100"):
+        render(many, media, RCFG, tmp_path / "many.mp4")
+
+
+def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_path):
+    """Linux refuses a single argument over 128 KiB (about 460 clips): a long graph is written to a file, and the file is removed after."""
+    seen = {}
+
+    def fake_run(cmd, capture=True):
+        seen["cmd"] = cmd
+        seen["graph"] = Path(cmd[cmd.index("-filter_complex_script") + 1]).read_text()
+    monkeypatch.setattr(render_mod, "run", fake_run)
+    monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 2000)
+    media = probe(str(coded))
+    tl = timeline(str(coded), media.fps, [(k * 0.5, k * 0.5 + 0.4) for k in range(20)])
+    render(tl, media, RCFG, tmp_path / "long.mp4")
+    assert "-filter_complex" not in seen["cmd"] and seen["graph"].endswith("[aout]")
+    assert not list(tmp_path.glob(".graph-*"))
