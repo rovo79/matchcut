@@ -35,7 +35,7 @@ from matchcut.pipeline.timeline import Timeline, clip_origin  # noqa: E402
 
 PASSED, FAILED = "Passed", "Failed"
 CORE = "Failed: matchcut core defect"  # the check failed because of matchcut itself, not the editing API (see the report)
-KNOWN = "Passed: gap confirmed"  # the check confirms a documented limitation
+KNOWN = "Known gap (not a pass)"  # the check shows a documented limitation is still there: counted apart from the passes
 
 
 class Checks:

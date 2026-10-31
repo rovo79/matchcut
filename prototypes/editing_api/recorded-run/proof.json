@@ -471,7 +471,7 @@
     {
       "step": "11 publish",
       "check": "matchcut export refuses the human stage (M2a's rule: only canonical stages go out), so an edited cut cannot yet go to an NLE",
-      "outcome": "Passed: gap confirmed",
+      "outcome": "Known gap (not a pass)",
       "detail": "the human stage is an import result, not a canonical stage: export one of the stages it was imported against\n"
     },
     {
@@ -712,7 +712,7 @@
   ],
   "summary": {
     "Passed": 88,
-    "Passed: gap confirmed": 1,
+    "Known gap (not a pass)": 1,
     "Failed: matchcut core defect": 2,
     "Failed": 0
   }

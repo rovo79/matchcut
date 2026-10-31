@@ -18,7 +18,8 @@ an editor's import there unless asked (`replace_import`), and then moves it asid
 | `cli.py` | `python cli.py WS TOOL '{json}'`: JSON in, JSON out |
 | `mcp_server.py` | `python mcp_server.py WS`: MCP over stdio (newline-delimited JSON-RPC 2.0), no SDK, no dependencies |
 | `proof.py` | The proof: deterministic fixtures and 91 checks |
-| `recorded-run/` | `proof.md` and `proof.json` from the run on 2026-10-31 (work paths replaced by `<work>`) |
+| `recorded-run/` | `proof.md` and `proof.json` from the run on 2026-10-31, before the renderer fix (work paths replaced by `<work>`; the gap's label was later renamed from "Passed: gap confirmed" to "Known gap (not a pass)") |
+| `recorded-run-renderer-fix/` | The same proof with the renderer fix (`claude/renderer-audio-fix-bkqqay`) merged in: 90 Passed, 1 known gap, no core-defect failure |
 
 ## Run the proof
 

@@ -1,6 +1,6 @@
 # Editing API proof: recorded run
 
-{'Passed': 88, 'Passed: gap confirmed': 1, 'Failed: matchcut core defect': 2, 'Failed': 0}
+{'Passed': 88, 'Known gap (not a pass)': 1, 'Failed: matchcut core defect': 2, 'Failed': 0}
 
 | Step | Check | Outcome |
 |---|---|---|
@@ -82,7 +82,7 @@
 | 11 publish | the editor pin is still applied in the human stage | Passed |
 | 11 publish | matchcut junctions lists the human stage (5 junctions; the new clips renamed h001, h002 by M2a's builder) | Passed |
 | 11 publish | M2a's diff of the published stage finds the clips but reads the two new transitions on c005 as trims (its neighbours changed) | Passed |
-| 11 publish | matchcut export refuses the human stage (M2a's rule: only canonical stages go out), so an edited cut cannot yet go to an NLE | Passed: gap confirmed |
+| 11 publish | matchcut export refuses the human stage (M2a's rule: only canonical stages go out), so an edited cut cannot yet go to an NLE | Known gap (not a pass) |
 | 12 mcp | initialize and tools/list (11 tools) | Passed |
 | 12 mcp | edit_inspect over MCP equals the Python call | Passed |
 | 12 mcp | a refusal over MCP carries its reason | Passed |
