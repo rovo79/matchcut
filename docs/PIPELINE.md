@@ -128,6 +128,10 @@ Each clip reads the source through its own ffmpeg input:
 - **Trims:** they are exact, made on the decoded frames, relative to that seek. Video trims start 0.5 ms early, so a point stored to 4 decimals
   still selects its own frame at 29.97 fps.
 - **Decoder threads:** a cut of more than 8 clips decodes each input with one thread, to bound memory.
+- **Transitions:** they are whole frames. `final.json` stores them so (`Timeline.snap_transitions`, laid out as the OTIO/FCPXML/EDL
+  exporters lay them out). The renderer renders any stage's transitions on those same frames, in memory: a workspace saved earlier with,
+  say, a 0.336 s dissolve renders the 8 frames its export shows, and its files are not rewritten. Each transition is placed by frame count
+  against the exact frame rate (`30000/1001`, not `29.9700`).
 - **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
   - the audio of a reordered dissolve went missing;
   - a reordered cut under music lost its audio;

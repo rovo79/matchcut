@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -62,8 +63,15 @@ def build_filter_graph(
     music: Optional[MusicConfig] = None,
     music_duration: Optional[float] = None,
 ) -> str:
-    """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``."""
+    """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``.
+
+    Transitions are rendered on whole frames (``Timeline.snap_transitions``, the interchange exporters' layout), so a stage saved with a
+    fractional transition renders the frames its export shows; the stage itself is not changed.  Times are written to the microsecond
+    against the exact frame rate, and each transition starts ``TRIM_EPSILON_SECONDS`` before its first frame's time, so it cannot begin
+    a frame late at 29.97 fps."""
+    tl = tl.snap_transitions()
     fps = media.fps
+    rate = _rate_text(fps)
     width = cfg.proxy_width if cfg.proxy else cfg.width
     scale = f",scale={width}:-2:flags=bicubic" if width else ""
     parts: List[str] = []
@@ -74,13 +82,15 @@ def build_filter_graph(
         i = ci.index
         parts.append(
             f"[{i}:v]trim=start={max(0.0, ci.start - eps):.4f}:end={ci.end - eps:.4f},setpts=PTS-STARTPTS,"
-            f"fps={fps:.4f},settb=AVTB,format=yuv420p,setsar=1{scale}[v{i}]"
+            f"fps={rate},settb=AVTB,format=yuv420p,setsar=1{scale}[v{i}]"
         )
         if audio:
             parts.append(f"[{i}:a]atrim=start={ci.start:.4f}:end={ci.end:.4f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
 
+    # the running length in whole frames (each clip's frames as its trim selects them), so offsets do not drift over a long cut
+    frames = lambda seconds: int(math.floor(seconds * fps + 0.5)) if fps > 0 else 0  # noqa: E731
     cur_v, cur_a = "[v0]", "[a0]"
-    cur_dur = tl.clips[0].duration
+    cur_frames = frames(tl.clips[0].duration)
     for i, c in enumerate(tl.clips[1:], start=1):
         tr = c.transition_in
         nv, na = f"[xv{i}]", f"[xa{i}]"
@@ -88,15 +98,16 @@ def build_filter_graph(
             parts.append(f"{cur_v}[v{i}]concat=n=2:v=1:a=0{nv}")
             if audio:
                 parts.append(f"{cur_a}[a{i}]concat=n=2:v=0:a=1{na}")
-            cur_dur += c.duration
+            cur_frames += frames(c.duration)
         else:
             kind = "fadeblack" if tr.kind == "dip_to_black" else "fade"
-            offset = max(0.0, cur_dur - tr.duration)
-            parts.append(f"{cur_v}[v{i}]xfade=transition={kind}:duration={tr.duration:.3f}:offset={offset:.3f}{nv}")
+            offset = max(0.0, (cur_frames - frames(tr.duration)) / fps - eps)
+            parts.append(f"{cur_v}[v{i}]xfade=transition={kind}:duration={tr.duration:.6f}:offset={offset:.6f}{nv}")
             if audio:
-                parts.append(f"{cur_a}[a{i}]acrossfade=d={tr.duration:.3f}{na}")
-            cur_dur += c.duration - tr.duration
+                parts.append(f"{cur_a}[a{i}]acrossfade=d={tr.duration:.6f}{na}")
+            cur_frames += frames(c.duration) - frames(tr.duration)
         cur_v, cur_a = nv, na
+    cur_dur = cur_frames / fps if fps > 0 else tl.duration
 
     vfilters = []
     afilters = []
@@ -114,6 +125,12 @@ def build_filter_graph(
     if has_music:
         parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips))
     return ";".join(parts)
+
+
+def _rate_text(fps: float) -> str:
+    """The frame rate for ffmpeg's fps filter: an exact ratio for the usual rates (30000/1001, not 29.9700), else six decimals."""
+    exact = Fraction(fps).limit_denominator(1001)
+    return f"{exact.numerator}/{exact.denominator}" if abs(float(exact) - fps) < 1e-6 * max(fps, 1.0) else f"{fps:.6f}"
 
 
 def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1) -> List[str]:

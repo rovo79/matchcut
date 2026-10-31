@@ -160,6 +160,26 @@ class Timeline:
             c.source_out = round(out_f / fps, 4)
         return out
 
+    def snap_transitions(self) -> "Timeline":
+        """Copy with every transition a whole number of frames, laid out as the interchange exporters lay them out
+        (``interchange.common.layout``): the running total is rounded, so the cut's length stays within half a frame.  A transition that
+        rounds to no frame becomes a cut.  Source points are left as they are."""
+        out = self.copy()
+        fps = out.fps
+        if fps <= 0:
+            return out
+        cum, done = 0.0, 0
+        for c in out.clips[1:]:
+            if c.transition_in.is_cut:
+                continue
+            cum += c.transition_in.duration
+            frames = max(int(math.floor(abs(cum) * fps + 0.5 + 1e-6)) - done, 0)
+            done += frames
+            c.transition_in = Transition(c.transition_in.kind, round(frames / fps, 4)) if frames else Transition()
+        if out.clips:
+            out.clips[0].transition_in = Transition()
+        return out
+
     def renumber(self) -> None:
         for i, c in enumerate(self.clips):
             c.id = f"c{i + 1:03d}"

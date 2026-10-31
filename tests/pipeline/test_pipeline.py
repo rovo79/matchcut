@@ -72,11 +72,14 @@ def test_filter_graph_shapes():
     tl.clips = [Clip("c001", 0, 0, 2, "b1"), Clip("c002", 1, 3, 5, "b1", transition_in=Transition("dissolve", 0.5)), Clip("c003", 2, 6, 8, "b2", transition_in=Transition("dip_to_black", 0.4))]
     cfg = PipelineConfig().render
     graph = build_filter_graph(tl, media, cfg)
-    assert "xfade=transition=fade:duration=0.500:offset=1.500" in graph
-    assert "xfade=transition=fadeblack:duration=0.400:offset=3.100" in graph
-    assert "acrossfade=d=0.500" in graph
+    # transitions on whole frames as the exporters lay them out: the 0.5 s dissolve (12.5 frames) renders as 13 frames, the dip as 10
+    # (22.5 -> 23 frames in all); each transition starts 0.5 ms before its first frame's time
+    assert "xfade=transition=fade:duration=0.520000:offset=1.479500" in graph
+    assert "xfade=transition=fadeblack:duration=0.400000:offset=3.079500" in graph
+    assert "acrossfade=d=0.520000" in graph
     assert graph.endswith("[aout]") and "[vout]" in graph
-    assert "fade=t=out:st=4.600:d=0.500" in graph
+    assert "fade=t=out:st=4.580:d=0.500" in graph
+    assert "fps=25/1," in graph
 
 
 def test_music_is_analysed_once_and_reaches_the_prompts(demo_video, click_track, tmp_path):
@@ -127,8 +130,8 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
     media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
     music = MusicConfig(path="song.mp3", start=4.0, gain_db=-9.0, fade_out=2.0)
     graph = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=music)
-    assert "[3:a]atrim=start=4.000:end=9.500" in graph  # 5.5 s timeline, offset 4 s; the music is the input after the 3 clips
-    assert "afade=t=out:st=3.500:d=2.000" in graph
+    assert "[3:a]atrim=start=4.000:end=9.480" in graph  # 5.48 s rendered (the 0.5 s dissolve is 13 frames), offset 4 s; input after the 3 clips
+    assert "afade=t=out:st=3.480:d=2.000" in graph
     assert "volume=-9.0dB[music]" in graph
     assert "[asrc]asplit[asrc0][asrc1]" in graph
     assert "[music][asrc1]sidechaincompress=threshold=0.05:ratio=6.0" in graph

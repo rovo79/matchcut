@@ -177,14 +177,12 @@ def test_ntsc_rate_hard_cuts_are_frame_exact_in_any_order(ntsc, tmp_path):
         assert_source_tones(tl, sig.audio(out))
 
 
-@pytest.mark.xfail(strict=True, reason="known, older than this change and identical on main: at 29.97 fps each transition shows the incoming clip "
-                   "one frame early (one extra video frame per transition), because xfade offsets are written as rounded seconds and the fps "
-                   "filter as 29.9700; to be fixed with the transition frame normalisation, not here")
 def test_ntsc_rate_transitions_are_frame_exact(ntsc, tmp_path):
+    """Each transition starts on its own frame at 29.97 fps (it started a frame late while offsets were rounded seconds)."""
     media = probe(str(ntsc))
     tl = _ntsc_timeline(ntsc, transitions=True)
     out = do_render(tl, media, tmp_path / "ntsc_tr.mp4")
-    assert_av_lengths(out, media.fps)  # audio is present and within tolerance even here
+    assert_av_lengths(out, media.fps)
     assert_video_exact(tl, out, media.fps)
 
 
