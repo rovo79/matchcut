@@ -22,8 +22,11 @@ Rules every proposal must pass (all or nothing)
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
+import re
 import math
 import os
 import shutil
@@ -34,8 +37,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from matchcut.interchange import InterchangeError
-from matchcut.interchange.common import export_timeline, junction_ids, layout, record_frames, snap_rate, to_frames
-from matchcut.interchange.workspace import IMPORT_SCHEMA, human_stage
+from matchcut.interchange.common import export_timeline, junction_ids, layout, record_frames, to_frames
+from matchcut.interchange.workspace import IMPORT_SCHEMA, _build as m2a_build, _source as _m2a_source  # private M2a helpers: fine for a prototype
 from matchcut.pipeline.audio import MusicAnalysis
 from matchcut.pipeline.config import PipelineConfig, RenderConfig
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_site
@@ -111,10 +114,14 @@ class Workspace:
                 return json.loads((ws / name).read_text())
             except (OSError, ValueError):
                 return {}
+        try:  # the exact rate M2a exports at (the stream's r_frame_rate), not probe.json's average
+            rate = _m2a_source(ws, cfg)[0].rate
+        except (InterchangeError, OSError, ValueError) as exc:
+            raise EditError(f"cannot read the source footage: {exc}") from exc
         music = None
         if cfg.music.path and (ws / "music.json").exists():
             music = MusicAnalysis.load(ws / "music.json")
-        return cls(ws, cfg, media, snap_rate(media.fps), {s.index: (s.start, s.end) for s in shots},
+        return cls(ws, cfg, media, rate, {s.index: (s.start, s.end) for s in shots},
                    {int(k): v for k, v in _json("descriptions.json").items()}, _json("narrative.json") or {}, music, PinStore(ws).load())
 
     @property
@@ -137,6 +144,22 @@ class Workspace:
 
 
 # ----------------------------------------------------------------------------------------------- addressing
+def _int(op: Dict[str, Any], key: str, default: Any = None) -> int:
+    """A whole-number argument: refused when missing (without a default), boolean or fractional, never silently truncated."""
+    v = op.get(key, default)
+    if v is None:
+        raise Refused(f"{key} is required")
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        raise Refused(f"{key} must be a whole number of frames, not {v!r}")
+    try:
+        f = float(v)
+    except ValueError:
+        raise Refused(f"{key} must be a whole number, not {v!r}") from None
+    if not f.is_integer():
+        raise Refused(f"{key} must be a whole number, not {v!r}")
+    return int(f)
+
+
 def find_clip(tl: Timeline, ref: Any) -> Clip:
     ref = str(ref)
     hits = [c for c in tl.clips if c.id == ref] or [c for c in tl.clips if clip_origin(c) == ref]
@@ -226,14 +249,17 @@ class Ops:
         else:
             raise Refused("say where: before or after a clip")
 
-    def _first_is_cut(self) -> None:
+    def _first_is_cut(self) -> Set[str]:
+        """The first clip of a cut has no incoming transition: drop one a reorder left there; the ids it changed."""
         if self.tl.clips and not self.tl.clips[0].transition_in.is_cut:
             self.tl.clips[0].transition_in = Transition()
+            return {self.tl.clips[0].id}
+        return set()
 
     # -- the operations
     def trim(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
         """Move one edge of a clip by ``frames`` (positive = later in the source); later clips ripple."""
-        c, edge, n = find_clip(self.tl, op["clip"]), op["edge"], int(op["frames"])
+        c, edge, n = find_clip(self.tl, op["clip"]), op.get("edge"), _int(op, "frames")
         if edge not in ("in", "out"):
             raise Refused("edge must be in or out")
         self._edge(c, edge)
@@ -245,7 +271,7 @@ class Ops:
         """Move the cut between two clips by ``frames``: the outgoing out-point and the incoming in-point together; nothing ripples."""
         j = find_junction(self.tl, op["junction"])
         a, b = self.tl.clips[j], self.tl.clips[j + 1]
-        n = int(op["frames"])
+        n = _int(op, "frames")
         self._edge(a, "out")
         self._edge(b, "in")
         ai, ao = self._fr(a)
@@ -256,7 +282,7 @@ class Ops:
 
     def slip(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
         """Show other frames of the same shot for the same length."""
-        c, n = find_clip(self.tl, op["clip"]), int(op["frames"])
+        c, n = find_clip(self.tl, op["clip"]), _int(op, "frames")
         self._edge(c, "in")
         self._edge(c, "out")
         i, o = self._fr(c)
@@ -268,14 +294,14 @@ class Ops:
         old = find_clip(self.tl, op["clip"])
         self._edge(old, "in")
         self._edge(old, "out")
-        shot = int(op["shot"])
+        shot = _int(op, "shot")
         if shot not in self.w.bounds:
             raise Refused(f"no shot {shot}")
         oi, oo = self._fr(old)
-        length = int(op.get("frames", oo - oi))
+        length = _int(op, "frames", oo - oi)
         lo, hi = self.w.shot_frames(shot)
         if "in_frame" in op:
-            start = int(op["in_frame"])
+            start = _int(op, "in_frame")
         else:  # the middle of the shot
             if hi - lo < length:
                 raise Refused(f"shot {shot} has {hi - lo} frames, fewer than the {length} needed")
@@ -287,20 +313,18 @@ class Ops:
         return {old.id, new.id}, f"replace {old.id} (shot {old.shot_index}) with {new.id} (shot {shot} frames {start}-{start + length})"
 
     def insert(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
-        shot, i, o = int(op["shot"]), int(op["in_frame"]), int(op["out_frame"])
+        shot, i, o = _int(op, "shot"), _int(op, "in_frame"), _int(op, "out_frame")
         anchor = find_clip(self.tl, op.get("before") or op.get("after"))
         new = self._new_clip(shot, i, o, anchor.beat_id, "inserted")
         self._place(new, op)
-        self._first_is_cut()
-        return {new.id}, f"insert {new.id} (shot {shot} frames {i}-{o}) {'before' if 'before' in op else 'after'} {anchor.id}"
+        return {new.id} | self._first_is_cut(), f"insert {new.id} (shot {shot} frames {i}-{o}) {'before' if 'before' in op else 'after'} {anchor.id}"
 
     def remove(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
         c = find_clip(self.tl, op["clip"])
         if len(self.tl.clips) <= 1:
             raise Refused("cannot remove the only clip")
         self.tl.clips.remove(c)
-        self._first_is_cut()
-        return {c.id}, f"remove {c.id} (shot {c.shot_index})"
+        return {c.id} | self._first_is_cut(), f"remove {c.id} (shot {c.shot_index})"
 
     def move(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
         c = find_clip(self.tl, op["clip"])
@@ -309,13 +333,12 @@ class Ops:
             raise Refused("cannot move a clip next to itself")
         self.tl.clips.remove(c)
         self._place(c, op)
-        self._first_is_cut()
-        return {c.id}, f"move {c.id} {'before' if 'before' in op else 'after'} {target.id}"
+        return {c.id} | self._first_is_cut(), f"move {c.id} {'before' if 'before' in op else 'after'} {target.id}"
 
     def set_transition(self, op: Dict[str, Any]) -> Tuple[Set[str], str]:
         j = find_junction(self.tl, op["junction"])
         a, b = self.tl.clips[j], self.tl.clips[j + 1]
-        kind, n = op["kind"], int(op.get("frames", 0))
+        kind, n = op.get("kind"), _int(op, "frames", 0)
         if kind not in TRANSITION_KINDS:
             raise Refused(f"unknown transition {kind} ({', '.join(TRANSITION_KINDS)})")
         if kind == "cut":
@@ -324,7 +347,7 @@ class Ops:
             raise Refused(f"a {kind} needs at least 1 frame")
         if kind != "cut" and is_match_cut(a, b):
             raise Refused(f"junction {j + 1} is a match cut: match cuts stay hard cuts")
-        if a.locked_out and b.locked_in and "pinned" in a.tags and "pinned" in b.tags:
+        if j in {pin_site(self.tl, p) for p in held_pins(self.tl, self.w.pins)}:
             raise Refused(f"junction {j + 1} is held by an editor pin: its transition stays")
         frac = self.w.cfg.transitions.max_fraction_of_clip
         limit = int(min(self.w.f(a.duration), self.w.f(b.duration)) * frac)
@@ -439,9 +462,11 @@ def changes(w: Workspace, before: Timeline, after: Timeline) -> Dict[str, Any]:
         elif d_in or d_out:
             edits.append(f"{cid}: " + ", ".join(([f"in {d_in:+d}f"] if d_in else []) + ([f"out {d_out:+d}f"] if d_out else [])))
         t0, t1 = (r0.kind, r0.tr), (r.kind, r.tr)
+        label = lambda t: "cut" if not t[1] else f"{t[0]} {t[1]}f"  # noqa: E731
         if t0 != t1 and prev_a[cid] is not None:
-            label = lambda t: "cut" if not t[1] else f"{t[0]} {t[1]}f"  # noqa: E731
             edits.append(f"{prev_a[cid]}|{cid}: {label(t0)} -> {label(t1)}")
+        elif t0 != t1:
+            edits.append(f"{cid}: incoming {label(t0)} dropped (it is the first clip now)")
     common_b = [c.id for c in before.clips if c.id in a]
     common_a = [c.id for c in after.clips if c.id in b]
     if common_a != common_b:
@@ -451,14 +476,94 @@ def changes(w: Workspace, before: Timeline, after: Timeline) -> Dict[str, Any]:
             "junctions_changed": len([k for k in jb if k in ja and jb[k] != ja[k]]), "duration_frames": [record_frames(rb), record_frames(ra)]}
 
 
+def _frame_junctions(tl: Timeline, rate: Fraction) -> Dict[Tuple[str, str], Tuple[int, int, str, int]]:
+    """(outgoing id, incoming id) -> (out frame, in frame, transition kind, transition frames), by clip id."""
+    rows = layout(tl, rate)
+    return {(tl.clips[i].id, tl.clips[i + 1].id): (rows[i].out_f, rows[i + 1].in_f, rows[i + 1].kind, rows[i + 1].tr)
+            for i in range(len(tl.clips) - 1)}
+
+
+def _transition_limits(w: Workspace, tl: Timeline) -> Dict[Tuple[str, str], str]:
+    rows = layout(tl, w.rate)
+    frac = w.cfg.transitions.max_fraction_of_clip
+    out = {}
+    for i in range(1, len(rows)):
+        limit = int(min(rows[i - 1].out_f - rows[i - 1].in_f, rows[i].out_f - rows[i].in_f) * frac)
+        if rows[i].tr > limit:
+            a, b = tl.clips[i - 1].id, tl.clips[i].id
+            out[(a, b)] = f"the {rows[i].tr}-frame {rows[i].kind} at {a}|{b} is longer than {frac:.0%} of the shorter clip ({limit} frames)"
+    return out
+
+
+def untouched_identical(w: Workspace, before: Timeline, after: Timeline, touched: Set[str]) -> List[str]:
+    """Every clip no operation named, and every junction between two such clips that is still a junction, exactly as before (in frames)."""
+    out = []
+    old = {c.id: c for c in before.clips}
+    for c in after.clips:
+        if c.id in old and c.id not in touched and _fields(c) != _fields(old[c.id]):
+            out.append(f"{c.id} changed but no operation named it")
+    jb, ja = _frame_junctions(before, w.rate), _frame_junctions(after, w.rate)
+    for k, v in ja.items():
+        if k in jb and not (set(k) & touched) and jb[k] != v:
+            out.append(f"junction {k[0]}|{k[1]} moved in frames but no operation named it")
+    return out
+
+
+def rule_problems(w: Workspace, before: Timeline, after: Timeline, touched: Set[str]) -> List[str]:
+    """The proposal-wide rules (all operations together), counting only problems ``before`` did not already have."""
+    problems: List[str] = []
+    min_s = w.cfg.pacing.min_clip_seconds
+    known = set(before.validate(w.bounds, min_s))  # the minimum length is the ops' rule (see Ops._set)
+    problems += [p for p in after.validate(w.bounds, min_s) if p not in known and "below" not in p]
+    try:
+        layout(after, w.rate)
+    except InterchangeError as exc:
+        return problems + [str(exc)]
+    old_limits = _transition_limits(w, before)
+    problems += [v for k, v in _transition_limits(w, after).items() if k not in old_limits]
+    for p in held_pins(before, w.pins):
+        d = pin_outcome(after, p, HUMAN_STAGE)
+        if d is None or d.action != "pinned":
+            problems.append(f"breaks the editor pin s{p.out_shot}->s{p.in_shot}: {d.detail if d else 'pin lost'}")
+    ja = _frame_junctions(after, w.rate)
+    jb = _frame_junctions(before, w.rate)
+    for i in range(len(before.clips) - 1):
+        a, b = before.clips[i], before.clips[i + 1]
+        if is_match_cut(a, b):
+            if ja.get((a.id, b.id)) != jb[(a.id, b.id)]:
+                problems.append(f"breaks the match cut {a.id}|{b.id}: its clips must stay adjacent with the same cut points and a hard cut")
+    return problems + untouched_identical(w, before, after, touched)
+
+
+_REV_ID = re.compile(r"^r\d{3,}$")
+_PROPOSAL_ID = re.compile(r"^[0-9a-f]{12}$")
+
+
+def _check_id(value: Any, pattern: "re.Pattern[str]", what: str) -> str:
+    if not isinstance(value, str) or not pattern.match(value):
+        raise EditError(f"not a {what} id: {value!r}")
+    return value
+
+
 # ----------------------------------------------------------------------------------------------- the session
 class EditSession:
-    """``WS/edits/``: ``session.json`` (base, head), ``revisions/rNNN.json`` (immutable), ``proposals/<id>.json``, ``renders/``."""
+    """``WS/edits/``: ``session.json`` (base, head), ``revisions/rNNN.json`` (immutable), ``proposals/<id>.json``, ``renders/``.
+    Commands that write hold an exclusive lock on ``WS/edits/.lock``, so the CLI and the MCP server can run side by side."""
 
     def __init__(self, ws: Path):
         self.w = Workspace.open(ws)
         self.dir = self.w.ws / "edits"
         self.state_path = self.dir / "session.json"
+
+    @contextlib.contextmanager
+    def _locked(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with open(self.dir / ".lock", "w") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     # -- state
     def _state(self) -> Dict[str, Any]:
@@ -489,6 +594,7 @@ class EditSession:
         return st
 
     def revision(self, rev: str) -> Dict[str, Any]:
+        _check_id(rev, _REV_ID, "revision")
         try:
             return json.loads((self.dir / "revisions" / f"{rev}.json").read_text())
         except (OSError, ValueError) as exc:
@@ -503,25 +609,35 @@ class EditSession:
             raise EditError(f"revision {rev['id']} exists")  # revisions are immutable
         _atomic_write(path, json.dumps(rev, indent=2) + "\n")
 
+    def _revisions(self) -> List[Dict[str, Any]]:
+        files = sorted((self.dir / "revisions").glob("r*.json"), key=lambda p: int(p.stem[1:]))
+        return [json.loads(p.read_text()) for p in files]
+
     # -- commands
     def start(self, stage: str = "final") -> Dict[str, Any]:
-        path = self._stage_path(stage)
-        sha = _sha256(path)
-        if self.state_path.exists():
-            st = self._state()
-            if st["base_stage"] == stage and st["base_sha256"] == sha:
-                return {"resumed": True, "head": st["head"], "base_stage": stage}
-            stale_dir = self.dir.with_name(f"edits.stale-{st['base_sha256'][:12]}")
-            if stale_dir.exists():
-                raise EditError(f"{stale_dir.name} exists: move it away first")
-            shutil.move(str(self.dir), str(stale_dir))  # kept, never deleted
-        canonical = Timeline.load(path)
-        snapped, notes = export_timeline(canonical, self.w.bounds, self.w.rate)  # the stage as M2a exports it: on the frame grid, keys stamped
-        snapped.stage, snapped.name = "edit", "edit r000"
-        self._write_revision({"schema": SCHEMA, "id": "r000", "parent": None, "proposal": None, "ops": [], "results": [],
-                              "timeline_sha256": _tl_sha(snapped), "timeline": snapped.to_dict()})
-        self._save_state({"schema": SCHEMA, "base_stage": stage, "base_sha256": sha, "head": "r000", "next": 1})
-        return {"resumed": False, "head": "r000", "base_stage": stage, "snap_notes": notes}
+        with self._locked():
+            path = self._stage_path(stage)
+            sha = _sha256(path)
+            if self.state_path.exists():
+                st = self._state()
+                if st["base_stage"] == stage and st["base_sha256"] == sha:
+                    return {"resumed": True, "head": st["head"], "base_stage": stage}
+                stale_dir = self.dir.with_name(f"edits.stale-{st['base_sha256'][:12]}")
+                if stale_dir.exists():
+                    raise EditError(f"{stale_dir.name} exists: move it away first")
+                shutil.move(str(self.dir), str(stale_dir))  # kept, never deleted
+                self.dir.mkdir(parents=True)
+            canonical = Timeline.load(path)
+            snapped, notes = export_timeline(canonical, self.w.bounds, self.w.rate)  # on the frame grid as M2a exports it, keys stamped
+            for c, r in zip(snapped.clips, layout(snapped, self.w.rate)):
+                # transitions on whole frames too, as layout lays them: otherwise layout's error diffusion lets one transition's change
+                # move another junction by a frame, and the renderer would use the unrounded length
+                c.transition_in = Transition(r.kind, self.w.s(r.tr)) if r.tr else Transition()
+            snapped.stage, snapped.name = "edit", "edit r000"
+            self._write_revision({"schema": SCHEMA, "id": "r000", "parent": None, "proposal": None, "ops": [], "results": [],
+                                  "timeline_sha256": _tl_sha(snapped), "timeline": snapped.to_dict()})
+            self._save_state({"schema": SCHEMA, "base_stage": stage, "base_sha256": sha, "head": "r000", "next": 1})
+            return {"resumed": False, "head": "r000", "base_stage": stage, "snap_notes": notes}
 
     def inspect(self, rev: Optional[str] = None) -> Dict[str, Any]:
         st = self._state()
@@ -530,9 +646,10 @@ class EditSession:
         out.update({"revision": rev, "head": st["head"], "base_stage": st["base_stage"], "stale": self.stale()})
         return out
 
-    def propose(self, ops: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
-        st = self._check_fresh()
-        head = st["head"]
+    def _evaluate(self, head: str, ops: Any) -> Tuple[Dict[str, Any], Timeline]:
+        """Run ``ops`` on a copy of ``head`` and check every rule; nothing is written."""
+        if not isinstance(ops, list) or not ops or not all(isinstance(op, dict) for op in ops):
+            raise EditError("ops must be a non-empty list of operation objects")
         before = self.timeline(head)
         tl = before.copy()
         engine = Ops(self.w, tl)
@@ -554,138 +671,161 @@ class EditSession:
                 tl.clips = snapshot.clips  # the op left nothing behind
                 results.append({"op": op, "ok": False, "reason": str(exc)})
                 ok = False
-            except (KeyError, ValueError, TypeError) as exc:
+            except (KeyError, ValueError, TypeError, AttributeError) as exc:
                 tl.clips = snapshot.clips
                 results.append({"op": op, "ok": False, "reason": f"malformed op: {exc!r}"})
                 ok = False
-        problems: List[str] = []
-        if ok:
-            min_s = self.w.cfg.pacing.min_clip_seconds
-            known = set(before.validate(self.w.bounds, min_s))  # only new problems count (see Ops._set)
-            problems += [p for p in tl.validate(self.w.bounds, min_s) if p not in known and "below" not in p]
-            try:
-                layout(tl, self.w.rate)
-            except InterchangeError as exc:
-                problems.append(str(exc))
-            for p in held_pins(before, self.w.pins):
-                d = pin_outcome(tl, p, HUMAN_STAGE)
-                if d is None or d.action != "pinned":
-                    problems.append(f"breaks the editor pin s{p.out_shot}->s{p.in_shot}: {d.detail if d else 'pin lost'}")
-            old = {c.id: c for c in before.clips}
-            for c in tl.clips:
-                if c.id in old and c.id not in touched and _fields(c) != _fields(old[c.id]):
-                    problems.append(f"{c.id} changed but no operation named it")
-            ok = not problems
+        problems = rule_problems(self.w, before, tl, touched) if ok else []
+        ok = ok and not problems
         for r in results:
             if r["ok"]:
                 tl.history.append(Decision("agent", r["op"]["op"], [], r["detail"], data=dict(r["op"])))
         proposal_id = _sha256_bytes(f"{head}:{_tl_sha(before)}:{_canon(list(ops))}".encode())[:12]
         out = {"proposal": proposal_id, "base": head, "ok": ok, "results": results, "problems": problems,
-               "untouched_identical": not any("no operation named it" in p for p in problems),
+               "untouched_identical": not untouched_identical(self.w, before, tl, touched),
                "changes": changes(self.w, before, tl) if ok else None}
-        _atomic_write(self.dir / "proposals" / f"{proposal_id}.json",
-                      json.dumps(dict(out, ops=list(ops), timeline=tl.to_dict() if ok else None), indent=2) + "\n")
-        return out
+        return out, tl
 
-    def apply(self, proposal_id: str) -> Dict[str, Any]:
-        st = self._check_fresh()
+    def propose(self, ops: Any) -> Dict[str, Any]:
+        with self._locked():
+            st = self._check_fresh()
+            out, tl = self._evaluate(st["head"], ops)
+            _atomic_write(self.dir / "proposals" / f"{out['proposal']}.json",
+                          json.dumps(dict(out, ops=list(ops), timeline=tl.to_dict() if out["ok"] else None), indent=2) + "\n")
+            return out
+
+    def _proposal(self, proposal_id: str) -> Dict[str, Any]:
+        _check_id(proposal_id, _PROPOSAL_ID, "proposal")
         try:
-            prop = json.loads((self.dir / "proposals" / f"{proposal_id}.json").read_text())
+            return json.loads((self.dir / "proposals" / f"{proposal_id}.json").read_text())
         except (OSError, ValueError) as exc:
             raise EditError(f"no proposal {proposal_id}") from exc
-        if not prop["ok"]:
-            raise EditError(f"proposal {proposal_id} was refused: " + "; ".join([r["reason"] for r in prop["results"] if not r["ok"]] + prop["problems"]))
-        if prop["base"] != st["head"]:
-            raise EditError(f"proposal {proposal_id} was made at {prop['base']}, but the head is now {st['head']}: propose again")
-        rid = f"r{st['next']:03d}"
-        tl = Timeline.from_dict(prop["timeline"])
-        tl.name = f"edit {rid}"
-        self._write_revision({"schema": SCHEMA, "id": rid, "parent": st["head"], "proposal": proposal_id, "ops": prop["ops"],
-                              "results": prop["results"], "changes": prop["changes"], "timeline_sha256": _tl_sha(tl), "timeline": tl.to_dict()})
-        st.update(head=rid, next=st["next"] + 1)
-        self._save_state(st)
-        return {"head": rid, "parent": prop["base"], "changes": prop["changes"]}
+
+    def apply(self, proposal_id: str) -> Dict[str, Any]:
+        with self._locked():
+            st = self._check_fresh()
+            prop = self._proposal(proposal_id)
+            if prop["base"] != st["head"]:
+                raise EditError(f"proposal {proposal_id} was made at {prop['base']}, but the head is now {st['head']}: propose again")
+            out, tl = self._evaluate(st["head"], prop["ops"])  # never trust the file: the operations are run and checked again
+            if not out["ok"]:
+                raise EditError(f"proposal {proposal_id} was refused: " + "; ".join([r["reason"] for r in out["results"] if not r["ok"]] + out["problems"]))
+            if out["proposal"] != proposal_id or prop.get("timeline") != tl.to_dict():
+                raise EditError(f"proposal {proposal_id} does not match its operations: propose again")
+            rid = f"r{st['next']:03d}"
+            tl.name = f"edit {rid}"
+            self._write_revision({"schema": SCHEMA, "id": rid, "parent": st["head"], "proposal": proposal_id, "ops": prop["ops"],
+                                  "results": out["results"], "changes": out["changes"], "timeline_sha256": _tl_sha(tl), "timeline": tl.to_dict()})
+            st.update(head=rid, next=st["next"] + 1)
+            self._save_state(st)
+            return {"head": rid, "parent": prop["base"], "changes": out["changes"]}
 
     def _children(self, rev: str) -> List[str]:
-        out = []
-        for p in sorted((self.dir / "revisions").glob("r*.json")):
-            if json.loads(p.read_text()).get("parent") == rev:
-                out.append(p.stem)
-        return out
+        return [r["id"] for r in self._revisions() if r.get("parent") == rev]
 
     def undo(self) -> Dict[str, Any]:
-        st = self._check_fresh()
-        parent = self.revision(st["head"])["parent"]
-        if parent is None:
-            raise EditError("nothing to undo: the head is the session's first revision")
-        st["head"] = parent
-        self._save_state(st)
-        return {"head": parent}
+        with self._locked():
+            st = self._check_fresh()
+            parent = self.revision(st["head"])["parent"]
+            if parent is None:
+                raise EditError("nothing to undo: the head is the session's first revision")
+            st["head"] = parent
+            self._save_state(st)
+            return {"head": parent}
 
     def redo(self) -> Dict[str, Any]:
-        st = self._check_fresh()
-        kids = self._children(st["head"])
-        if not kids:
-            raise EditError("nothing to redo")
-        st["head"] = kids[-1]  # the latest branch
-        self._save_state(st)
-        return {"head": kids[-1], "branches": kids}
+        with self._locked():
+            st = self._check_fresh()
+            kids = self._children(st["head"])
+            if not kids:
+                raise EditError("nothing to redo")
+            st["head"] = kids[-1]  # the latest branch
+            self._save_state(st)
+            return {"head": kids[-1], "branches": kids}
 
     def checkout(self, rev: str) -> Dict[str, Any]:
         """Move the head to any revision of the session (e.g. back to another branch)."""
-        st = self._check_fresh()
-        self.revision(rev)
-        st["head"] = rev
-        self._save_state(st)
-        return {"head": rev}
+        with self._locked():
+            st = self._check_fresh()
+            self.revision(rev)
+            st["head"] = rev
+            self._save_state(st)
+            return {"head": rev}
 
     def log(self) -> Dict[str, Any]:
         st = self._state()
-        revs = []
-        for p in sorted((self.dir / "revisions").glob("r*.json")):
-            r = json.loads(p.read_text())
-            revs.append({"id": r["id"], "parent": r["parent"], "ops": [x.get("detail") for x in r["results"]], "timeline_sha256": r["timeline_sha256"]})
+        revs = [{"id": r["id"], "parent": r["parent"], "ops": [x.get("detail") for x in r["results"]], "timeline_sha256": r["timeline_sha256"]}
+                for r in self._revisions()]
         return {"head": st["head"], "base_stage": st["base_stage"], "stale": self.stale(), "revisions": revs}
 
     def compare(self, a: str, b: str) -> Dict[str, Any]:
         return dict(changes(self.w, self.timeline(a), self.timeline(b)), a=a, b=b)
 
-    def render(self, rev: Optional[str] = None, junction: Any = None, proxy: bool = True) -> Dict[str, Any]:
-        rev = rev or self._state()["head"]
-        tl = self.timeline(rev)
+    def render(self, rev: Optional[str] = None, junction: Any = None, proxy: bool = True, proposal: Optional[str] = None) -> Dict[str, Any]:
+        """Render a revision, or an accepted proposal before it is applied: the whole cut, or one junction's review window.
+        Files are named by what was rendered (the timeline and the render, music and review settings), so a cached file is never stale."""
+        if proposal is not None:
+            prop = self._proposal(proposal)
+            if not prop["ok"]:
+                raise EditError(f"proposal {proposal} was refused: nothing to render")
+            tl, label = Timeline.from_dict(prop["timeline"]), f"p{proposal}"
+        else:
+            rev = rev or self._state()["head"]
+            tl, label = self.timeline(rev), rev
         cfg = self.w.cfg
+        key = _sha256_bytes(_canon([tl.to_dict(), cfg.render.__dict__, cfg.music.__dict__, cfg.review.__dict__, proxy, str(junction)]).encode())[:10]
         music_duration = self.w.music.duration if self.w.music is not None else None
         out_dir = self.dir / "renders"
         if junction is None:
-            out = out_dir / f"{rev}{'-proxy' if proxy else ''}.mp4"
+            out = out_dir / f"{label}-{key}.mp4"
             if not out.exists():
                 rcfg = RenderConfig(**{**cfg.render.__dict__, "enabled": True, "proxy": proxy})
-                ffmpeg_render(tl, self.w.media, rcfg, out, music=cfg.music if cfg.music.path else None, music_duration=music_duration)
+                tmp = out.with_name(out.stem + ".part.mp4")
+                ffmpeg_render(tl, self.w.media, rcfg, tmp, music=cfg.music if cfg.music.path else None, music_duration=music_duration)
+                os.replace(tmp, out)  # a failed render never leaves a file that looks finished
             return {"path": str(out), "frames": record_frames(layout(tl, self.w.rate))}
         from matchcut.review.render import render_window  # lazy: the review package is optional here
         from matchcut.review.window import review_window
-        j = find_junction(tl, junction)
+        j = find_junction(tl, junction) if not isinstance(junction, bool) else None
+        if j is None:
+            raise EditError(f"no junction {junction!r}")
         win = review_window(tl, j, cfg.review.pre_seconds, cfg.review.post_seconds)
-        out = out_dir / f"{rev}-j{j + 1}.mp4"
+        out = out_dir / f"{label}-j{j + 1}-{key}.mp4"
         if not out.exists():
-            render_window(tl, win, self.w.media, cfg, out, label="", bounds=self.w.bounds)
+            render_window(tl, win, self.w.media, cfg, out, label="", bounds=self.w.bounds)  # writes a temp file, then renames
         return {"path": str(out), "window_s": [win.start, win.end], "cut_s": win.cut}
 
-    def publish(self) -> Dict[str, Any]:
-        """Write the head as the workspace's human stage, through M2a's builder, so the TUI, ``junctions`` and ``export`` see it."""
-        st = self._check_fresh()
-        stage_path = self._stage_path(st["base_stage"])
-        canonical = Timeline.load(stage_path)
-        snapped = self.timeline("r000")
-        head = self.timeline(st["head"])
-        human = human_stage(canonical, head, self.w.rate, snapped=snapped, bounds=self.w.bounds)
-        latest_name, latest_path = [(s, p) for s, p in stage_timeline_paths(self.w.ws) if s != HUMAN_STAGE and p.exists()][-1]
-        decisions = [d for d in human.history if d.pass_name == "human"]
-        record = {"schema": IMPORT_SCHEMA, "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                  "source_file": str((self.dir / "revisions" / f"{st['head']}.json").resolve()), "format": "matchcut-edit",
-                  "stage": st["base_stage"], "stage_file": stage_path.name, "stage_sha256": st["base_sha256"],
-                  "latest_stage": latest_name, "latest_stage_file": latest_path.name, "latest_stage_sha256": _sha256(latest_path),
-                  "decisions": len(decisions), "notes": [f"published from the edit session at revision {st['head']}"]}
-        _atomic_write(self.w.ws / "human.json", json.dumps(human.to_dict(), indent=2))
-        _atomic_write(self.w.ws / "human_import.json", json.dumps(record, indent=2) + "\n")
-        return {"human": str(self.w.ws / "human.json"), "revision": st["head"], "decisions": [d.detail for d in decisions]}
+    def publish(self, replace_import: bool = False) -> Dict[str, Any]:
+        """Write the head as the workspace's human stage, through M2a's builder, so the TUI and ``junctions`` see it.
+
+        An existing human stage that came from an editor's file (``matchcut import``) is never replaced silently: the call is refused unless
+        ``replace_import``, and then the two files are moved into ``edits/replaced-imports/`` first."""
+        with self._locked():
+            st = self._check_fresh()
+            ws = self.w.ws
+            try:
+                existing = json.loads((ws / "human_import.json").read_text())
+            except (OSError, ValueError):
+                existing = None
+            if existing is not None and existing.get("format") != "matchcut-edit":
+                if not replace_import:
+                    raise EditError(f"human.json holds an editor's import ({existing.get('format')} from {existing.get('source_file')}): "
+                                    "publish with replace_import to move it aside")
+                keep = self.dir / "replaced-imports" / _sha256_bytes(_canon(existing).encode())[:12]
+                keep.mkdir(parents=True, exist_ok=True)
+                for name in ("human.json", "human_import.json"):
+                    if (ws / name).exists():
+                        shutil.move(str(ws / name), str(keep / name))
+            stage_path = self._stage_path(st["base_stage"])
+            canonical = Timeline.load(stage_path)
+            latest_name, latest_path = [(s, p) for s, p in stage_timeline_paths(ws) if s != HUMAN_STAGE and p.exists()][-1]
+            # as import_timeline: compared with the base stage (as r000 laid it out), history continued from the LATEST canonical stage
+            human, diff = m2a_build(canonical, self.timeline("r000"), self.timeline(st["head"]), self.w.rate, Timeline.load(latest_path), self.w.bounds)
+            record = {"schema": IMPORT_SCHEMA, "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                      "source_file": str((self.dir / "revisions" / f"{st['head']}.json").resolve()), "format": "matchcut-edit",
+                      "stage": st["base_stage"], "stage_file": stage_path.name, "stage_sha256": st["base_sha256"],
+                      "latest_stage": latest_name, "latest_stage_file": latest_path.name, "latest_stage_sha256": _sha256(latest_path),
+                      "decisions": len(diff.decisions), "notes": [f"published from the edit session at revision {st['head']}"] + list(diff.notes)}
+            _atomic_write(ws / "human.json", json.dumps(human.to_dict(), indent=2))
+            _atomic_write(ws / "human_import.json", json.dumps(record, indent=2) + "\n")
+            return {"human": str(ws / "human.json"), "revision": st["head"], "decisions": [d.detail for d in diff.decisions]}

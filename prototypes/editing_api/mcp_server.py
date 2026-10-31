@@ -34,9 +34,13 @@ def handle(session: EditSession, msg: dict):
         if name not in TOOLS:
             return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": f"unknown tool {name}"}}
         try:
+            if not isinstance(args, dict):
+                raise EditError("arguments must be an object")
             out, is_error = TOOLS[name][2](session, args), False
         except EditError as exc:
             out, is_error = {"error": str(exc)}, True
+        except Exception as exc:  # a bad request must never take the server down
+            out, is_error = {"error": f"{type(exc).__name__}: {exc}"}, True
         result = {"content": [{"type": "text", "text": json.dumps(out)}], "isError": is_error}
     else:
         return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": f"unknown method {method}"}}
@@ -48,7 +52,13 @@ def main() -> int:
     for line in sys.stdin:
         if not line.strip():
             continue
-        reply = handle(session, json.loads(line))
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
+            sys.stdout.flush()
+            continue
+        reply = handle(session, msg) if isinstance(msg, dict) else {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
         if reply is not None:
             sys.stdout.write(json.dumps(reply) + "\n")
             sys.stdout.flush()

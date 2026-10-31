@@ -1,6 +1,7 @@
 # Agent-native iterative editing on matchcut's own timeline: feasibility
 
-**Status: experiment, run once (2026-10-31) in a headless Linux container.**
+**Status: experiment (2026-10-31) in a headless Linux container.** The proof was run several times, including twice from scratch after an
+independent review.
 
 The question: can an agent inspect a matchcut cut and change it iteratively through small, structured, deterministic operations, using
 matchcut's canonical timeline and its FFmpeg renderer, without a new GUI, a new NLE or a second editing engine? And can those operations be
@@ -11,30 +12,32 @@ The answer comes from a working prototype and a proof: [prototypes/editing_api/]
 - Nothing under `matchcut/` changed.
 - **Human gates M1, M2b, M2a and M2c: PENDING** (unchanged).
 - **Labels used below:**
-  - **Observed** means the proof ran it here; the step is named.
+  - **Observed** means the proof, or a direct test, ran it here.
   - **Inferred** means read from the code, not run.
 
 ## Verdict
 
-**Feasible, and a better fit than any external editor.** About 690 lines of prototype on top of matchcut's existing modules gave an agent the whole loop:
+**Feasible.** About 830 lines of prototype on top of matchcut's existing modules gave an agent the whole loop:
 
 - inspect the cut and the unused footage;
-- propose operations;
-- see the exact changes, or the exact reason for a refusal;
+- propose operations and see the exact changes, or the exact reason for a refusal;
+- render a proposal before applying it;
 - apply, undo, branch and compare revisions;
 - render the whole cut or one junction;
 - hand the result back to the rest of matchcut as the human stage.
 
 Every step ran on matchcut's own `Timeline`, pins, frame arithmetic, renderer and M2a builder. Nothing was translated.
 
-- **What the proof showed (observed, 69 checks):**
-  - 67 Passed;
+- **What the proof showed (observed, 91 checks):**
+  - 88 Passed;
   - 1 confirmed gap (an edited cut cannot be exported to an NLE yet);
-  - 1 failure caused by a **defect in matchcut's existing renderer**, reproduced without the prototype (below).
+  - 2 failures caused by a **defect in matchcut's existing renderer**, reproduced without the prototype (Finding 1).
 - **Speed:**
-  - proposals and applies take about 2 ms;
+  - a proposal or an apply takes about 4 ms (an apply runs the operations again);
   - a render of the 7-second demo cut takes about 0.8 s.
-- **Determinism:** the same edits on a fresh copy produced byte-identical revisions.
+- **Determinism:** the same edits give the same revisions.
+  - Within a run, on a fresh copy of the workspace, they are byte-identical.
+  - Across two independent runs, they are identical apart from the work-directory path and the hashes that include it.
 
 **Recommendation:**
 - Fix the renderer defect first, as its own small change.
@@ -47,13 +50,13 @@ The prototype adds sessions, revisions, addressing and rule checking. Everything
 
 | Need | Existing code the prototype used |
 |---|---|
-| The cut, in seconds and in frames | `pipeline/timeline.py` (`Timeline`, `Clip`, `clip_origin`); `interchange/common.py` (`layout`, `to_frames`, `export_timeline`, `junction_ids`) |
-| Locks | Editor pins: `pipeline/editorial.py` (`pin_outcome`, `pin_site`). Match-cut locks and tags: `passes.is_match_cut` |
+| The cut, in seconds and in frames | `pipeline/timeline.py` (`Timeline`, `Clip`, `clip_origin`); `interchange/common.py` (`layout`, `to_frames`, `export_timeline`, `junction_ids`); M2a's exact source rate |
+| Locks | Editor pins: `pipeline/editorial.py` (`pin_outcome`, `pin_site`). Match cuts: `passes.is_match_cut` |
 | Shot bounds, minimum length, transition limits | `shots.json`; `PipelineConfig.pacing` and `.transitions` |
 | Music beats | `pipeline/audio.py` (`MusicAnalysis.nearest_beat`). The semantics come from `BeatSyncPass` |
 | Story beats, shot descriptions | `narrative.json`, `descriptions.json` |
 | Render the cut, render one junction | `pipeline/render.render`; `review/render.render_window` with `review_window` (M2b) |
-| Hand the edit back to matchcut | `interchange/workspace.human_stage` (M2a's builder), `IMPORT_SCHEMA`, `junctions.stale_human` |
+| Hand the edit back to matchcut | M2a's builder (`interchange/workspace._build`, as `import_timeline` uses it), `IMPORT_SCHEMA`, `junctions.stale_human` |
 
 matchcut already has an edit vocabulary, in the polish pass (`PolishPass._apply_edit`): trim and extend head/tail, drop, move, and set a transition, with lock checks. It is not usable by an agent as it stands:
 
@@ -63,87 +66,122 @@ matchcut already has an edit vocabulary, in the polish pass (`PolishPass._apply_
 
 The prototype's operations are frame-native versions of the same ideas. They add `roll`, `slip`, `replace`, `insert` and `snap_to_beat`.
 
+The prototype checks its rules on the whole proposal, whichever operations caused a change: shot bounds, minimum length, transition limits, editor pins, match cuts and untouched clips.
+
 ## The proof
 
 **Fixtures:**
 - synthetic demo footage (8 shots, 25 fps) and a click track;
 - the pipeline run with the mock backend;
 - junction 1 pinned the way the TUI's Edit view does it;
-- the passes re-run, so the canonical `final` carries a real editor lock.
+- the passes re-run, so the canonical `final` carries a real editor lock;
+- a second copy, without the pin, in which c004|c005 is marked as a match cut the way the match-cut pass marks one.
 
-**Run it:** `python prototypes/editing_api/proof.py` (about 11 s; no model, network or GPU).
+**Run it:** `python prototypes/editing_api/proof.py` (about 16 s; no model, network or GPU).
 
 **Recorded run:** [recorded-run/proof.md](../prototypes/editing_api/recorded-run/proof.md).
 
 | Area | What was observed |
 |---|---|
 | Inspect (step 2) | **Clips:** source and record frames, transitions and locks. **Junctions:** id, record frame, music-beat offset in frames, whether pinned, beat change. **Shots:** every shot with its description, and which clips use it (unused: 2, 4, 5). **Story beats:** target against actual length. |
-| Refusals (2b) | 11 refusals, each with its reason and no revision made. **Locks and pins:** trimming, rolling, beat-snapping or changing the transition of the pinned junction; removing or moving a pinned clip (the pin would break). **Limits:** a roll past the end of the shot; a trim below the minimum length; a dissolve longer than 40% of the shorter clip (step 5). **Requests:** a batch with one bad operation (refused whole), an unknown clip, an unknown op, and applying a refused proposal. |
-| Trim and roll (3) | `roll junction 3 +3f` changed exactly c003's out-point and c004's in-point, with the running time unchanged. Every other clip came out identical (checked field by field). |
-| Replace (4) | `replace c004 with shot 4` made `e001`, the same length and from the middle of the shot, and kept c004's incoming dissolve. |
+| Refusals (2b–2d) | Each comes with its reason, and no revision is made. **Pins:** trimming, rolling, beat-snapping or changing the transition of the pinned junction; removing or moving a pinned clip. **Match cuts:** an insert inside one, removing or moving half of one, a dissolve on one, trimming its edge. **Limits:** a roll past the end of the shot; a trim below the minimum length. **Transition length:** a dissolve longer than 40% of the shorter clip, whether it comes from `set_transition`, a trim, a roll or a move. **Requests:** a batch with one bad operation (refused whole); an unknown clip or op; a fractional frame count; ops that are not a list; revision and proposal ids that are paths; a hand-edited proposal file (apply runs the operations again). |
+| Frames (1, 2b) | **Whole frames:** r000 has every source point and every transition length on whole frames. **No side effects:** changing one transition moved no other junction. |
+| Trim and roll (3) | `roll junction 3 +1f` changed exactly c003's out-point and c004's in-point, with the running time unchanged. Every other clip and junction came out identical, in frames. A 3-frame roll was refused, because it would leave c004 too short for its 19-frame dissolve. |
+| Replace (4) | `replace c004 with shot 4` made `e001`, the same length and from the middle of the shot, and kept c004's incoming dissolve. **The proposal was rendered as a preview before it was applied**, and the head stayed where it was. |
 | Transitions (5) | A 6-frame dissolve at junction 4 started c005 **6 frames earlier on the record**, so the cut is 6 frames shorter. In matchcut's model a transition overlaps its two clips. |
-| Music beats (6) | **Snap:** after the roll, junction 3 was 3 frames late, and `snap_to_beat` rolled it back onto the beat. No other junction moved, because a roll ripples nothing. **Off the beat:** the new dissolve had pulled junction 4 off its beat (step 5). **Unreachable:** junction 2 cannot reach its beat, since its outgoing clip already ends at the end of its shot (refused). |
+| Music beats (6) | **Snap:** `snap_to_beat` rolled junction 3 onto its beat. No other junction moved, because a roll ripples nothing. **No-op:** snapping a junction already on its beat changed nothing. **Off the beat:** the new dissolve had pulled junction 4 off its beat. |
 | Batch (7) | An insert (shot 5) and a dip to black, in one proposal. |
-| Undo, redo, branches (8) | **Head:** undo and redo; `checkout`. **Branches:** an edit after an undo made a branch, r006 from r004, and r005 was kept. That edit was a move, a remove and a slip in one proposal, each reported. **Concurrency:** a proposal made before the head moved was refused ("propose again"). |
-| Compare (9) | r000 → r004 reports only the replace and the new dissolve: the roll and its beat snap cancel out. |
-| Render (10) | **Frames:** the full render has exactly the cut's frame count (181). **Frame accuracy:** each moving clip shows its exact source frames, checked on three frames per clip against offsets −2..+2 at full size. Three clips were decisive; the other three were static test shots. **Junction preview:** a junction's review window renders (M2b's code). **Audio:** the r005 render lost its audio (see Findings 1). r004 has audio as long as its video. |
-| Publish (11) | **Human stage:** the head became the workspace's human stage (not stale), and the editor pin is still applied there. `matchcut.pipeline junctions` lists it. **Export:** `matchcut export --stage human` refuses it (Findings 4). |
-| MCP and CLI (12) | **MCP:** `initialize` and `tools/list` (11 tools). `edit_inspect` over MCP returned exactly what the Python call returns. A refusal carries its reason, and an error is a tool result with `isError`. **CLI:** the JSON CLI served the same tools. |
+| First clip (2d) | Removing the first two clips is accepted, and the change report says the new first clip lost its dissolve. |
+| Undo, redo, branches (8) | **Head:** undo and redo; `checkout`. **Branches:** an edit after an undo made a branch, r006 from r004, and r005 was kept. That edit was a cut, a move, a remove and a slip in one proposal, each reported. **Concurrency:** a proposal made before the head moved was refused ("propose again"). |
+| Compare (9) | r000 → r004 shows the net effect: the replace, the new dissolve, and the roll and beat snap combined into one edge move. |
+| Render (10) | **Frames:** the full render has exactly the cut's frame count (181). **Frame accuracy:** each moving clip shows its exact source frames, checked on three frames per clip against offsets −2..+2 at full size. Three clips were decisive; the other three were static test shots. **Junction preview:** a junction's review window renders. **Audio:** two renders lost audio (Finding 1): r005 (5.6 s of audio under 7.24 s of video) and the review window of its out-of-order junction 5 (1.27 s under 3.0 s). r004 has audio as long as its video. |
+| Publish (11) | **Guard:** publishing over an editor's import (made with `matchcut export` and `import`) is refused. With `replace_import`, the import is moved aside, not lost. **Human stage:** the head became the workspace's human stage (not stale), and the editor pin is still applied there. `matchcut.pipeline junctions` lists it. **Export:** `matchcut export --stage human` refuses it (Finding 4). |
+| MCP and CLI (12) | **MCP:** `initialize` and `tools/list` (11 tools). `edit_inspect` over MCP returned exactly what the Python call returns. A refusal carries its reason. Errors, and a malformed request, come back as `isError` results, and the server keeps answering. **CLI:** the JSON CLI served the same tools. |
 | Stale (13) | **Proposals:** re-running the passes (without the pin) changed `final.json`. The session saw it and refused to propose, and the published human stage turned stale by the engine's own rule. **New session:** it moved the old one aside, kept, and started again at r000. |
 | Determinism (14) | The same edit script on a fresh copy of the workspace produced the same revision hashes, and every check passed again. |
+
+### Independent review
+
+An independent reviewer read the prototype and the report and re-ran the proof. Their verdict was **"sound with fixes"**. Every finding below has been fixed, and each fix has its own check in the proof.
+
+- **Critical:** `insert`, `remove` and `move` could break a match cut.
+- **Important:**
+  - the transition limit was checked only by `set_transition`;
+  - removing or moving the first clip was wrongly refused;
+  - layout's rounding let one transition move another junction by a frame;
+  - the MCP server died on a malformed request;
+  - ids could be paths;
+  - `publish` silently replaced an editor's import;
+  - `apply` trusted the proposal file on disk.
+- **Wording:** Finding 1 was understated, and the verdict wrongly called this "a better fit than any external editor"; that was an opinion the proof did not show.
+
+The reviewer confirmed the renderer defect independently. They also found that it is broader than first reported: it hits hard cuts with music, and M2b review windows.
 
 ### Performance and limits (observed in this container; 4 CPUs, ffmpeg 6.1.1)
 
 - **Session commands:**
-  - `start` takes 1.5 ms, `inspect` 0.8 ms, a `propose` 1.7 ms and an `apply` 0.9 ms;
+  - `start` takes 1.8 ms, `inspect` 0.7 ms, a `propose` 4 ms and an `apply` 4 ms;
   - each revision is a small JSON file (6 to 9 KB here, mostly the pipeline's decision history). A full timeline per revision is cheap at matchcut's scale (tens to hundreds of clips).
 - **Renders:**
-  - the full 7.2 s cut at source size (320×180) takes 0.83 s;
-  - one junction window takes 0.89 s;
-  - a cached render takes 0.5 ms.
+  - the full 7.2 s cut at source size (320×180) takes 0.78 s;
+  - one junction window takes 0.88 s;
+  - a cached render takes under 1 ms.
   - Render time grows with the cut's length and resolution. Real footage was not measured.
-- **MCP:** 5 requests, including starting the server, took 0.22 s.
+- **MCP:** 7 requests, including starting the server, took 0.28 s.
 - **Not measured:**
   - real camera footage;
   - long cuts;
   - variable frame rate;
-  - more than one source file (matchcut cuts one source).
+  - more than one source file (matchcut cuts one source);
+  - concurrent writers beyond the file lock's design.
 
 ## Findings
 
-1. **Defect in matchcut's existing renderer (observed in step 10, then reproduced with `matchcut.pipeline.render.render` alone).**
-   - **What happens:** when a dissolve or a dip to black joins two clips whose source ranges are out of order (the incoming clip comes from earlier in the file than the outgoing one), the rendered file has **no audio stream**. In a longer chain, the audio stops early: 5.5 s of audio under 7.24 s of video in r005.
-   - **Cause:** ffmpeg's `acrossfade` between two `atrim` branches of the same input outputs nothing when the second range is earlier in the file. A hard cut (`concat`) and the video `xfade` are not affected.
-   - **The fix:** opening the source once per clip (one `-i` per segment) fixed it in a direct test. An explicit `asplit` did not.
-   - **Who is affected:** the mock backend keeps shots in source order, so the existing tests never reach this. Real model cuts do reorder shots, and so does any agent edit. **Fix this before anything else**, with a regression test.
+1. **Defect in matchcut's existing renderer (observed, and reproduced with `matchcut.pipeline.render.render` alone).**
+   - **What happens:** when two consecutive clips are out of source order (the second comes from earlier in the file than the first), the audio is lost or cut short:
+     - with a dissolve or a dip to black, the file has **no audio stream at all**, with or without music;
+     - with music configured, even a hard cut loses most of its audio (1.57 s of audio under 3.0 s of video in a two-clip test);
+     - in a longer cut the audio stops early (r005: 5.6 s under 7.24 s).
+   - **M2b review windows** go through the same renderer, so the window of such a junction is affected too (1.27 s under 3.0 s).
+   - **Cause:** every clip takes its audio from a branch of the same input. When a later filter (`acrossfade`, or the music mix) waits on a branch whose range is earlier in the file, ffmpeg delivers nothing, or too little. Hard cuts without music, and video, are not affected.
+   - **The fix direction (direct test):** opening the source once per clip fixed it; an explicit `asplit` did not. In the renderer this should be an input-side `-ss`/`-t` per clip, so that a long cut does not decode the file from the start once per clip.
+   - **Who is affected:** the mock backend keeps shots in source order, so the existing tests never reach this. Real model cuts do reorder shots, and so does any agent edit.
+   - **What to do:** fix this before anything else. The regression test should cover cuts, dissolves and dips, with and without music and ducking, and a junction window.
 2. **Transitions ripple (observed in steps 5 and 6).**
    - **What happens:** in matchcut's model a dissolve overlaps its two clips. Adding one makes every later cut start earlier by its length, which can take them off the music's beats. Changing a transition is therefore not local to its junction.
    - **What the API does:** it says so. The proposal reports the running time before and after, and `inspect` reports each junction's beat offset.
    - **Not decided:** whether a transition change should be absorbed automatically (for example by rolling the next junction). That is an open design question.
-3. **Identity is exact inside matchcut.**
+3. **Canonical transition lengths are not on whole frames (observed).**
+   - **What happens:** the pipeline snaps source points to frames, but not transition lengths. The final cut here has a 0.336 s dissolve, which is 8.4 frames.
+   - **The disagreement:** M2a's `layout` rounds transition lengths with error diffusion, while the renderer uses the raw seconds. The exported timeline and the rendered video can therefore differ by a fraction of a frame at each transition. Inside an edit session, one transition's change could also move another junction by a frame.
+   - **What the prototype does:** it puts r000's transitions on whole frames.
+   - **What the core should do:** `snap_to_frames` should snap transitions too.
+4. **Identity is exact inside matchcut.**
    - **No matching needed:** within a session, clip ids never change, so the change report is computed by id. M2a's matching by source range is not needed; it exists because NLEs drop matchcut's ids.
    - **Where M2a's diff falls short (observed in step 11):** M2a's diff of the same edit is less precise. It read the two new transitions on c005 as trims ("in +3f, out −3f"), because c005's neighbours had changed.
    - **Ids change on publish:** M2a's builder renames the agent's new clips `e001`, `e002` to `h001`, `h002`. The clip keys are kept.
-4. **The human stage is one slot, and it cannot be exported (observed in step 11).**
-   - **Collision:** publishing an agent's revision writes the same `human.json` that `matchcut import` writes from an NLE, so the two would replace each other.
+5. **The human stage is one slot, and it cannot be exported (observed in step 11).**
+   - **Collision:** publishing writes the same `human.json` that `matchcut import` writes from an NLE. The prototype refuses to replace an editor's import unless told to, and then moves it aside.
    - **No export:** M2a deliberately refuses to export the human stage. An agent-edited cut therefore cannot go to Resolve or another NLE through `export` today.
    - **A decision is needed:** either a separate `edit` stage with its own export path, or allowing `export` of the human stage.
-5. **A pipeline re-run invalidates a session (observed in step 13).**
+6. **A pipeline re-run invalidates a session (observed in step 13).**
    - **Safe by design:** the session refuses stale work and keeps it aside. Nothing is lost silently.
    - **No carry-over:** the agent's edits are not carried into the new cut. Today the only channel from human decisions into the pipeline is pins.
    - **A later option:** a session could turn its kept junctions into pins before a re-run. Not built.
-6. **Locks protect cut points, not transitions.**
-   - **Pins:** a pin stores the two cut points. The prototype also refuses transition changes at a pinned junction, a conservative choice that needs a product decision.
-   - **Match cuts:** they stay hard cuts, as in the polish pass.
-7. **The pipeline can leave a clip under its own minimum length (observed).**
+7. **Locks: what is protected (observed in steps 2b and 2d).**
+   - **Editor pins:** pins and match cuts are both enforced across the whole proposal. A pinned junction keeps its cut points and stays adjacent.
+   - **Match cuts:** a match cut keeps its cut points, stays adjacent and stays a hard cut.
+   - **Transitions at pins:** a pin stores only cut points. Refusing a transition change at a pinned junction is the prototype's conservative choice, and needs a product decision.
+8. **The pipeline can leave a clip under its own minimum length (observed).**
    - **Where:** c005 is 18 frames against a 19-frame minimum, after the beat-sync pass.
-   - **What the API does:** it tolerates such a clip, letting it grow but never shorten. It does not treat the pipeline's own output as invalid.
-8. **Story beats are reported, not edited.**
+   - **What the API does:** it tolerates such a clip, letting it grow but never shorten. The same rule applies to transitions that were already over the limit: only new problems are refused.
+9. **Story beats are reported, not edited.**
    - `inspect` gives each story beat's target and actual length.
    - There is no "fit this beat to N seconds" operation. `PacingPass._fit` could be reused for it.
-9. **Agents need to see as well as edit (inferred).**
-   - The proof checked frames numerically.
-   - A real agent loop needs a frame tool that returns the out and in frames of a junction as images, for a vision model. The frame cache and the M1 inspector's images already exist.
+   - `snap_to_beat` also ignores the beat-sync pass's preference for downbeats at story-beat changes.
+10. **Agents need to see as well as edit (inferred).**
+    - The proof checked frames numerically.
+    - A real agent loop needs a frame tool that returns the out and in frames of a junction as images, for a vision model. The frame cache and the M1 inspector's images already exist.
 
 ## Does MCP offer a meaningful advantage?
 
@@ -151,12 +189,12 @@ The prototype's operations are frame-native versions of the same ideas. They add
   - the same 11 tools, with their JSON Schemas, to any MCP client (Claude Desktop, other agents) without a shell;
   - typed arguments and discoverable tools.
 - **What it does not add:**
-  - any capability, rule or safety the API lacks. Both transports are thin layers over one tool table: the MCP server is 59 lines and the CLI 36.
+  - any capability, rule or safety the API lacks. Both transports are thin layers over one tool table: the MCP server is 69 lines and the CLI 39.
 - **Compared with FilmCraft:** the value of the FilmCraft route depended on its editor. Here the tools edit the canonical timeline directly, so there is nothing to translate and no metadata to lose.
 - **Compared with an agent editing the timeline JSON directly:** the API gives what raw JSON edits cannot:
   - frame-exact arithmetic;
-  - locks and pins enforced;
-  - all-or-nothing proposals with exact change reports;
+  - locks, pins and match cuts enforced across the whole proposal;
+  - all-or-nothing proposals with exact change reports and previews;
   - a guard against a moved head;
   - undo history;
   - staleness detection;
@@ -171,9 +209,9 @@ agent ─┬─ JSON CLI  (python -m matchcut.edit WS TOOL '{...}')
                     │
           matchcut/edit/
             ops.py      pure: (Timeline, op) -> Timeline, or Refused(reason); frame-native
-            rules.py    shot bounds, minimum length, transition limits, locks, pins, match cuts, untouched-clip check
-            session.py  WS/edits/: immutable revisions, proposals (hashed), head, undo/redo/checkout, staleness, concurrency
-            view.py     inspect (clips, junctions, shots, story and music beats), compare by id, frames for vision
+            rules.py    proposal-wide: shot bounds, minimum length, transition limits, pins, match cuts, untouched clips and junctions
+            session.py  WS/edits/: immutable revisions, proposals (hashed, re-run on apply), head, undo/redo/checkout, staleness, lock
+            view.py     inspect (clips, junctions, shots, story and music beats), compare by id, previews, frames for vision
             publish.py  revision -> human stage via M2a's builder (or a separate edit stage, see decision 1)
                     │ reads only, plus WS/edits/ and the publish target
           existing: pipeline.timeline, editorial, interchange.common, pipeline.render, review.render, junctions
@@ -189,25 +227,26 @@ agent ─┬─ JSON CLI  (python -m matchcut.edit WS TOOL '{...}')
 
 | Priority | Capability |
 |---|---|
-| P0 | Fix the renderer's audio defect (Finding 1), with a regression test. |
-| P0 | Frame-native operations and rules in `matchcut/edit/`, with unit tests and property tests (untouched clips, running-time arithmetic, lock invariants). |
-| P1 | The session store: revisions, propose/apply, undo/redo/checkout, compare, staleness. |
+| P0 | Fix the renderer's audio defect (Finding 1), with the regression test described there. |
+| P0 | Frame-native operations and proposal-wide rules in `matchcut/edit/`, with unit and property tests (untouched clips and junctions, running-time arithmetic, pin and match-cut invariants, transition limits). |
+| P1 | Snap transition lengths to whole frames in the core (Finding 3). |
+| P1 | The session store: revisions, proposals re-run on apply, undo/redo/checkout, compare, staleness, a lock, validated input. |
 | P1 | A frame tool for vision models (junction out/in frames as images). |
-| P1 | A decision on where an agent's edit lives, and how it reaches an NLE (Finding 4). |
-| P2 | Carry an agent's edits across a pipeline re-run, e.g. as pins (Finding 5). |
-| P2 | Story-beat fitting; ripple-free transition changes (Findings 2 and 8). |
+| P1 | A decision on where an agent's edit lives, and how it reaches an NLE (Finding 5). |
+| P2 | Carry an agent's edits across a pipeline re-run, e.g. as pins (Finding 6). |
+| P2 | Story-beat fitting; ripple-free transition changes; downbeat preference (Findings 2 and 9). |
 | P2 | Music placement operations (start offset, gain). The render supports them; no operation does. |
 | Later | MCP transport (M3b); a TUI view of the edit head (the Edit view already shows a published human stage). |
 
 ## Proposed next milestone: M3a, the edit core
 
-**Before M3a**, a separate small change: fix the renderer audio defect, with its regression test.
+**Before M3a**, a separate small change: fix the renderer audio defect, with its regression test. Snapping transitions to whole frames could go in the same change.
 
 **Scope.** These tasks are each reviewed, then the whole branch is reviewed:
-1. `matchcut/edit/ops.py` and `rules.py`: the nine operations and the rules, frame-native and pure. Unit tests reuse the proof's scenarios and add property tests.
-2. `session.py`: revisions, proposals, undo/redo/checkout, compare and staleness, with concurrency tests.
+1. `matchcut/edit/ops.py` and `rules.py`: the nine operations and the proposal-wide rules, frame-native and pure. Unit tests reuse the proof's scenarios, including the match-cut and first-clip cases, and add property tests.
+2. `session.py`: revisions, proposals, undo/redo/checkout, compare and staleness, with concurrency, re-validation and input-validation tests.
 3. `view.py` and the JSON CLI `python -m matchcut.edit`:
-   - inspect, compare, render (whole cut and junction window) and junction frames as images;
+   - inspect, compare, render (proposal preview, whole cut and junction window) and junction frames as images;
    - the tool table and the CLI.
 4. Publishing (per decision 1), docs (`docs/EDIT.md`) and an acceptance kit.
 

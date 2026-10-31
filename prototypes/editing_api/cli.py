@@ -28,6 +28,9 @@ def main(argv=None) -> int:
     except EditError as exc:
         print(json.dumps({"error": str(exc)}))
         return 1
+    except Exception as exc:  # malformed arguments: one line, never a traceback
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+        return 1
     print(json.dumps(out, indent=2))
     return 0
 
