@@ -35,6 +35,10 @@ junction with `←`/`→` or by clicking its glyph; `[` and `]` move the inspect
 stage between the rough cut and each pass. Junctions are followed across stages
 by lineage (same shot, overlapping source range), because passes renumber
 clips.
+Switching stage keeps the selected junction: the junction between the same two clip
+instances if the other stage has it (even at another index), else the same shot pair
+at the same occurrence (a cut can repeat a shot pair), else the nearest junction with
+that shot pair, else the same position.
 After `python -m matchcut.pipeline.cli import WORKSPACE FILE` (an editor's re-export, see
 [INTEROP.md](INTEROP.md)) a `human` stage follows `final`, so `[`/`]` can inspect what the editor changed; if
 the pipeline has run again since, that stage no longer fits and is left out until you re-export, or import the editor's file again
@@ -91,7 +95,13 @@ the junction being prepared is ignored (`already preparing this junction`),
 whichever of `p` and `a` asked first: an `a` pressed while `p` is still preparing
 the same junction is rejected the same way. A
 result for a junction you have since left still plays, because you asked for
-it, but does not overwrite the selected junction's status line.
+it, but does not overwrite the selected junction's status line. A result that
+finishes after the cut changed on disk (a re-run, a pin) also still plays, and its
+status line ends `(the cut changed: press a again to compare the new cut)` (after `p`:
+`(the cut changed: press p again to play the new cut)`; a failed result, `review failed: ...`,
+gets no suffix); it is not the pair `a` toggles, so the next `a` prepares afresh. `p` and `a`
+re-read the workspace first, so a cut rewritten outside the app (the `import` command, another
+process) is picked up and prepared afresh rather than toggled.
 
 ![The Edit tab after p on junction 1: the status line under the frames and the Play, A/B and Pause keys in the footer](screenshots/m2b-edit-review.svg)
 
