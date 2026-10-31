@@ -10,24 +10,28 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import tempfile
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from .config import MusicConfig, RenderConfig
-from .media import MediaInfo, _require, run
+from .media import MediaError, MediaInfo, _require, run
 from .timeline import Timeline
 
 log = logging.getLogger("matchcut.pipeline")
 
-SEEK_MARGIN_SECONDS = 1.0  # decoded before each clip's in-point, so the input seek (to a keyframe) never decides the first frame
+SEEK_MARGIN_SECONDS = 0.25  # decoded before each clip's in-point: the trims, not the input seek, decide the first frame and sample
 READ_MARGIN_SECONDS = 0.5  # read past each clip's out-point
 # Video trims start and end this much early.  Points are stored to 4 decimals, so at 29.97 fps an in-point can land up to 0.05 ms after
 # its own frame's timestamp, and an exact trim then starts a frame late.  It must stay far below any stream's offset from the file's
 # start (a video stream that starts 22 ms after its audio is common): half a frame would pick the previous frame there.
 TRIM_EPSILON_SECONDS = 0.0005
 SINGLE_THREAD_DECODE_ABOVE = 8  # more clips than this: one decoder thread per input (measured: memory grows ~20 MB per 720p input otherwise)
+INLINE_GRAPH_LIMIT = 100_000  # a longer filter graph goes to ffmpeg in a file (Linux refuses one argument over 128 KiB: ~460 clips)
+FILES_PER_RENDER = 32  # open files ffmpeg needs besides one per clip input (output, music, libraries)
 
 
 @dataclass(frozen=True)
@@ -47,7 +51,7 @@ def clip_inputs(tl: Timeline, fps: float) -> List[ClipInput]:
     for i, c in enumerate(tl.clips):
         seek = max(0.0, math.floor((c.source_in - SEEK_MARGIN_SECONDS) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - SEEK_MARGIN_SECONDS)
         seek = round(seek, 6)
-        out.append(ClipInput(i, seek, round(c.source_out - seek + READ_MARGIN_SECONDS, 6), round(c.source_in - seek, 4), round(c.source_out - seek, 4)))
+        out.append(ClipInput(i, seek, round(c.source_out - seek + READ_MARGIN_SECONDS, 6), round(c.source_in - seek, 6), round(c.source_out - seek, 6)))
     return out
 
 
@@ -65,10 +69,12 @@ def build_filter_graph(
 ) -> str:
     """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``.
 
-    Transitions are rendered on whole frames (``Timeline.snap_transitions``, the interchange exporters' layout), so a stage saved with a
-    fractional transition renders the frames its export shows; the stage itself is not changed.  Times are written to the microsecond
-    against the exact frame rate, and each transition starts ``TRIM_EPSILON_SECONDS`` before its first frame's time, so it cannot begin
-    a frame late at 29.97 fps."""
+    Transitions are placed by frame count: each clip contributes its whole frames, each transition its whole frames, and an xfade starts
+    ``TRIM_EPSILON_SECONDS`` before its first frame's time, written to the microsecond against the exact frame rate (``30000/1001``, not
+    ``29.9700``).  Rounded seconds started transitions a frame late at 29.97 and 30 fps.
+
+    The transitions are first put on whole frames as the interchange exporters lay them out (``Timeline.snap_transitions``), so a stage
+    saved with a fractional transition renders the frames its export shows; the stage itself is not changed."""
     tl = tl.snap_transitions()
     fps = media.fps
     rate = _rate_text(fps)
@@ -81,31 +87,32 @@ def build_filter_graph(
     for ci in clip_inputs(tl, fps):
         i = ci.index
         parts.append(
-            f"[{i}:v]trim=start={max(0.0, ci.start - eps):.4f}:end={ci.end - eps:.4f},setpts=PTS-STARTPTS,"
+            f"[{i}:v]trim=start={max(0.0, ci.start - eps):.6f}:end={ci.end - eps:.6f},setpts=PTS-STARTPTS,"
             f"fps={rate},settb=AVTB,format=yuv420p,setsar=1{scale}[v{i}]"
         )
         if audio:
-            parts.append(f"[{i}:a]atrim=start={ci.start:.4f}:end={ci.end:.4f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
+            parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
 
-    # the running length in whole frames (each clip's frames as its trim selects them), so offsets do not drift over a long cut
-    frames = lambda seconds: int(math.floor(seconds * fps + 0.5)) if fps > 0 else 0  # noqa: E731
+    frames = lambda seconds: int(math.floor(seconds * fps + 0.5)) if fps > 0 else 0  # noqa: E731  (whole frames, as the trims select them)
     cur_v, cur_a = "[v0]", "[a0]"
     cur_frames = frames(tl.clips[0].duration)
     for i, c in enumerate(tl.clips[1:], start=1):
         tr = c.transition_in
         nv, na = f"[xv{i}]", f"[xa{i}]"
-        if tr.is_cut:
+        tr_frames = 0 if tr.is_cut else frames(tr.duration)
+        if not tr_frames:
             parts.append(f"{cur_v}[v{i}]concat=n=2:v=1:a=0{nv}")
             if audio:
                 parts.append(f"{cur_a}[a{i}]concat=n=2:v=0:a=1{na}")
             cur_frames += frames(c.duration)
         else:
             kind = "fadeblack" if tr.kind == "dip_to_black" else "fade"
-            offset = max(0.0, (cur_frames - frames(tr.duration)) / fps - eps)
-            parts.append(f"{cur_v}[v{i}]xfade=transition={kind}:duration={tr.duration:.6f}:offset={offset:.6f}{nv}")
+            offset = max(0.0, (cur_frames - tr_frames) / fps - eps)
+            length = tr_frames / fps
+            parts.append(f"{cur_v}[v{i}]xfade=transition={kind}:duration={length:.6f}:offset={offset:.6f}{nv}")
             if audio:
-                parts.append(f"{cur_a}[a{i}]acrossfade=d={tr.duration:.6f}{na}")
-            cur_frames += frames(c.duration) - frames(tr.duration)
+                parts.append(f"{cur_a}[a{i}]acrossfade=d={length:.6f}{na}")
+            cur_frames += frames(c.duration) - tr_frames
         cur_v, cur_a = nv, na
     cur_dur = cur_frames / fps if fps > 0 else tl.duration
 
@@ -128,9 +135,26 @@ def build_filter_graph(
 
 
 def _rate_text(fps: float) -> str:
-    """The frame rate for ffmpeg's fps filter: an exact ratio for the usual rates (30000/1001, not 29.9700), else six decimals."""
+    """The frame rate for ffmpeg's fps filter: an exact ratio for the usual rates (30000/1001), else six decimals."""
     exact = Fraction(fps).limit_denominator(1001)
     return f"{exact.numerator}/{exact.denominator}" if abs(float(exact) - fps) < 1e-6 * max(fps, 1.0) else f"{fps:.6f}"
+
+
+def _ensure_open_files(n_inputs: int) -> None:
+    """The renderer opens the source once per clip: raise the soft open-file limit toward the hard one if the cut needs more, or say why
+    it cannot (a 256-file default, as on macOS, stops a cut of about 220 clips)."""
+    try:
+        import resource
+    except ImportError:  # Windows: no rlimit to raise
+        return
+    need = n_inputs + FILES_PER_RENDER
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == resource.RLIM_INFINITY or soft >= need:
+        return
+    if hard != resource.RLIM_INFINITY and hard < need:
+        raise MediaError(f"this cut has {n_inputs} clips and the renderer opens the source once per clip, but the open-file limit is {hard}: "
+                         f"raise it (ulimit -n {need}) and render again")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (need, hard))
 
 
 def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1) -> List[str]:
@@ -149,9 +173,9 @@ def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_dur
             parts.append(
                 f"[music][asrc1]sidechaincompress=threshold={music.duck_threshold}:ratio={music.duck_ratio}:attack=20:release=300[ducked]"
             )
-            parts.append("[asrc0][ducked]amix=inputs=2:duration=first:normalize=0[amixed]")
+            parts.append("[asrc0][ducked]amix=inputs=2:duration=longest:normalize=0[amixed]")
         else:
-            parts.append("[asrc][music]amix=inputs=2:duration=first:normalize=0[amixed]")
+            parts.append("[asrc][music]amix=inputs=2:duration=longest:normalize=0[amixed]")
     else:
         parts.append("[music]anull[amixed]")
     final = f"loudnorm=I={music.target_lufs:.1f}:TP=-1.5:LRA=11,aresample=48000" if music.loudnorm else "anull"
@@ -170,6 +194,7 @@ def render(
 ) -> Path:
     if not tl.clips:
         raise ValueError("cannot render an empty timeline")
+    _ensure_open_files(len(tl.clips))
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
     graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration)
@@ -180,7 +205,15 @@ def render(
         cmd += [*threads, "-ss", f"{ci.seek:.6f}", "-t", f"{ci.length:.6f}", "-i", media.path]
     if has_music:
         cmd += ["-i", str(music.path)]
-    cmd += ["-filter_complex", graph, "-map", "[vout]"]
+    graph_file = None
+    if len(graph) > INLINE_GRAPH_LIMIT:
+        fd, name = tempfile.mkstemp(prefix=".graph-", suffix=".txt", dir=output.parent)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(graph)
+        graph_file = Path(name)
+        cmd += ["-filter_complex_script", str(graph_file), "-map", "[vout]"]
+    else:
+        cmd += ["-filter_complex", graph, "-map", "[vout]"]
     if media.has_audio or has_music:
         cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", cfg.audio_bitrate]
     cmd += [
@@ -197,5 +230,9 @@ def render(
         str(output),
     ]
     log.info("rendering %d clips (%.1fs)%s -> %s", len(tl.clips), tl.duration, " with music" if has_music else "", output)
-    run(cmd, capture=False)
+    try:
+        run(cmd, capture=False)
+    finally:
+        if graph_file is not None:
+            graph_file.unlink(missing_ok=True)
     return output

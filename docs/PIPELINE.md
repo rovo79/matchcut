@@ -124,19 +124,28 @@ and every decision each pass made.
 
 Each clip reads the source through its own ffmpeg input:
 
-- **Where it reads:** the input is seeked to a frame 1 s before the clip's in-point, and reads to 0.5 s past its out-point.
-- **Trims:** they are exact, made on the decoded frames, relative to that seek. Video trims start 0.5 ms early, so a point stored to 4 decimals
-  still selects its own frame at 29.97 fps.
-- **Decoder threads:** a cut of more than 8 clips decodes each input with one thread, to bound memory.
-- **Transitions:** they are whole frames. `final.json` stores them so (`Timeline.snap_transitions`, laid out as the OTIO/FCPXML/EDL
-  exporters lay them out). The renderer renders any stage's transitions on those same frames, in memory: a workspace saved earlier with,
-  say, a 0.336 s dissolve renders the 8 frames its export shows, and its files are not rewritten. Each transition is placed by frame count
-  against the exact frame rate (`30000/1001`, not `29.9700`).
+- **Where it reads:** the input is seeked to a frame at or before 0.25 s ahead of the clip's in-point (or to 0), and reads to 0.5 s past
+  its out-point.
+- **Trims:** they are exact, made on the decoded frames and samples, relative to that seek. Video trims start 0.5 ms early, so a point
+  stored to 4 decimals still selects its own frame at 29.97 and 30 fps.
+- **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).
+  - `final.json` stores them as whole frames (`Timeline.snap_transitions`, laid out as the OTIO/FCPXML/EDL exporters lay them out).
+  - The renderer puts any stage's transitions on those same frames, in memory. A workspace saved earlier with, say, a 0.336 s dissolve
+    renders the 8 frames its export shows, and its files are not rewritten.
 - **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
   - the audio of a reordered dissolve went missing;
   - a reordered cut under music lost its audio;
   - a repeated range never finished;
   - the video held seconds of raw frames in memory.
+- **Costs:**
+  - **Open files:** one per clip. The renderer raises the soft limit toward the hard one, and says what to set when the hard limit is too
+    low.
+  - **Memory:** each input opens its own decoder. Memory grows by about 15–30 MB per clip at 720p–1080p, and each input also reads the
+    source's index (about 10 MB for a one-hour MP4). Cuts of more than 8 clips decode each input with one thread to bound this. Measured
+    peaks are still well below the shared input's.
+  - **Decoding:** each clip decodes from the keyframe at or before its seek point, so up to one frame group plus 0.25 s before its in-point.
+  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file.
+- **Tested on:** ffmpeg 6.1 only. ffmpeg 7 adds threads per input.
 
 ## Music
 

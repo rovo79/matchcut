@@ -96,16 +96,22 @@ def interior(tl, i: int) -> Tuple[float, float]:
 
 
 def expected_frames(tl, fps: float) -> Dict[int, int]:
-    """{output frame: source frame} for every frame one clip shows alone, outside the cut's fades."""
+    """{output frame: source frame} for every frame one clip shows alone, outside the cut's fades, counted in whole frames as the renderer
+    lays the cut out (each clip its frames, each transition its frames), so 4-decimal seconds never add or lose a frame."""
+    def frames(seconds: float) -> int:
+        return int(np.floor(seconds * fps + 0.5))
+    n = [frames(c.duration) for c in tl.clips]
+    tr = [0] + [0 if c.transition_in.is_cut else frames(c.transition_in.duration) for c in tl.clips[1:]]
+    total = sum(n) - sum(tr)
+    fade_in, fade_out = frames(tl.fade_in), frames(tl.fade_out)
     out: Dict[int, int] = {}
+    start = 0
     for i, c in enumerate(tl.clips):
-        lo, hi = interior(tl, i)
-        rs = tl.record_start(i)
-        for k in range(int(np.ceil(lo * fps - 1e-6)), int(np.floor(hi * fps - 1e-6)) + 1):
-            t = k / fps
-            if t < lo - 1e-9 or t >= hi - 1e-9 or t < tl.fade_in or t >= tl.duration - tl.fade_out - 1e-9:
-                continue
-            out[k] = int(round((c.source_in + (t - rs)) * fps))
+        if i:
+            start += n[i - 1] - tr[i]
+        lo, hi = start + tr[i], start + n[i] - (tr[i + 1] if i + 1 < len(tl.clips) else 0)
+        for k in range(max(lo, fade_in), min(hi, total - fade_out)):
+            out[k] = frames(c.source_in) + (k - start)
     return out
 
 
