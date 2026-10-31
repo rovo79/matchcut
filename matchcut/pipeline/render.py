@@ -1,7 +1,16 @@
-"""Render a timeline to a video file with ffmpeg (cuts, dissolves, dips, fades)."""
+"""Render a timeline to a video file with ffmpeg (cuts, dissolves, dips, fades).
+
+Every clip reads the source through its own ffmpeg input, seeked to just before the clip (``clip_inputs``). With one shared input,
+clips that play out of source order (or repeat a range) made ffmpeg buffer, starve or stall the branches it could not feed yet: the
+audio of a reordered dissolve came out empty, a reordered cut under music came out short, a repeated range never finished, and a
+reordered video held seconds of raw frames in memory.  Each input decodes only its clip (plus ``SEEK_MARGIN_SECONDS`` before it),
+and the trims stay exact: they are applied to the decoded frames, relative to the seek point.
+"""
 from __future__ import annotations
 
 import logging
+import math
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -10,6 +19,35 @@ from .media import MediaInfo, _require, run
 from .timeline import Timeline
 
 log = logging.getLogger("matchcut.pipeline")
+
+SEEK_MARGIN_SECONDS = 1.0  # decoded before each clip's in-point, so the input seek (to a keyframe) never decides the first frame
+READ_MARGIN_SECONDS = 0.5  # read past each clip's out-point
+# Video trims start and end this much early.  Points are stored to 4 decimals, so at 29.97 fps an in-point can land up to 0.05 ms after
+# its own frame's timestamp, and an exact trim then starts a frame late.  It must stay far below any stream's offset from the file's
+# start (a video stream that starts 22 ms after its audio is common): half a frame would pick the previous frame there.
+TRIM_EPSILON_SECONDS = 0.0005
+SINGLE_THREAD_DECODE_ABOVE = 8  # more clips than this: one decoder thread per input (measured: memory grows ~20 MB per 720p input otherwise)
+
+
+@dataclass(frozen=True)
+class ClipInput:
+    """Where clip ``index`` reads the source: ``-ss seek -t length -i source``; its in/out points relative to ``seek``."""
+
+    index: int
+    seek: float
+    length: float
+    start: float
+    end: float
+
+
+def clip_inputs(tl: Timeline, fps: float) -> List[ClipInput]:
+    """One input per clip.  ``seek`` is on the frame grid, ``SEEK_MARGIN_SECONDS`` before the in-point (or 0)."""
+    out: List[ClipInput] = []
+    for i, c in enumerate(tl.clips):
+        seek = max(0.0, math.floor((c.source_in - SEEK_MARGIN_SECONDS) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - SEEK_MARGIN_SECONDS)
+        seek = round(seek, 6)
+        out.append(ClipInput(i, seek, round(c.source_out - seek + READ_MARGIN_SECONDS, 6), round(c.source_in - seek, 4), round(c.source_out - seek, 4)))
+    return out
 
 
 def snap_to_frames(tl: Timeline, bounds: Optional[Dict[int, Sequence[float]]] = None) -> Timeline:
@@ -24,20 +62,22 @@ def build_filter_graph(
     music: Optional[MusicConfig] = None,
     music_duration: Optional[float] = None,
 ) -> str:
-    """ffmpeg -filter_complex graph assembling the timeline from input 0 (and music from input 1)."""
+    """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``."""
     fps = media.fps
     width = cfg.proxy_width if cfg.proxy else cfg.width
     scale = f",scale={width}:-2:flags=bicubic" if width else ""
     parts: List[str] = []
     has_music = bool(music is not None and music.path)
     audio = media.has_audio and not (has_music and music.only)
-    for i, c in enumerate(tl.clips):
+    eps = TRIM_EPSILON_SECONDS
+    for ci in clip_inputs(tl, fps):
+        i = ci.index
         parts.append(
-            f"[0:v]trim=start={c.source_in:.4f}:end={c.source_out:.4f},setpts=PTS-STARTPTS,"
+            f"[{i}:v]trim=start={max(0.0, ci.start - eps):.4f}:end={ci.end - eps:.4f},setpts=PTS-STARTPTS,"
             f"fps={fps:.4f},settb=AVTB,format=yuv420p,setsar=1{scale}[v{i}]"
         )
         if audio:
-            parts.append(f"[0:a]atrim=start={c.source_in:.4f}:end={c.source_out:.4f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
+            parts.append(f"[{i}:a]atrim=start={ci.start:.4f}:end={ci.end:.4f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
 
     cur_v, cur_a = "[v0]", "[a0]"
     cur_dur = tl.clips[0].duration
@@ -72,18 +112,18 @@ def build_filter_graph(
         label = "[asrc]" if has_music else "[aout]"
         parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}{label}")
     if has_music:
-        parts += _music_chain(music, cur_dur, audio, music_duration)
+        parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips))
     return ";".join(parts)
 
 
-def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None) -> List[str]:
-    """Trim, fade, gain, duck (optional), mix and normalise the music (input 1) under [asrc]."""
+def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1) -> List[str]:
+    """Trim, fade, gain, duck (optional), mix and normalise the music (input ``music_input``) under [asrc]."""
     parts: List[str] = []
     start = max(0.0, music.start)
     available = total if music_duration is None else max(0.0, min(total, music_duration - start))
     fade = min(music.fade_out, available / 2)
     parts.append(
-        f"[1:a]atrim=start={start:.3f}:end={start + available:.3f},asetpts=PTS-STARTPTS,"
+        f"[{music_input}:a]atrim=start={start:.3f}:end={start + available:.3f},asetpts=PTS-STARTPTS,"
         f"afade=t=out:st={max(0.0, available - fade):.3f}:d={fade:.3f},volume={music.gain_db:.1f}dB[music]"
     )
     if source_audio:
@@ -117,7 +157,10 @@ def render(
     has_music = bool(music is not None and music.path)
     graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration)
     output.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n", "-i", media.path]
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n"]
+    threads = ["-threads", "1"] if len(tl.clips) > SINGLE_THREAD_DECODE_ABOVE else []
+    for ci in clip_inputs(tl, media.fps):
+        cmd += [*threads, "-ss", f"{ci.seek:.6f}", "-t", f"{ci.length:.6f}", "-i", media.path]
     if has_music:
         cmd += ["-i", str(music.path)]
     cmd += ["-filter_complex", graph, "-map", "[vout]"]

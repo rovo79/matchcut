@@ -122,6 +122,18 @@ ffmpeg filter graph (trim → concat / xfade / acrossfade → fades); `--proxy`
 renders a quick 640 px preview. `report.md` has the narrative, the cut list
 and every decision each pass made.
 
+Each clip reads the source through its own ffmpeg input:
+
+- **Where it reads:** the input is seeked to a frame 1 s before the clip's in-point, and reads to 0.5 s past its out-point.
+- **Trims:** they are exact, made on the decoded frames, relative to that seek. Video trims start 0.5 ms early, so a point stored to 4 decimals
+  still selects its own frame at 29.97 fps.
+- **Decoder threads:** a cut of more than 8 clips decodes each input with one thread, to bound memory.
+- **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
+  - the audio of a reordered dissolve went missing;
+  - a reordered cut under music lost its audio;
+  - a repeated range never finished;
+  - the video held seconds of raw frames in memory.
+
 ## Music
 
 `--music track.mp3` (config section `music`) adds a prerecorded track:

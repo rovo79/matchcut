@@ -127,7 +127,7 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
     media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
     music = MusicConfig(path="song.mp3", start=4.0, gain_db=-9.0, fade_out=2.0)
     graph = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=music)
-    assert "[1:a]atrim=start=4.000:end=9.500" in graph  # 5.5 s timeline, offset 4 s
+    assert "[3:a]atrim=start=4.000:end=9.500" in graph  # 5.5 s timeline, offset 4 s; the music is the input after the 3 clips
     assert "afade=t=out:st=3.500:d=2.000" in graph
     assert "volume=-9.0dB[music]" in graph
     assert "[asrc]asplit[asrc0][asrc1]" in graph
@@ -140,14 +140,14 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
 def test_filter_graph_music_only_and_no_duck():
     media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
     only = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", only=True))
-    assert "[0:a]" not in only and "[music]anull[amixed]" in only
+    assert not any(f"[{i}:a]" in only for i in range(3)) and "[music]anull[amixed]" in only
     no_duck = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", duck=False, loudnorm=False))
     assert "sidechaincompress" not in no_duck
     assert "[asrc][music]amix=inputs=2:duration=first:normalize=0[amixed]" in no_duck
     assert "[amixed]anull[aout]" in no_duck
     silent = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=False)
     graph = build_filter_graph(_three_clip_timeline(), silent, PipelineConfig().render, music=MusicConfig(path="s.mp3"))
-    assert "[0:a]" not in graph and "[music]anull[amixed]" in graph and "[aout]" in graph
+    assert not any(f"[{i}:a]" in graph for i in range(3)) and "[music]anull[amixed]" in graph and "[aout]" in graph
 
 
 def test_render_with_music_track(demo_video, click_track, tmp_path):
@@ -179,7 +179,7 @@ def test_render_with_music_track(demo_video, click_track, tmp_path):
 def test_short_music_track_fades_where_it_ends():
     media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
     graph = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", start=1.0, fade_out=2.0), music_duration=4.0)
-    assert "[1:a]atrim=start=1.000:end=4.000" in graph  # only 3 s of music are available
+    assert "[3:a]atrim=start=1.000:end=4.000" in graph  # only 3 s of music are available
     assert "afade=t=out:st=1.500:d=1.500" in graph  # fade capped at half the 3 s available
 
 
