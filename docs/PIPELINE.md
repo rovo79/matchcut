@@ -144,6 +144,14 @@ Each clip reads the source through its own ffmpeg input:
     exported frames, and every clip starts within half a frame of `Timeline.record_start`.
   - A single fractional transition can therefore render one frame longer or shorter than its seconds. The whole cut is its duration in
     frames, rounded half up.
+  - **Stored in whole frames:** `final.json` stores transitions as those whole frames (`Timeline.snap_transitions`, to the microsecond),
+    so a new run's stage, its exports, its render and `final.edl` agree to the frame.
+  - **Beat sync** measures beats on the same whole-frame record positions.
+  - **Rounding that changes the cut** (a transition that rounds to no frame, or one as long as a clip) is recorded in the history.
+  - **Workspaces saved before** are not rewritten; they render and export the same frames anyway.
+    - Their `final.edl` keeps the old numbers until the passes run again.
+    - Running the passes again rewrites `final.json` (for example 0.75 s → 0.72 s). That marks an imported `human.json` as stale even
+      though its frames are the same.
 - **Audio length:** at the end of the chain the audio's timestamps are renumbered from its samples, then it is padded or cut to the
   video's length.
   - Mixing and ducking can end it early.

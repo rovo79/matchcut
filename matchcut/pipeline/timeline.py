@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import math
+from fractions import Fraction
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-from .media import seconds_to_timecode
+from .frames import snap_rate, to_frames
 
 TRANSITION_KINDS = ("cut", "dissolve", "dip_to_black")
 HUMAN_STAGE = "human"  # the stage an editor's re-export is imported as (matchcut.interchange writes it; the engine only reads it)
@@ -160,6 +161,55 @@ class Timeline:
             c.source_out = round(out_f / fps, 4)
         return out
 
+    def snap_transitions(self) -> "Timeline":
+        """Copy with every transition a whole number of frames, laid out exactly as the interchange exporters and the renderer lay them out
+        (``interchange.common.layout``): rounded over the running total at the source's exact rate, so the cut's length stays within half
+        a frame.  Lengths are stored to the microsecond, so a long run of transitions re-laid out from the stored values gives the same
+        frames.  A transition that rounds to no frame (or has no length) becomes a cut.  Source points are left as they are."""
+        out = self.copy()
+        if out.fps <= 0:
+            return out
+        rate = snap_rate(out.fps)
+        cum, done = 0.0, 0
+        for c in out.clips[1:]:
+            if c.transition_in.is_cut:
+                c.transition_in = Transition()
+                continue
+            cum += c.transition_in.duration
+            frames = max(to_frames(cum, rate) - done, 0)
+            done += frames
+            c.transition_in = Transition(c.transition_in.kind, round(float(frames / rate), 6)) if frames else Transition()
+        if out.clips:
+            out.clips[0].transition_in = Transition()
+        return out
+
+    def transition_rounding_problems(self, rounded: "Timeline") -> List[Decision]:
+        """What rounding the transitions to whole frames (``rounded`` = ``self.snap_transitions()``) did that changes the cut, as decisions to
+        record: a transition that rounded to no frame (it is a cut now), or one that takes all of a clip's frames.  Ordinary rounding of a
+        fraction of a frame is not reported (the exports and the render always rounded it so)."""
+        out: List[Decision] = []
+        if self.fps <= 0:
+            return out
+        rate = snap_rate(self.fps)
+        for i in range(1, min(len(self.clips), len(rounded.clips))):
+            before, after = self.clips[i].transition_in, rounded.clips[i].transition_in
+            prev, cur = rounded.clips[i - 1], rounded.clips[i]
+            ids = [prev.id, cur.id]
+            if not before.is_cut and after.is_cut:
+                out.append(Decision("final", "transition_dropped", ids,
+                                    f"{before.kind} of {before.duration:.3f} s between {prev.id} and {cur.id} rounds to no frame: it is a cut now",
+                                    data={"kind": before.kind, "seconds": before.duration}))
+                continue
+            if after.is_cut:
+                continue
+            tr = to_frames(after.duration, rate)
+            shortest = min(to_frames(prev.source_out, rate) - to_frames(prev.source_in, rate), to_frames(cur.source_out, rate) - to_frames(cur.source_in, rate))
+            if tr >= shortest:
+                out.append(Decision("final", "transition_too_long", ids,
+                                    f"{after.kind} of {tr} frames between {prev.id} and {cur.id} is as long as one of its clips ({shortest} frames): "
+                                    "the editor and the exports cannot lay it out", data={"frames": tr, "clip_frames": shortest}))
+        return out
+
     def renumber(self) -> None:
         for i, c in enumerate(self.clips):
             c.id = f"c{i + 1:03d}"
@@ -234,39 +284,53 @@ class Timeline:
 
     # -- exports ---------------------------------------------------------
     def to_edl(self, title: Optional[str] = None) -> str:
-        """CMX3600-style EDL (single video track, source reel AX)."""
+        """CMX3600-style EDL (single video track, source reel AX), laid out exactly as the M2a EDL exporter lays it out
+        (``interchange.edl.export_edl`` on ``interchange.common.layout``): every number a whole frame at the source's exact rate, source
+        points rounded half up, transitions over the running total; an event before a dissolve ends where the dissolve starts, and the
+        dissolve's hold line holds the outgoing media there.  So this EDL, the M2a exports and the render agree to the frame, and it reads
+        back through M2a's EDL reader as the same cut."""
         lines = [f"TITLE: {title or self.name}", "FCM: NON-DROP FRAME", ""]
-        tc = lambda t: seconds_to_timecode(t, self.fps)  # noqa: E731
-        rec = 0.0
-        event = 0
+        if not self.clips:
+            return "\n".join(lines)
+        rate = snap_rate(self.fps) if self.fps > 0 else Fraction(25)
+        base = int(round(float(rate))) or 1
+
+        def tc(n: int) -> str:
+            secs, f = divmod(max(n, 0), base)
+            return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}:{f:02d}"
+
+        rows = []  # (in_f, out_f, tr, rec) per clip, as layout() computes them
+        cum, done = 0.0, 0
         for i, c in enumerate(self.clips):
-            tr = c.transition_in
-            if i > 0 and not tr.is_cut:
+            in_f = to_frames(c.source_in, rate)
+            out_f = max(to_frames(c.source_out, rate), in_f + 1)
+            tr = 0
+            if i and not c.transition_in.is_cut:
+                cum += c.transition_in.duration
+                tr = max(to_frames(cum, rate) - done, 0)
+                done += tr
+            rec = rows[-1][3] + (rows[-1][1] - rows[-1][0]) - tr if rows else 0
+            rows.append((in_f, out_f, tr, rec))
+        event = 0
+        for i, (c, (in_f, out_f, tr, rec)) in enumerate(zip(self.clips, rows)):
+            nxt = rows[i + 1][2] if i + 1 < len(rows) else 0  # the next transition starts where this event ends
+            src_out, rec_out = out_f - nxt, rec + (out_f - in_f) - nxt
+            event += 1
+            if tr:
                 prev = self.clips[i - 1]
-                rec -= tr.duration
-                frames = int(round(tr.duration * self.fps))
-                event += 1
-                lines.append(
-                    f"{event:03d}  AX       V     C        "
-                    f"{tc(prev.source_out)} {tc(prev.source_out)} {tc(rec)} {tc(rec)}"
-                )
-                lines.append(
-                    f"{event:03d}  AX       V     D    {frames:03d} "
-                    f"{tc(c.source_in)} {tc(c.source_out)} {tc(rec)} {tc(rec + c.duration)}"
-                )
+                hold = rows[i - 1][1] - tr  # where the outgoing clip's media is when the dissolve starts
+                lines.append(f"{event:03d}  AX       V     C        {tc(hold)} {tc(hold)} {tc(rec)} {tc(rec)}")
+                lines.append(f"{event:03d}  AX       V     D    {tr:03d} {tc(in_f)} {tc(src_out)} {tc(rec)} {tc(rec_out)}")
                 lines.append(f"* FROM CLIP NAME: shot_{prev.shot_index:04d}")
                 lines.append(f"* TO CLIP NAME: shot_{c.shot_index:04d}")
-                lines.append(f"* TRANSITION: {tr.kind}")
+                lines.append(f"* TRANSITION: {c.transition_in.kind}")
             else:
-                event += 1
-                lines.append(
-                    f"{event:03d}  AX       V     C        "
-                    f"{tc(c.source_in)} {tc(c.source_out)} {tc(rec)} {tc(rec + c.duration)}"
-                )
+                lines.append(f"{event:03d}  AX       V     C        {tc(in_f)} {tc(src_out)} {tc(rec)} {tc(rec_out)}")
                 lines.append(f"* FROM CLIP NAME: shot_{c.shot_index:04d}")
+            if src_out <= in_f:  # the transitions take all of this clip (the final stage records transition_too_long)
+                lines.append(f"* COMMENT: shot_{c.shot_index:04d} is no longer than its transitions: this event has no frames of its own")
             if c.purpose:
                 lines.append(f"* COMMENT: {c.beat_id} {c.purpose}".strip())
-            rec += c.duration
             lines.append("")
         return "\n".join(lines)
 

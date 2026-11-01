@@ -32,7 +32,7 @@ def test_edl_and_csv_exports():
     edl = tl.to_edl("demo")
     assert edl.startswith("TITLE: demo")
     assert "001  AX       V     C        00:00:00:00 00:00:02:00 00:00:00:00 00:00:02:00" in edl
-    assert "D    012" in edl  # 0.5 s dissolve at 25 fps
+    assert "D    013" in edl  # 0.5 s dissolve at 25 fps = 12.5 frames, rounded half up as the M2a exports and the render round it
     csv = tl.to_csv()
     assert csv.splitlines()[0].startswith("clip_id,shot_index")
     assert len(csv.splitlines()) == 4
