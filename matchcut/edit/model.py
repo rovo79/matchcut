@@ -79,12 +79,14 @@ class EditContext:
         return round(float(Fraction(int(frames)) / self.rate), 6)
 
     def shot_frames(self, shot: int) -> Tuple[int, int]:
-        """The frames (lo, hi) of shot ``shot`` as M2a's layout gives them: its start and end rounded like any clip point (``f``).  A
-        clip's in-point may be ``lo`` and its out-point ``hi``, so a point inside the shot in seconds is always inside it in frames (a shot
-        end off the frame grid, where the pipeline may have clamped a pinned point, is the frame layout rounds that point to).  KeyError
-        for an unknown shot."""
+        """The whole frames (lo, hi) inside shot ``shot``: an operation may put a clip's in-point at ``lo`` at the earliest and its
+        out-point at ``hi`` at the latest.  The start rounds up and the end down, exactly as M2a's export snaps a point back into its shot
+        (``interchange.common.export_timeline`` -> ``Timeline.snap_to_frames(bounds)``, at ``float(rate)`` with its 1e-9 slack), so a
+        point an operation places is never moved by the export.  (A point the base already had just outside, e.g. a shot end off the
+        frame grid that the layout rounds up, is a pre-existing excess the rules tolerate.)  KeyError for an unknown shot."""
         lo, hi = self.bounds[shot]
-        return self.f(lo), self.f(hi)
+        fps = float(self.rate)
+        return int(math.ceil(lo * fps - 1e-9)), int(math.floor(hi * fps + 1e-9))
 
     def has_shot(self, shot: int) -> bool:
         return shot in self.bounds

@@ -21,8 +21,8 @@ the same proposal and revision ids.
 A session is stale when its base stage file has changed (or that stage is no longer listed, e.g. a ``human.json`` gone stale): every
 command that changes it refuses, the read-only ones say ``stale: true``, and ``start`` moves it aside to ``WS/edits.stale-<sha12>/``.
 The same holds when the source footage's frame rate is no longer the session's.  ``start`` with ``restart`` moves a fresh session to
-``WS/edits.replaced-<sha12>/``.  Nothing in the store is ever deleted, and a revision whose timeline no longer matches its
-``timeline_sha256`` is refused when read.
+``WS/edits.replaced-<sha12>/``.  Nothing in the store is ever deleted, and a revision that no longer matches its hashes
+(``timeline_sha256`` over its timeline, ``document_sha256`` over everything but its ``created`` time) is refused when read.
 
 Expected user errors raise ``SessionError`` (a ``Refused``) with a one-line message; a proposal the rules refuse raises
 ``ProposalRefused`` with its problems, timing and changes.
@@ -102,6 +102,12 @@ def _sha256_file(path: Path) -> Optional[str]:
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
     except OSError:
         return None
+
+
+def document_sha256(doc: Dict[str, Any]) -> str:
+    """The sha256 of a revision document's canonical JSON without its ``created`` time and this hash itself: it covers the parent, the
+    operations, the reports and the timeline."""
+    return _sha256_text(canonical_json({k: v for k, v in doc.items() if k not in ("created", "document_sha256")}))
 
 
 def timeline_sha256(tl: Timeline) -> str:
@@ -424,9 +430,13 @@ class Session:
             sha = _sha256_text(canonical_json(doc["timeline"]))
         except (KeyError, TypeError, ValueError):
             sha = None
-        if doc.get("id") != rev or sha is None or sha != doc.get("timeline_sha256"):
-            raise SessionError(f"revision {rev} was changed after it was written (its id or timeline no longer matches its "
-                               "timeline_sha256): revisions are immutable; check out another revision or start a new session")
+        try:
+            whole = document_sha256(doc)
+        except (TypeError, ValueError):
+            whole = None
+        if doc.get("id") != rev or sha is None or sha != doc.get("timeline_sha256") or whole != doc.get("document_sha256"):
+            raise SessionError(f"revision {rev} was changed after it was written (its id, parent, operations or timeline no longer match "
+                               "its hashes): revisions are immutable; check out another revision or start a new session")
         return doc
 
     def timeline(self, rev: Optional[str] = None) -> Timeline:
@@ -549,7 +559,7 @@ def _write_revision(d: Path, doc: Dict[str, Any]) -> None:
     if path.exists():
         raise SessionError(f"revision {doc['id']} exists already: revisions are never rewritten")
     path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write(path, _pretty(doc))
+    _atomic_write(path, _pretty(dict(doc, document_sha256=document_sha256(doc))))
 
 
 def _read_base(path: Path, ctx: EditContext) -> Tuple[str, Timeline, List[str]]:

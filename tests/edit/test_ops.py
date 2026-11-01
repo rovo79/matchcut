@@ -139,7 +139,10 @@ def test_a_clip_left_outside_its_shot_may_move_back_in_never_further_out(ctx):
     tight = EditContext(ctx.rate, {**ctx.bounds, 2: (9.0, 12.0)})  # shot 2 now starts at frame 225; c003 is in at 220
     tl = cut(tight, BASE)
     assert run(tl, tight, op="trim", clip="c003", edge="out", frames=2).detail == "trim c003 out +2f"
-    assert frames_of(run(tl, tight, op="trim", clip="c003", edge="in", frames=2).timeline, tight)[2][1] == 222
+    # an edge that moves lands inside the shot (M2a's export would move it otherwise); one that stays may stay outside
+    refused(tl, tight, "c003's in-point would still lie outside shot 2 at frame 222 (the shot is frames 225-300)", op="trim", clip="c003",
+            edge="in", frames=2)
+    assert frames_of(run(tl, tight, op="trim", clip="c003", edge="in", frames=5).timeline, tight)[2][1] == 225
     refused(tl, tight, "c003 would leave shot 2", op="trim", clip="c003", edge="in", frames=-1)
 
 

@@ -27,7 +27,7 @@ from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, clip_origin
 
 from .model import EditContext, Refused, Row, frame_rows, running_frames
-from .ops import beat_frame, find_junction, held_pins, lock_reason, pin_label, transition_limit
+from .ops import MAX_FRAMES, beat_frame, find_junction, held_pins, lock_reason, pin_label, transition_limit
 
 GUARDS = ("max_duration_change_frames", "keep_record_frames", "keep_on_beat")
 
@@ -211,8 +211,9 @@ def guard_problems(before: Timeline, after: Timeline, ctx: EditContext, guards: 
 
     if "max_duration_change_frames" in guards:
         limit = guards["max_duration_change_frames"]
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
-            out.append(f"guard max_duration_change_frames must be a whole number of frames >= 0, not {limit!r}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= MAX_FRAMES:
+            shown = repr(limit) if len(repr(limit)) <= 24 else repr(limit)[:20] + "..."
+            out.append(f"guard max_duration_change_frames must be a whole number of frames from 0 to {MAX_FRAMES}, not {shown}")
         else:
             d = running_frames(ra) - running_frames(rb)
             if abs(d) > limit:

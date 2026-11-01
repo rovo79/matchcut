@@ -60,13 +60,14 @@ class OpsResult:
     issued: Tuple[str, ...] = ()  # every id a new clip took in the batch, sorted (also one a later operation removed again)
 
 
-MAX_FRAMES = 10 ** 9  # a frame count beyond this is refused (no cut is that long; it keeps the arithmetic finite)
+MAX_FRAMES = 10 ** 9  # a frame count beyond this either way is refused (no cut is that long; it keeps the arithmetic finite)
+MAX_SHOT = 10 ** 6  # a shot index beyond this either way is refused (no workspace has that many shots)
 
 
 # ----------------------------------------------------------------------------------------------- arguments and addressing
-def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED) -> int:
-    """A whole-number argument: an int, or a float with no fraction.  A bool, a fractional or non-numeric value is refused, never
-    truncated; a missing one is refused unless there is a ``default``."""
+def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED, limit: int = MAX_FRAMES, unit: str = "frames") -> int:
+    """A whole-number argument: an int, or a float with no fraction, of at most ``limit`` (``unit``) either way.  A bool, a fractional or
+    non-numeric value is refused, never truncated; a missing one is refused unless there is a ``default``."""
     if key not in op:
         if default is _REQUIRED:
             raise Refused(f"{op.get('op', 'the operation')} needs {key}")
@@ -76,8 +77,9 @@ def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED) -> int:
         raise Refused(f"{key} must be a whole number, not {v!r}")
     if isinstance(v, float) and not (math.isfinite(v) and v.is_integer()):
         raise Refused(f"{key} must be a whole number, not {v!r}")
-    if abs(v) > MAX_FRAMES:
-        raise Refused(f"{key} is out of range ({'-' if v < 0 else ''}more than {MAX_FRAMES} frames)")
+    if abs(v) > limit:
+        shown = str(int(v)) if abs(v) < 1e15 else f"{v:g}"
+        raise Refused(f"{key} is out of range: at most {limit} {unit} either way, not {shown[:12]}{'...' if len(shown) > 12 else ''}")
     return int(v)
 
 
@@ -165,14 +167,20 @@ def _frames(ctx: EditContext, c: Clip) -> Tuple[int, int]:
 def _set(ctx: EditContext, c: Clip, in_f: int, out_f: int, new: bool = False) -> None:
     """Give ``c`` the frames ``in_f``-``out_f``.
 
-    The range must lie inside the clip's shot, and be at least the minimum clip length.  A clip the pipeline already left a little outside
-    its shot, or under the minimum, is tolerated as it is: its edges may move back in and it may grow, but nothing may get worse.  A new
-    clip (``new``) is held to the rules strictly.  Only an edge that moves is written."""
+    The range must lie inside the clip's shot (``EditContext.shot_frames``, so M2a's export never moves a point an operation placed), and be
+    at least the minimum clip length.  A clip the pipeline already left a little outside its shot, or under the minimum, is tolerated as
+    it is: an edge that stays where it was may stay outside, an edge that moves must land inside the shot, and the clip may grow but not
+    shrink further.  A new clip (``new``) is held to the rules strictly.  Only an edge that moves is written."""
     if not ctx.has_shot(c.shot_index):
         raise Refused(f"{c.id}: no shot {c.shot_index}")
     lo, hi = ctx.shot_frames(c.shot_index)
     old_in, old_out = (in_f, out_f) if new else _frames(ctx, c)
-    if in_f < (lo if new else min(lo, old_in)) or out_f > (hi if new else max(hi, old_out)):
+    for edge, frame, was, bad in (("in", in_f, old_in, in_f < lo), ("out", out_f, old_out, out_f > hi)):
+        if bad and not new and frame != was and (was < lo if edge == "in" else was > hi) and \
+                (frame > was if edge == "in" else frame < was):
+            raise Refused(f"{c.id}'s {edge}-point would still lie outside shot {c.shot_index} at frame {frame} (the shot is frames {lo}-{hi}): "
+                          f"an edge that moves must land inside it, at frame {lo if edge == 'in' else hi} or {'later' if edge == 'in' else 'earlier'}")
+    if (in_f < lo and (new or in_f != old_in)) or (out_f > hi and (new or out_f != old_out)):
         raise Refused(f"{c.id} would leave shot {c.shot_index} (frames {in_f}-{out_f}; the shot is frames {lo}-{hi})")
     if out_f <= in_f:
         raise Refused(f"{c.id} would have no frames ({in_f}-{out_f})")
@@ -286,7 +294,7 @@ def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext, reserved: Abstr
     """Put footage of another shot in a clip's place: ``frames`` long (default: the same length), from ``in_frame`` (default: the middle of
     the shot).  The new clip keeps the old one's incoming transition and story beat."""
     old = find_clip(tl, _ref(op, "clip"))
-    shot = whole(op, "shot")
+    shot = whole(op, "shot", limit=MAX_SHOT, unit="(a shot index)")
     _unlocked(old, "in", "out")
     if not ctx.has_shot(shot):
         raise Refused(f"no shot {shot}")
@@ -311,7 +319,7 @@ def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext, reserved: Abstr
 def _insert(tl: Timeline, op: Dict[str, Any], ctx: EditContext, reserved: AbstractSet[str] = frozenset()) -> Tuple[Set[str], str]:
     """A new clip of ``shot`` (frames ``in_frame``-``out_frame``) before or after a clip, with a cut.  The clip that follows it keeps its own
     incoming transition."""
-    shot, i, o = whole(op, "shot"), whole(op, "in_frame"), whole(op, "out_frame")
+    shot, i, o = whole(op, "shot", limit=MAX_SHOT, unit="(a shot index)"), whole(op, "in_frame"), whole(op, "out_frame")
     side, anchor = _where(tl, op)
     new = _new_clip(tl, ctx, shot, i, o, anchor.beat_id, "inserted", reserved)
     _put(tl, new, side, anchor)

@@ -158,7 +158,7 @@ def test_normalise_gives_exactly_the_frames_layout_gives_even_at_a_shot_end_off_
     out, notes = S.normalise(tl, ctx)
     assert [(r.in_f, r.out_f, r.tr) for r in frame_rows(out, ctx.rate)] == [(r.in_f, r.out_f, r.tr) for r in layout(tl, ctx.rate)]
     assert [(ctx.f(c.source_in), ctx.f(c.source_out)) for c in out.clips] == [(0, 50), (50, 75)]
-    assert ctx.shot_frames(0) == (0, 50)
+    assert ctx.shot_frames(0) == (1, 49)  # what an operation may place; r000's 0 and 50 are the base's own (tolerated) excess
     assert out.clips[0].origin == "0@0.012-1.985" and tl.clips[0].origin == ""  # the input is not changed
     assert notes == ["c001: in 0.012 s -> frame 0 (-0.30f), out 1.985 s -> frame 50 (+0.38f)",
                      "c002: incoming dissolve 0.1 s (2.50f) -> 3 frames"]
@@ -706,7 +706,7 @@ def test_r000_keeps_a_pinned_out_point_at_an_off_grid_shot_end_on_layouts_frame(
     s = S.load(w)
     ctx, base, r0 = s.context(), Timeline.load(w / "final.json"), s.timeline("r000")
     assert [(r.in_f, r.out_f, r.tr) for r in frame_rows(r0, ctx.rate)] == [(r.in_f, r.out_f, r.tr) for r in layout(base, ctx.rate)]
-    assert frame_rows(r0, ctx.rate)[0].out_f == 61 and ctx.shot_frames(0) == (0, 61)
+    assert frame_rows(r0, ctx.rate)[0].out_f == 61 and ctx.shot_frames(0) == (0, 60)  # 61: the base's own excess, tolerated
     assert [p.key for p, _ in held_pins(r0, ctx)] == [p.key for p, _ in held_pins(base, ctx)] == [(0, 1)]
     assert any(n.startswith("c001: out") and "pin s0->s1" in n for n in out["normalised"])
     for ops in ([{"op": "remove", "clip": "c002"}], [{"op": "insert", "shot": 7, "in_frame": 710, "out_frame": 760, "after": "c001"}],
@@ -811,3 +811,43 @@ def test_notes_say_one_frame_not_one_frames():
     tl = Timeline(source="s.mp4", fps=25.0)
     tl.clips = [Clip("c001", 0, 0.0, 2.0), Clip("c002", 1, 4.0, 6.0, transition_in=Transition("dip_to_black", 0.05))]
     assert S.normalise(tl, ctx)[1] == ["c002: incoming dip_to_black 0.05 s (1.25f) -> 1 frame"]
+
+
+@pytest.mark.parametrize("edit", ["parent", "ops", "changes", "proposal", "remove_hash"])
+def test_a_revision_whose_parent_ops_or_reports_were_changed_is_refused(ws, edit):
+    """The whole revision document but its time is hashed (document_sha256): a hand-edited parent or operations is refused, and log
+    shows the revision as an error entry; a changed time alone is accepted."""
+    S.apply(ws, S.propose(ws, TRIM)["proposal"])
+    path = ws / "edits" / "revisions" / "r001.json"
+    original = json.loads(path.read_text())
+    assert original["document_sha256"] == S.document_sha256(original)
+    doc = dict(original)
+    if edit == "remove_hash":
+        del doc["document_sha256"]
+    else:
+        doc[edit] = {"parent": None, "ops": [{"op": "remove", "clip": "c001"}], "changes": [], "proposal": "0123456789ab"}[edit]
+    path.write_text(json.dumps(doc))
+    before = tree(ws)
+    with pytest.raises(S.SessionError, match="revision r001 was changed after it was written"):
+        S.undo(ws)
+    assert tree(ws) == before
+    assert "error" in S.log(ws)["revisions"][1]
+    path.write_text(json.dumps(dict(original, created="2000-01-01T00:00:00+00:00")))  # the time is not covered
+    assert S.undo(ws)["head"] == "r000"
+
+
+@pytest.mark.parametrize("ops,guards,match", [
+    ([{"op": "trim", "clip": "c002", "edge": "out", "frames": -10 ** 12}], None,
+     "frames is out of range: at most 1000000000 frames either way, not -10000000000"),
+    ([{"op": "trim", "clip": "c002", "edge": "out", "frames": 1e300}], None, "frames is out of range: at most 1000000000 frames either way, not 1e\\+300"),
+    ([{"op": "replace", "clip": "c002", "shot": 10 ** 8}], None, "shot is out of range: at most 1000000 \\(a shot index\\) either way"),
+    ([{"op": "insert", "shot": -10 ** 8, "in_frame": 0, "out_frame": 30, "after": "c001"}], None, "shot is out of range"),
+    (TRIM, {"max_duration_change_frames": 10 ** 400}, "guard max_duration_change_frames must be a whole number of frames from 0 to 1000000000, "
+                                                      "not 10000000000000000000\\.\\.\\."),
+])
+def test_out_of_range_numbers_are_refused_in_plain_words(ws, ops, guards, match):
+    before = tree(ws)
+    with pytest.raises(Refused, match=match) as err:
+        S.propose(ws, ops, guards)
+    assert "-more" not in str(err.value) and len(str(err.value)) < 300
+    assert tree(ws) == before
