@@ -1,0 +1,457 @@
+"""The nine edit operations: pure, frame-native functions of a timeline and one operation.
+
+Every operation works on a copy of the timeline (``apply_op`` never changes its input) and either returns the new timeline, the ids of the
+clips it changed (``touched``) and one line saying what it did, or raises ``Refused`` with one line saying why not.  Counts are whole
+frames at the source's exact rate; points are stored with ``EditContext.s``.
+
+Addressing:
+- a clip by its id (stable for a session: new clips are ``e<n>``, nothing is renumbered) or its instance key (``clip_origin``);
+- a junction (the cut between clips i and i+1) by its 1-based number or its id (``s1-s3``; a repeated shot pair ``s1-s3#2``).
+
+Each operation checks what it can see locally: locked edges (an editor pin or a match cut), shot bounds, the minimum clip length (a clip the
+pipeline left under it may grow, never shrink further), and, for ``set_transition``, the transition rules.  The proposal-wide rules
+(``rules.problems``) check the whole result, whichever operation caused a change.
+"""
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from fractions import Fraction
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+
+from matchcut.interchange.common import junction_ids
+from matchcut.pipeline.editorial import Pin, pin_outcome, pin_site
+from matchcut.pipeline.passes import is_match_cut
+from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, Transition, clip_origin
+
+from .model import EditContext, Refused, frame_rows
+
+OPS = ("trim", "roll", "slip", "replace", "insert", "remove", "move", "set_transition", "snap_to_beat")
+
+# the arguments each operation takes (besides "op"); anything else is refused, so a misspelt optional argument is never silently ignored
+ARGS: Dict[str, Tuple[str, ...]] = {
+    "trim": ("clip", "edge", "frames"),
+    "roll": ("junction", "frames"),
+    "slip": ("clip", "frames"),
+    "replace": ("clip", "shot", "in_frame", "frames"),
+    "insert": ("shot", "in_frame", "out_frame", "before", "after"),
+    "remove": ("clip",),
+    "move": ("clip", "before", "after"),
+    "set_transition": ("junction", "kind", "frames"),
+    "snap_to_beat": ("junction", "mode", "window_s"),
+}
+
+_REQUIRED = object()
+
+
+@dataclass(frozen=True)
+class OpResult:
+    timeline: Timeline
+    touched: FrozenSet[str]  # ids of the clips the operation changed, added or removed
+    detail: str  # one line
+
+
+@dataclass(frozen=True)
+class OpsResult:
+    timeline: Timeline
+    touched: FrozenSet[str]
+    details: Tuple[str, ...]  # one line per operation
+
+
+# ----------------------------------------------------------------------------------------------- arguments and addressing
+def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED) -> int:
+    """A whole-number argument: an int, or a float with no fraction.  A bool, a fractional or non-numeric value is refused, never
+    truncated; a missing one is refused unless there is a ``default``."""
+    if key not in op:
+        if default is _REQUIRED:
+            raise Refused(f"{op.get('op', 'the operation')} needs {key}")
+        return default
+    v = op[key]
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise Refused(f"{key} must be a whole number, not {v!r}")
+    if isinstance(v, float) and not (math.isfinite(v) and v.is_integer()):
+        raise Refused(f"{key} must be a whole number, not {v!r}")
+    return int(v)
+
+
+def _ref(op: Dict[str, Any], key: str) -> Any:
+    if key not in op or op[key] is None:
+        raise Refused(f"{op.get('op', 'the operation')} needs {key}")
+    return op[key]
+
+
+def find_clip(tl: Timeline, ref: Any) -> Clip:
+    """The clip whose id is ``ref``, else the one clip whose ``clip_origin`` is ``ref``; Refused when there is none or more than one."""
+    if not isinstance(ref, str) or not ref:
+        raise Refused(f"a clip is named by its id or its key (a string), not {ref!r}")
+    hits = [c for c in tl.clips if c.id == ref] or [c for c in tl.clips if clip_origin(c) == ref]
+    if not hits:
+        raise Refused(f"no clip {ref}")
+    if len(hits) > 1:
+        raise Refused(f"clip {ref} is ambiguous ({', '.join(c.id for c in hits)}): name it by its id")
+    return hits[0]
+
+
+def find_junction(tl: Timeline, ref: Any) -> int:
+    """The 0-based index i of the cut between clips i and i+1, from a 1-based number (an int or a digit string) or a junction id
+    (``s1-s3``, ``s1-s3#2`` as ``junction_ids`` gives them); Refused when there is no such junction."""
+    n = len(tl.clips) - 1
+    if isinstance(ref, bool):
+        raise Refused(f"a junction is named by its number or its id, not {ref!r}")
+    if isinstance(ref, int) or (isinstance(ref, str) and ref.isdigit()):
+        k = int(ref)
+        if not 1 <= k <= n:
+            raise Refused(f"no junction {k}: this cut has {n} junction{'s' if n != 1 else ''}" + (f" (1..{n})" if n > 0 else ""))
+        return k - 1
+    if not isinstance(ref, str):
+        raise Refused(f"a junction is named by its number or its id, not {ref!r}")
+    ids = junction_ids(tl)
+    if ref in ids:
+        return ids.index(ref)
+    shown = ", ".join(ids[:12]) + (", ..." if len(ids) > 12 else "")
+    raise Refused(f"no junction {ref} (junctions: {shown or 'none'})")
+
+
+# ----------------------------------------------------------------------------------------------- locks and pins
+def lock_reason(c: Clip, edge: str) -> str:
+    """Why the ``edge`` ("in" / "out") of ``c`` may not move, in one line, or "" when it may."""
+    if not (c.locked_in if edge == "in" else c.locked_out):
+        return ""
+    if any(t.startswith("match_in:" if edge == "in" else "match_out:") for t in c.tags):
+        return f"the {edge}-point of {c.id} is held by a match cut"
+    if "pinned" in c.tags:
+        return f"the {edge}-point of {c.id} is held by an editor pin"
+    return f"the {edge}-point of {c.id} is locked"
+
+
+def _unlocked(c: Clip, *edges: str) -> None:
+    for edge in edges:
+        why = lock_reason(c, edge)
+        if why:
+            raise Refused(why)
+
+
+def held_pins(tl: Timeline, ctx: EditContext) -> List[Tuple[Pin, int]]:
+    """The editor pins ``tl`` holds (``pin_outcome`` on the human stage's terms: the pin was applied and the cut still keeps its clip
+    instances, their adjacency and both cut points), each with its junction index (``pin_site``)."""
+    out: List[Tuple[Pin, int]] = []
+    for pin in ctx.pins:
+        d = pin_outcome(tl, pin, HUMAN_STAGE)
+        if d is not None and d.action == "pinned":
+            site = pin_site(tl, pin)
+            if site is not None:
+                out.append((pin, site))
+    return out
+
+
+def pin_label(pin: Pin) -> str:
+    return f"s{pin.out_shot}->s{pin.in_shot}"
+
+
+# ----------------------------------------------------------------------------------------------- helpers
+def _frames(ctx: EditContext, c: Clip) -> Tuple[int, int]:
+    return ctx.f(c.source_in), ctx.f(c.source_out)
+
+
+def _set(ctx: EditContext, c: Clip, in_f: int, out_f: int, new: bool = False) -> None:
+    """Give ``c`` the frames ``in_f``-``out_f``.
+
+    The range must lie inside the clip's shot, and be at least the minimum clip length.  A clip the pipeline already left a little outside
+    its shot, or under the minimum, is tolerated as it is: its edges may move back in and it may grow, but nothing may get worse.  A new
+    clip (``new``) is held to the rules strictly.  Only an edge that moves is written."""
+    if not ctx.has_shot(c.shot_index):
+        raise Refused(f"{c.id}: no shot {c.shot_index}")
+    lo, hi = ctx.shot_frames(c.shot_index)
+    old_in, old_out = (in_f, out_f) if new else _frames(ctx, c)
+    if in_f < (lo if new else min(lo, old_in)) or out_f > (hi if new else max(hi, old_out)):
+        raise Refused(f"{c.id} would leave shot {c.shot_index} (frames {in_f}-{out_f}; the shot is frames {lo}-{hi})")
+    if out_f <= in_f:
+        raise Refused(f"{c.id} would have no frames ({in_f}-{out_f})")
+    floor = ctx.min_frames if new else min(ctx.min_frames, old_out - old_in)
+    if out_f - in_f < floor:
+        raise Refused(f"{c.id} would be {out_f - in_f} frames, below the minimum clip length ({ctx.min_frames} frames)")
+    if new or in_f != old_in:
+        c.source_in = ctx.s(in_f)
+    if new or out_f != old_out:
+        c.source_out = ctx.s(out_f)
+
+
+def new_clip_id(tl: Timeline) -> str:
+    """The first ``e<n>`` (``e001``, ``e002`` ...) that no clip of ``tl`` has, and that no decision of its history names: an id a session
+    once gave a clip is not given again on the same line of revisions while its history records it."""
+    taken = {c.id for c in tl.clips}
+    for d in tl.history:
+        taken.update(d.clip_ids)
+    n = 1
+    while f"e{n:03d}" in taken:
+        n += 1
+    return f"e{n:03d}"
+
+
+def _new_clip(tl: Timeline, ctx: EditContext, shot: int, in_f: int, out_f: int, beat_id: str, purpose: str) -> Clip:
+    if not ctx.has_shot(shot):
+        raise Refused(f"no shot {shot}")
+    c = Clip(id=new_clip_id(tl), shot_index=shot, source_in=0.0, source_out=0.0, beat_id=beat_id, purpose=purpose)
+    _set(ctx, c, in_f, out_f, new=True)
+    key = f"edit:{shot}@{in_f}-{out_f}"
+    taken = {clip_origin(x) for x in tl.clips}
+    origin, k = key, 2
+    while origin in taken:
+        origin, k = f"{key}#{k}", k + 1
+    c.origin = origin
+    return c
+
+
+def _where(tl: Timeline, op: Dict[str, Any]) -> Tuple[str, Clip]:
+    """("before" | "after", the anchor clip) from exactly one of the two arguments."""
+    given = [k for k in ("before", "after") if op.get(k) is not None]
+    if len(given) != 1:
+        raise Refused(f"{op.get('op')} needs exactly one of before / after (a clip)")
+    return given[0], find_clip(tl, op[given[0]])
+
+
+def _put(tl: Timeline, c: Clip, side: str, anchor: Clip) -> None:
+    k = tl.clips.index(anchor)
+    tl.clips.insert(k + (1 if side == "after" else 0), c)
+
+
+def _first_is_cut(tl: Timeline) -> Set[str]:
+    """The first clip of a cut has no incoming transition: one a reorder left there becomes a cut.  The ids this changed."""
+    if tl.clips and tl.clips[0].transition_in != Transition():
+        tl.clips[0].transition_in = Transition()
+        return {tl.clips[0].id}
+    return set()
+
+
+def _label(kind: str, frames: int) -> str:
+    return "cut" if not frames else f"{kind} {frames}f"
+
+
+def transition_limit(ctx: EditContext, a_frames: int, b_frames: int) -> Fraction:
+    """The longest transition (in frames, exact) allowed between clips of these lengths: ``max_fraction_of_clip`` of the shorter."""
+    return ctx.max_fraction * min(a_frames, b_frames)
+
+
+# ----------------------------------------------------------------------------------------------- the operations
+# each edits ``tl`` (a copy) in place and returns (ids of the clips it changed, one line), or raises Refused
+
+def _trim(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Move one edge of a clip by ``frames`` (positive = later in the source); later clips ripple."""
+    c = find_clip(tl, _ref(op, "clip"))
+    edge = _ref(op, "edge")
+    if edge not in ("in", "out"):
+        raise Refused(f"edge must be in or out, not {edge!r}")
+    n = whole(op, "frames")
+    _unlocked(c, edge)
+    i, o = _frames(ctx, c)
+    _set(ctx, c, i + n if edge == "in" else i, o + n if edge == "out" else o)
+    return {c.id}, f"trim {c.id} {edge} {n:+d}f"
+
+
+def _roll(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Move a cut point by ``frames``: the outgoing clip's out-point and the incoming clip's in-point together; nothing ripples."""
+    j = find_junction(tl, _ref(op, "junction"))
+    n = whole(op, "frames")
+    a, b = tl.clips[j], tl.clips[j + 1]
+    _unlocked(a, "out")
+    _unlocked(b, "in")
+    ai, ao = _frames(ctx, a)
+    bi, bo = _frames(ctx, b)
+    _set(ctx, a, ai, ao + n)
+    _set(ctx, b, bi + n, bo)
+    return {a.id, b.id}, f"roll junction {j + 1} ({a.id}|{b.id}) {n:+d}f"
+
+
+def _slip(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Show other frames of the same shot for the same length: both edges move by ``frames``."""
+    c = find_clip(tl, _ref(op, "clip"))
+    n = whole(op, "frames")
+    _unlocked(c, "in", "out")
+    i, o = _frames(ctx, c)
+    _set(ctx, c, i + n, o + n)
+    return {c.id}, f"slip {c.id} {n:+d}f"
+
+
+def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Put footage of another shot in a clip's place: ``frames`` long (default: the same length), from ``in_frame`` (default: the middle of
+    the shot).  The new clip keeps the old one's incoming transition and story beat."""
+    old = find_clip(tl, _ref(op, "clip"))
+    shot = whole(op, "shot")
+    _unlocked(old, "in", "out")
+    if not ctx.has_shot(shot):
+        raise Refused(f"no shot {shot}")
+    oi, oo = _frames(ctx, old)
+    length = whole(op, "frames", oo - oi)
+    if length < 1:
+        raise Refused(f"frames must be at least 1, not {length}")
+    lo, hi = ctx.shot_frames(shot)
+    if "in_frame" in op:
+        start = whole(op, "in_frame")
+    else:
+        if hi - lo < length:
+            raise Refused(f"shot {shot} has {hi - lo} frames, fewer than the {length} needed")
+        start = lo + (hi - lo - length) // 2
+    new = _new_clip(tl, ctx, shot, start, start + length, old.beat_id, f"replaces {old.id}")
+    new.transition_in = Transition(old.transition_in.kind, old.transition_in.duration)
+    tl.clips[tl.clips.index(old)] = new
+    touched = {old.id, new.id} | _first_is_cut(tl)
+    return touched, f"replace {old.id} (shot {old.shot_index}) with {new.id} (shot {shot}, frames {start}-{start + length})"
+
+
+def _insert(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """A new clip of ``shot`` (frames ``in_frame``-``out_frame``) before or after a clip, with a cut.  The clip that follows it keeps its own
+    incoming transition."""
+    shot, i, o = whole(op, "shot"), whole(op, "in_frame"), whole(op, "out_frame")
+    side, anchor = _where(tl, op)
+    new = _new_clip(tl, ctx, shot, i, o, anchor.beat_id, "inserted")
+    _put(tl, new, side, anchor)
+    return {new.id} | _first_is_cut(tl), f"insert {new.id} (shot {shot}, frames {i}-{o}) {side} {anchor.id}"
+
+
+def _remove(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Take a clip out; later clips ripple.  The clip that followed it keeps its own incoming transition."""
+    c = find_clip(tl, _ref(op, "clip"))
+    if len(tl.clips) <= 1:
+        raise Refused("cannot remove the only clip")
+    tl.clips.remove(c)
+    return {c.id} | _first_is_cut(tl), f"remove {c.id} (shot {c.shot_index})"
+
+
+def _move(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Move a clip before or after another; it keeps its incoming transition (a cut when it becomes the first clip)."""
+    c = find_clip(tl, _ref(op, "clip"))
+    side, anchor = _where(tl, op)
+    if anchor is c:
+        raise Refused(f"cannot move {c.id} {side} itself")
+    order = [x.id for x in tl.clips]
+    tl.clips.remove(c)
+    _put(tl, c, side, anchor)
+    same = [x.id for x in tl.clips] == order
+    return {c.id} | _first_is_cut(tl), f"move {c.id} {side} {anchor.id}" + (" (it is there already)" if same else "")
+
+
+def _set_transition(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Make a junction a cut, or a dissolve / dip to black of ``frames``.  A match cut stays a hard cut; a transition an editor pin protects
+    (``hold_transition``) stays; the length is at most ``max_fraction_of_clip`` of the shorter clip (one already over it may only get
+    shorter)."""
+    j = find_junction(tl, _ref(op, "junction"))
+    kind = _ref(op, "kind")
+    if kind not in TRANSITION_KINDS:
+        raise Refused(f"unknown transition {kind!r} (one of: {', '.join(TRANSITION_KINDS)})")
+    if kind == "cut":
+        n = whole(op, "frames", 0)
+        if n:
+            raise Refused(f"a cut has no frames (frames {n})")
+    else:
+        n = whole(op, "frames")
+        if n < 1:
+            raise Refused(f"a {kind} needs at least 1 frame, not {n}")
+    a, b = tl.clips[j], tl.clips[j + 1]
+    rows = frame_rows(tl, ctx.rate)
+    cur = (rows[j + 1].kind, rows[j + 1].tr)
+    new = (kind if n else "cut", n)
+    if new == cur:
+        return set(), f"junction {j + 1} ({a.id}|{b.id}) is already {_label(*cur)}"
+    if n and is_match_cut(a, b):
+        raise Refused(f"junction {j + 1} ({a.id}|{b.id}) is a match cut: match cuts stay hard cuts")
+    for pin, site in held_pins(tl, ctx):
+        if site == j and pin.hold_transition:
+            raise Refused(f"the transition at junction {j + 1} ({a.id}|{b.id}) is protected by the editor pin {pin_label(pin)}")
+    limit = transition_limit(ctx, rows[j].length, rows[j + 1].length)
+    if n > limit and n > cur[1]:
+        raise Refused(f"a {n}-frame {kind} at junction {j + 1} ({a.id}|{b.id}) is longer than {float(ctx.max_fraction):.0%} of the shorter clip "
+                      f"({math.floor(limit)} frames)")
+    b.transition_in = Transition(kind, ctx.s(n)) if n else Transition()
+    return {b.id}, f"junction {j + 1} ({a.id}|{b.id}): {_label(*cur)} -> {_label(*new)}"
+
+
+def beat_frame(beat: float, ctx: EditContext) -> int:
+    """The record frame a music beat (seconds into the track) falls on: the frame grid's nearest frame to ``beat - music_start``.  A junction
+    is on the beat when its record frame is this frame; snapping puts it there, so a snapped junction is on its beat and stays put."""
+    return ctx.f(beat - ctx.music_start)
+
+
+def beat_target(tl: Timeline, j: int, ctx: EditContext, window: Optional[float] = None) -> Tuple[Optional[float], bool, int]:
+    """(the beat junction ``j`` would snap to, in seconds of the track, or None; whether it is a downbeat; the junction's record frame).
+
+    As the beat-sync pass: at a story-beat change, with ``prefer_downbeats``, the nearest downbeat within the window wins; otherwise the
+    nearest beat within the window."""
+    rec = frame_rows(tl, ctx.rate)[j + 1].rec
+    music = ctx.music
+    if music is None:
+        return None, False, rec
+    window = ctx.snap_window if window is None else window
+    track_t = float(Fraction(rec) / ctx.rate) + ctx.music_start
+    if ctx.prefer_downbeats and tl.clips[j].beat_id != tl.clips[j + 1].beat_id:
+        db = music.nearest_beat(track_t, downbeats=True)
+        if db is not None and abs(db - track_t) <= window + 1e-9:
+            return db, True, rec
+    b = music.nearest_beat(track_t)
+    if b is not None and abs(b - track_t) <= window + 1e-9:
+        return b, False, rec
+    return None, False, rec
+
+
+def _snap_to_beat(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+    """Put a junction on the nearest music beat within ``window_s`` (default ``music.snap_window``): by a roll (default; nothing else moves)
+    or, with ``mode: ripple``, by trimming the outgoing clip's out-point (later clips ripple)."""
+    if ctx.music is None:
+        raise Refused("this workspace has no music track")
+    j = find_junction(tl, _ref(op, "junction"))
+    mode = op.get("mode", "roll")
+    if mode not in ("roll", "ripple"):
+        raise Refused(f"mode must be roll or ripple, not {mode!r}")
+    window = op.get("window_s", ctx.snap_window)
+    if isinstance(window, bool) or not isinstance(window, (int, float)) or not math.isfinite(window) or window < 0:
+        raise Refused(f"window_s must be a number of seconds, not {window!r}")
+    target, downbeat, rec = beat_target(tl, j, ctx, float(window))
+    what = "downbeat" if downbeat else "beat"
+    if target is None:
+        raise Refused(f"no beat within {float(window):.2f}s of junction {j + 1}")
+    n = beat_frame(target, ctx) - rec
+    a, b = tl.clips[j], tl.clips[j + 1]
+    if n == 0:
+        return set(), f"junction {j + 1} ({a.id}|{b.id}) is already on the {what} at {target:.3f}s"
+    if mode == "roll":
+        ids, _ = _roll(tl, {"op": "roll", "junction": j + 1, "frames": n}, ctx)
+    else:
+        ids, _ = _trim(tl, {"op": "trim", "clip": a.id, "edge": "out", "frames": n}, ctx)
+    return ids, f"junction {j + 1} ({a.id}|{b.id}) {n:+d}f onto the {what} at {target:.3f}s ({mode})"
+
+
+_OPS: Dict[str, Callable[[Timeline, Dict[str, Any], EditContext], Tuple[Set[str], str]]] = {
+    "trim": _trim, "roll": _roll, "slip": _slip, "replace": _replace, "insert": _insert, "remove": _remove, "move": _move,
+    "set_transition": _set_transition, "snap_to_beat": _snap_to_beat,
+}
+
+
+def apply_op(tl: Timeline, op: Any, ctx: EditContext) -> OpResult:
+    """Apply one operation to a copy of ``tl``; ``tl`` is never changed.  Raises ``Refused`` (one line) when it cannot be applied."""
+    if not isinstance(op, dict):
+        raise Refused(f"an operation is an object with an \"op\", not {op!r}")
+    name = op.get("op")
+    if name not in _OPS:
+        raise Refused(f"unknown op {name!r} (one of: {', '.join(OPS)})")
+    extra = sorted(str(k) for k in op if k != "op" and k not in ARGS[name])
+    if extra:
+        raise Refused(f"{name} does not take {', '.join(extra)} (it takes {', '.join(ARGS[name])})")
+    out = tl.copy()
+    touched, detail = _OPS[name](out, op, ctx)
+    return OpResult(out, frozenset(touched), detail)
+
+
+def apply_ops(tl: Timeline, ops: Sequence[Any], ctx: EditContext) -> OpsResult:
+    """Apply ``ops`` in order to a copy of ``tl``, all or nothing: the first refusal is raised with its position (``Refused.index``) and
+    nothing is returned.  The touched ids are the union over the operations."""
+    if isinstance(ops, (str, bytes, dict)) or not isinstance(ops, Sequence):
+        raise Refused("ops must be a list of operations")
+    cur, touched, details = tl, set(), []  # type: Timeline, Set[str], List[str]
+    for k, op in enumerate(ops):
+        try:
+            res = apply_op(cur, op, ctx)
+        except Refused as exc:
+            name = op.get("op") if isinstance(op, dict) else None
+            raise Refused(f"op {k + 1}{f' ({name})' if isinstance(name, str) else ''}: {exc}", k) from None
+        cur, details = res.timeline, details + [res.detail]
+        touched |= res.touched
+    return OpsResult(cur if cur is not tl else tl.copy(), frozenset(touched), tuple(details))

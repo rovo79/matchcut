@@ -38,18 +38,35 @@ class Pin:
     note: str = ""
     out_origin: str = ""  # clip_origin of the outgoing / incoming clip when the pin was taken; "" for pins that predate it
     in_origin: str = ""
+    # The junction's transition is protected too (set by the edit CLI): ``held_transition`` is {"kind", "frames"}.  Only the edit
+    # package (``matchcut.edit``) honours it; the pipeline engine ignores it.  Pins without it are unprotected.
+    hold_transition: bool = False
+    held_transition: Optional[dict] = None
 
     @property
     def key(self) -> Tuple[int, int]:
         return (self.out_shot, self.in_shot)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not self.hold_transition and self.held_transition is None:  # an unprotected pin is written as before the fields existed
+            del d["hold_transition"], d["held_transition"]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Pin":
         return cls(int(d["out_shot"]), int(d["in_shot"]), float(d["out_time"]), float(d["in_time"]), str(d.get("origin", "locked")), str(d.get("note", "")),
-                   str(d.get("out_origin", "")), str(d.get("in_origin", "")))
+                   str(d.get("out_origin", "")), str(d.get("in_origin", "")), d.get("hold_transition") is True, _held(d.get("held_transition")))
+
+
+def _held(value: object) -> Optional[dict]:
+    """A stored ``held_transition`` as {"kind": str, "frames": int}; None when absent or malformed (the pin itself is kept)."""
+    if not isinstance(value, dict):
+        return None
+    frames = value.get("frames", 0)
+    if isinstance(frames, bool) or not isinstance(frames, int):
+        return None
+    return {"kind": str(value.get("kind", "cut")), "frames": frames}
 
 
 class PinStore:
