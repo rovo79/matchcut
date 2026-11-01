@@ -150,8 +150,8 @@ Each clip reads the source through its own ffmpeg input:
   - **Rounding that changes the cut** (a transition that rounds to no frame, or one as long as a clip) is recorded in the history.
   - **Workspaces saved before** are not rewritten; they render and export the same frames anyway.
     - Their `final.edl` keeps the old numbers until the passes run again.
-    - Running the passes again rewrites `final.json` (for example 0.75 s → 0.72 s). That marks an imported `human.json` as stale even
-      though its frames are the same.
+    - Running the passes again rewrites `final.json` (for example 0.75 s → 0.72 s). That marks an imported `human.json` (and a
+      published `edit.json`) as stale even though its frames are the same.
 - **Audio length:** at the end of the chain the audio's timestamps are renumbered from its samples, then it is padded or cut to the
   video's length.
   - Mixing and ducking can end it early.
@@ -268,6 +268,11 @@ clips, shots do not. `out_time` and `in_time` are source seconds. `origin` is
 the points of the first cut). `out_origin` / `in_origin` name the two clip
 instances the pin was taken on (see below; `""` in older files). A malformed entry is skipped and logged; a
 missing or corrupt file means no pins.
+
+A pin may also carry `hold_transition: true` and the `held_transition` it holds (`{"kind", "frames"}`), set and cleared by the edit
+CLI's `pin_transition` ([EDIT.md](EDIT.md#pins-and-pin_transition)); pins without them are unprotected, and the TUI's `l`/`r` keys
+make unprotected pins. **The pipeline ignores these fields**: a run treats a protected pin like any other pin and may change the
+transition at its junction; only an edit session refuses a proposal that changes it.
 
 How a pin takes effect:
 
@@ -463,7 +468,13 @@ read back to its stage. `exports/provenance.json` keeps the decisions behind the
 files carry. `import` writes `human.json`, a stage listed after `final` whose history holds one `human`
 decision per change (trim, transition, removed, added, reorder), and never modifies a canonical stage file;
 `junctions` and the Edit view show it. If the pipeline runs again, a `human.json` that no longer fits is
-left out and reported (never deleted). `--resolve-script` also writes `open_in_resolve.py` for Resolve
+left out and reported (never deleted).
+
+An agent (or a person at a shell) can also edit a cut through `python -m matchcut.edit` (the JSON CLI: [EDIT.md](EDIT.md)) and
+publish it as the `edit` stage, `edit.json`. The stage order is: the canonical stages (`roughcut`, the passes, `final`), then `edit` while
+it is fresh, then `human` while it is fresh; `junctions`, the Edit view, the review package and the exports list `edit` like any stage
+(`python -m matchcut.pipeline.cli export WORKSPACE --stage edit`; it is never exported by default). A pipeline re-run makes a published `edit.json` stale: it is left out and
+reported, never deleted. `--resolve-script` also writes `open_in_resolve.py` for Resolve
 Studio; matchcut never runs it. Everything about the formats, their limits and Resolve is in
 [INTEROP.md](INTEROP.md); what is verified and what still needs a human with an editor is in
 [M2A-ACCEPTANCE.md](M2A-ACCEPTANCE.md). The `final.edl` that `run` writes in the workspace is the older delivery
