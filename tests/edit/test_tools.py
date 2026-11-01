@@ -51,7 +51,8 @@ def test_proposal_ids(value, ok):
     assert (T.validate(value, T.PROPOSAL) == []) is ok
 
 
-@pytest.mark.parametrize("value, ok", [(1, True), ("3", True), ("s1-s3", True), ("s1-s3#2", True), (0, False), (-1, False), (1.5, False),
+@pytest.mark.parametrize("value, ok", [(1, True), (2.0, True), ("3", True), ("123456789", True), ("0", False), ("012", False),
+                                       ("1234567890", False), ("s1-s3", True), ("s1-s3#2", True), (0, False), (-1, False), (1.5, False),
                                        (True, False), ("s1->s3", False), ("../s1-s3", False), (None, False)])
 def test_junctions(value, ok):
     assert (T.validate(value, T.JUNCTION) == []) is ok
@@ -114,3 +115,21 @@ def test_the_engine_and_the_review_never_import_the_edit_package():
     for path in list((repo / "matchcut" / "pipeline").rglob("*.py")) + list((repo / "matchcut" / "review").rglob("*.py")):
         text = path.read_text()
         assert "matchcut.edit import" not in text and "import matchcut.edit" not in text and "from ..edit" not in text, path
+
+
+def test_schema_and_operations_agree_on_integral_float_junctions(make_ws):
+    """Review fix: {"junction": 2.0} passed the schema and was refused by find_junction."""
+    from matchcut.edit.ops import find_junction
+    w = make_ws()
+    S.start(w)
+    tl = S.load(w).timeline()
+    assert find_junction(tl, 2.0) == 1 and find_junction(tl, "2") == 1
+    for bad in (2.5, float("inf"), float("nan"), 0.0):
+        with pytest.raises(Refused):
+            find_junction(tl, bad)
+    f = T.call(w, "inspect")  # noqa: F841 - the session is readable
+    p = T.call(w, "propose", {"ops": [{"op": "roll", "junction": 3.0, "frames": 2}]})
+    assert p["changes"] == ["c003: out +2f", "c004: in +2f"]
+    assert T.call(w, "propose", {"ops": [{"op": "set_transition", "junction": 4.0, "kind": "dissolve", "frames": 4}]})["proposal"]
+    with pytest.raises(T.ArgumentError, match="junction"):
+        T.call(w, "frames", {"junction": "0"})

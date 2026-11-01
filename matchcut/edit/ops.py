@@ -110,11 +110,13 @@ def find_clip(tl: Timeline, ref: Any) -> Clip:
 
 
 def find_junction(tl: Timeline, ref: Any) -> int:
-    """The 0-based index i of the cut between clips i and i+1, from a 1-based number (an int or a digit string) or a junction id
+    """The 0-based index i of the cut between clips i and i+1, from a 1-based number (an int, an integral float or a digit string) or a junction id
     (``s1-s3``, ``s1-s3#2`` as ``junction_ids`` gives them); Refused when there is no such junction."""
     n = len(tl.clips) - 1
     if isinstance(ref, bool):
         raise Refused(f"a junction is named by its number or its id, not {ref!r}")
+    if isinstance(ref, float) and math.isfinite(ref) and ref.is_integer() and abs(ref) <= MAX_FRAMES:
+        ref = int(ref)  # 2.0 names junction 2, as ``whole`` reads frame counts (JSON Schema's integers include it)
     if isinstance(ref, str) and ref.isascii() and ref.isdigit() and len(ref) > 9:
         raise Refused(f"no junction {ref[:12]}{'...' if len(ref) > 12 else ''}: this cut has {n} junction{'s' if n != 1 else ''}")
     if isinstance(ref, int) or (isinstance(ref, str) and ref.isascii() and ref.isdigit()):

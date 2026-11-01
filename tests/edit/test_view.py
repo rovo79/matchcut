@@ -4,6 +4,9 @@ rendered)."""
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import time
 from fractions import Fraction
 from pathlib import Path
 
@@ -140,10 +143,14 @@ def test_inspect_pins_protections_and_released_pins(make_ws):
 
 
 def test_inspect_shows_a_held_transition_that_differs_from_the_junctions(make_ws):
+    """The protection is taken at r001 (a dissolve of 6); checking out r000 (a cut there) shows the mismatch."""
     w = pinned(make_ws)
     S.start(w)
-    out = V.pin_transition(w, pin="s0->s1", kind="dissolve", frames=6)
-    assert out["transition_mismatch"] and "head revision has a cut" in out["note"]
+    p = S.propose(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}])
+    S.apply(w, p["proposal"])
+    out = V.pin_transition(w, pin="s0->s1")
+    assert out["held_transition"] == {"kind": "dissolve", "frames": 6} and not out["transition_mismatch"]
+    S.checkout(w, "r000")
     d = V.inspect(w)
     p = next(x for x in d["pins"] if x["pin"] == "s0->s1")
     assert p["hold_transition"] and p["held_transition"] == {"kind": "dissolve", "frames": 6} and p["transition"] == {"kind": "cut", "frames": 0}
@@ -152,6 +159,7 @@ def test_inspect_shows_a_held_transition_that_differs_from_the_junctions(make_ws
     assert j["hold_transition"] and j["held_transition"] == {"kind": "dissolve", "frames": 6} and j["transition_mismatch"]
     assert j["protection"][1] == "editor pin s0->s1: its transition stays as it is (cut)"
     assert d["protections"][0]["transition"] and d["protections"][0]["transition_mismatch"]
+    assert not V.inspect(w, "r001")["junctions"][0]["transition_mismatch"]
     V.pin_transition(w, pin="s0->s1")  # the head's transition: no mismatch any more
     assert not V.inspect(w)["junctions"][0]["transition_mismatch"]
 
@@ -210,15 +218,65 @@ def test_pin_transition_sets_and_clears_the_protection_touching_nothing_else(mak
 def test_pin_transition_by_junction_and_explicit_transitions(make_ws):
     w = pinned(make_ws)
     S.start(w)
-    out = V.pin_transition(w, junction="s0-s1", kind="dip_to_black", frames=4)
-    assert out["pin"] == "s0->s1" and out["held_transition"] == {"kind": "dip_to_black", "frames": 4}
-    assert V.pin_transition(w, junction=1, kind="cut")["held_transition"] == {"kind": "cut", "frames": 0}
-    assert V.pin_transition(w, junction=1, kind="dissolve", frames=3.0)["held_transition"] == {"kind": "dissolve", "frames": 3}
+    out = V.pin_transition(w, junction="s0-s1", kind="cut", frames=0)  # explicit, and the head's: allowed
+    assert out["pin"] == "s0->s1" and out["held_transition"] == {"kind": "cut", "frames": 0}
+    assert V.pin_transition(w, junction=1.0, kind="cut")["held_transition"] == {"kind": "cut", "frames": 0}
     with pytest.raises(S.SessionError, match="no editor pin holds junction s1-s3"):
         V.pin_transition(w, junction=2)
     with pytest.raises(S.SessionError, match="pin s3->s6: it is not held in the head revision r000.*give kind and frames"):
         V.pin_transition(w, pin="s3->s6")
-    assert V.pin_transition(w, pin="s3->s6", kind="dissolve", frames=5)["junction"] is None  # an explicit transition: allowed
+    out = V.pin_transition(w, pin="s3->s6", kind="dissolve", frames=5.0)  # not held at the head: an explicit transition is allowed
+    assert out["junction"] is None and out["held_transition"] == {"kind": "dissolve", "frames": 5}
+
+
+def test_pin_transition_refuses_a_transition_the_head_does_not_have_at_a_held_pin(make_ws):
+    """Review fix: the rules keep a protected junction's transition as it is, so holding another one there could never be satisfied."""
+    w = pinned(make_ws)
+    S.start(w)
+    before = (w / "editorial.json").read_bytes()
+    for kind, frames in (("dissolve", 6), ("dip_to_black", 4)):
+        with pytest.raises(S.SessionError, match=r"pin s0->s1 is held at junction s0-s1 of the head revision r000, where the transition is "
+                                                 r"a cut: .*could never be reached there.*Omit kind and frames"):
+            V.pin_transition(w, pin="s0->s1", kind=kind, frames=frames)
+    assert (w / "editorial.json").read_bytes() == before
+    p = S.propose(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}])
+    S.apply(w, p["proposal"])
+    assert V.pin_transition(w, pin="s0->s1", kind="dissolve", frames=6)["held_transition"] == {"kind": "dissolve", "frames": 6}
+
+
+def test_pin_transition_keeps_what_pinstore_does_not_understand(make_ws):
+    """Review fix: a malformed pin entry, unknown top-level keys and unknown pin fields survive a pin_transition (``PinStore.put``
+    dropped them)."""
+    w = pinned(make_ws)
+    S.start(w)
+    raw = editorial(w)
+    raw["pins"].insert(1, {"out_shot": "x", "in_shot": 2})
+    raw["pins"][0]["future_field"] = "keep me"
+    raw["version"] = 3
+    raw["notes"] = "the editor's note"
+    (w / "editorial.json").write_text(json.dumps(raw, indent=2))
+    V.pin_transition(w, pin="s0->s1")
+    after = editorial(w)
+    assert after["version"] == 3 and after["notes"] == "the editor's note" and after["pins"][1] == {"out_shot": "x", "in_shot": 2}
+    assert after["pins"][0] == dict(raw["pins"][0], hold_transition=True, held_transition={"kind": "cut", "frames": 0})
+    assert after["pins"][2:] == raw["pins"][2:]
+    V.pin_transition(w, pin="s0->s1", hold=False)
+    assert editorial(w) == raw
+    assert [pin_label_of(p) for p in PinStore(w).load()] == ["s0->s1", "s5->s6", "s3->s6"]
+
+
+def pin_label_of(p: Pin) -> str:
+    return f"s{p.out_shot}->s{p.in_shot}"
+
+
+def test_pin_transition_lists_only_proposals_it_makes_stale(make_ws):
+    w = pinned(make_ws)
+    S.start(w)
+    old = S.propose(w, TRIM)
+    V.pin_transition(w, pin="s3->s6", kind="dissolve", frames=4)  # old is stale now
+    live = S.propose(w, TRIM)
+    out = V.pin_transition(w, pin="s0->s1")
+    assert out["proposals_to_propose_again"] == [live["proposal"]] and old["proposal"] != live["proposal"]
 
 
 @pytest.mark.parametrize("kw, message", [
@@ -380,3 +438,99 @@ def test_window_trims_select_exactly_the_windows_frames(rate):
             d = Fraction(f"{float(Fraction(n) / rate) - eps:.4f}")
             kept = [k for k in range(first, first + n + 3) if Fraction(k - first) / rate < d]
             assert len(kept) == n, (start, n)
+
+
+# ----------------------------------------------------------------------------------------------- review fixes: render names, .tmp sweep
+@pytest.fixture
+def fake_renders(monkeypatch):
+    """Renders that only write a small file: the names are what is under test."""
+    import matchcut.review.render as RR
+
+    def cut(tl, media, cfg, out, **kw):
+        Path(out).write_bytes(b"x" * 10)
+        return out
+
+    def window(tl, w, media, cfg, out, label="", bounds=None):
+        Path(out).write_bytes(b"x" * 10)
+    monkeypatch.setattr(V.pipeline_render, "render", cut)
+    monkeypatch.setattr(RR, "render_window", window)
+
+
+def names(w: Path, rev=None):
+    return tuple(Path(V.render(w, rev, junction=j)["path"]).name if j else Path(V.render(w, rev)["path"]).name for j in (None, 2, 4))
+
+
+def test_a_window_is_named_by_what_it_renders(ws, fake_renders):
+    base = names(ws)
+    p = S.propose(ws, [{"op": "trim", "clip": "c005", "edge": "out", "frames": -5}])  # far from window 2, inside window 4
+    S.apply(ws, p["proposal"])
+    now = names(ws)
+    assert now[0] != base[0] and now[1] == base[1] and now[2] != base[2]
+    S.undo(ws)
+    # the same frames under new clip ids (c004 removed, e001 inserted with its range): every name stays
+    p = S.propose(ws, [{"op": "remove", "clip": "c004"}, {"op": "insert", "shot": 5, "in_frame": 520, "out_frame": 570, "after": "c003"}])
+    S.apply(ws, p["proposal"])
+    assert [c.id for c in S.load(ws).timeline().clips] == ["c001", "c002", "c003", "e001", "c005"]
+    assert names(ws) == base
+
+
+def test_a_window_name_follows_the_musics_position(make_ws, fake_renders, tmp_path):
+    w = make_ws()
+    music = tmp_path / "music.wav"
+    music.write_bytes(b"RIFF")
+    cfg = PipelineConfig.load(w / "config.json")
+    cfg.music.path = str(music)
+    cfg.save(w / "config.json")
+    import matchcut.review.render as RR
+    S.start(w)
+    old = RR._audio_duration
+    RR._audio_duration = lambda path: 60.0
+    try:
+        base = names(w)
+        p = S.propose(w, [{"op": "trim", "clip": "c001", "edge": "in", "frames": 5}])  # every later window starts 5 frames earlier in the music
+        S.apply(w, p["proposal"])
+        now = names(w)
+        assert now[2] != base[2]
+        S.undo(w)
+        p = S.propose(w, [{"op": "trim", "clip": "c005", "edge": "out", "frames": -5}])  # window 2 ends nowhere near: same music position
+        S.apply(w, p["proposal"])
+        assert names(w)[1] == base[1]
+    finally:
+        RR._audio_duration = old
+
+
+def test_a_source_replaced_with_the_same_size_and_mtime_renames_the_renders(make_ws, fake_renders, tmp_path):
+    import shutil
+    src = tmp_path / "copy.mp4"
+    w0 = make_ws()
+    shutil.copy(PipelineConfig.load(w0 / "config.json").source, src)
+    from tests.edit.conftest import write_workspace
+    w = write_workspace(tmp_path / "w2", src, Fraction(25))
+    S.start(w)
+    base = names(w)
+    st = os.stat(src)
+    data = bytearray(src.read_bytes())
+    data[len(data) // 2] ^= 0xFF
+    src.write_bytes(bytes(data))
+    os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+    assert os.stat(src).st_size == st.st_size and os.stat(src).st_mtime_ns == st.st_mtime_ns
+    assert all(a != b for a, b in zip(names(w), base))
+
+
+def test_stale_temporary_files_are_swept(ws, fake_renders):
+    tmp = ws / "edits" / "renders" / ".tmp"
+    tmp.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    gone, old, live, fresh_gone = tmp / f"{dead.pid}-abc.mp4", tmp / "tmpk3j.full.mp4", tmp / f"{os.getpid()}-def.mp4", tmp / f"{dead.pid}-new.mp4"
+    for f in (gone, old, live, fresh_gone):
+        f.write_bytes(b"partial")
+    an_hour_ago = time.time() - 3700
+    os.utime(old, (an_hour_ago, an_hour_ago))
+    os.utime(gone, (time.time() - 120, time.time() - 120))
+    V.render(ws)
+    assert sorted(p.name for p in tmp.iterdir()) == sorted([live.name, fresh_gone.name])  # a dead process's file written just now waits
+
+
+def test_render_version_is_bumped_past_the_frames_fix():
+    assert V.RENDER_VERSION >= 2  # frame-*.jpg files grabbed without the source audio (wrong on MPEG-TS) are never reused

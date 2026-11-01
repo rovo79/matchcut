@@ -27,6 +27,7 @@ import json
 import math
 import os
 import re
+import time
 import uuid
 from fractions import Fraction
 from pathlib import Path
@@ -46,10 +47,12 @@ from .model import EditContext, Refused, Row, frame_rows, running_frames
 from .ops import MAX_FRAMES, beat_frame, find_junction, held_pins, pin_label
 from .session import SessionError
 
-RENDER_VERSION = 1  # part of every render key: a change to how a file is made changes its name
+RENDER_VERSION = 2  # part of every render key: a change to how a file is made changes its name
 QUALITIES = ("proxy", "full")
 MAX_FRAME_WIDTH = 1280  # a junction frame wider than this is scaled down (a vision model gains nothing from a 4K still)
 JPEG_QUALITY = 92
+TMP_MAX_AGE_SECONDS = 3600.0  # a temporary render file older than this was left by a killed render
+TMP_QUIET_SECONDS = 60.0  # ... and one whose process is gone, once it has not been written for this long
 
 
 # ----------------------------------------------------------------------------------------------- reading the session
@@ -105,15 +108,50 @@ def _media(ws: Path, cfg: PipelineConfig, rate: Fraction) -> MediaInfo:
 def _renders_dir(s: S.Session) -> Path:
     d = s.dir / "renders"
     d.mkdir(parents=True, exist_ok=True)
+    _sweep_tmp(d / ".tmp")
     return d
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OverflowError, ValueError):
+        return True
+    return True
+
+
+def _sweep_tmp(d: Path, max_age: float = TMP_MAX_AGE_SECONDS, quiet: float = TMP_QUIET_SECONDS) -> None:
+    """Remove what a killed render left in ``renders/.tmp`` (best effort): a file older than ``max_age`` seconds, or one named for a
+    process that is gone (``<pid>-...``, as ``_tmp`` names them) and not written for ``quiet`` seconds.  A render in progress keeps its
+    file fresh, so it is never swept."""
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return
+    now = time.time()
+    for f in entries:
+        try:
+            if not f.is_file():
+                continue
+            age = now - f.stat().st_mtime
+            m = re.match(r"([0-9]{1,9})-", f.name)
+            gone = m is not None and int(m.group(1)) != os.getpid() and not _pid_alive(int(m.group(1)))
+            if age > max_age or (gone and age > quiet):
+                f.unlink()
+        except OSError:
+            pass
+
+
 def _stat(path: Optional[str]) -> List[Any]:
+    """What tells a file's content changed without reading it: size, mtime, inode and ctime (a file replaced by one of the same size and
+    mtime still has another inode or ctime)."""
     try:
         st = os.stat(str(path))
-        return [st.st_size, st.st_mtime_ns]
+        return [st.st_size, st.st_mtime_ns, st.st_ino, st.st_ctime_ns]
     except (OSError, TypeError, ValueError):
-        return [None, None]
+        return [None, None, None, None]
 
 
 def _key(doc: Dict[str, Any]) -> str:
@@ -357,8 +395,11 @@ def _grab(media: MediaInfo, n: int, rate: Fraction) -> bytes:
         seek = round(max(0.0, math.floor((t - margin) * fps + 1e-6) / fps), 6)
         start = round(t - seek, 6)
     trim = max(0.0, start - pipeline_render.TRIM_EPSILON_SECONDS)
+    # the source's audio is read too, as the renderer reads it: ffmpeg times a seeked MPEG-TS/PS input whose audio is left unread
+    # differently (its video trims land on other frames: 1.5 s early on a TS remux), and reading it costs little elsewhere
+    graph = f"[0:v]trim=start={trim:.6f},setpts=PTS-STARTPTS[v]" + (";[0:a]anullsink" if media.has_audio else "")
     cmd = [_require("ffmpeg"), "-v", "error", "-nostdin", "-ss", f"{seek:.6f}", "-t", f"{start + 0.5 + 1 / fps:.6f}", "-i", media.path,
-           "-vf", f"trim=start={trim:.6f},setpts=PTS-STARTPTS", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]
+           "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"]
     try:
         out = run(cmd).stdout
     except MediaError as exc:
@@ -472,7 +513,7 @@ def _render_cut(ws: Path, s: S.Session, tl: Timeline, ctx: EditContext, quality:
 
 def _render_window(ws: Path, s: S.Session, tl: Timeline, ctx: EditContext, junction: Any, quality: str) -> Dict[str, Any]:
     from matchcut.review.render import render_window
-    from matchcut.review.window import ReviewError
+    from matchcut.review.window import ReviewError, music_start, sub_timeline
 
     cfg = _config(ws)
     media = _media(ws, cfg, ctx.rate)
@@ -486,10 +527,17 @@ def _render_window(ws: Path, s: S.Session, tl: Timeline, ctx: EditContext, junct
         width = cfg.render.proxy_width if not cfg.review.width else min(cfg.review.width, cfg.render.proxy_width)
         cfg = dataclasses.replace(cfg, review=dataclasses.replace(cfg.review, width=width))
     music, music_duration = _music(cfg, ctx)
-    key = _key({"kind": "window", "timeline": _content(tl), "window": dataclasses.asdict(w), "frames": info, "rate": str(ctx.rate),
-                "media": media.to_dict(), "source": [str(Path(media.path).resolve()), *_stat(media.path)],
-                "review": dataclasses.asdict(cfg.review), "audio_bitrate": cfg.render.audio_bitrate,
-                "music": _music_key(music, music_duration)})
+    sub = sub_timeline(tl, w)  # what render_window renders: the window's clips (the first cut in), with the fades the window reaches
+    music_doc = _music_key(music, music_duration)
+    if music_doc is not None:  # where the window's music starts in the track, and whether it fades (only at the end of the cut)
+        music_doc.update(start_in_track=music_start(tl, w, music.start), ends_cut=w.last == len(tl.clips) - 1)
+        if not music_doc["ends_cut"]:
+            music_doc.pop("fade_out")  # render_window fades the music only at the end of the cut
+    key = _key({"kind": "window", "timeline": _content(sub), "offset": round(w.offset, 6), "duration": w.duration,
+                "frames": info["frames"], "rate": str(ctx.rate), "media": media.to_dict(),
+                "source": [str(Path(media.path).resolve()), *_stat(media.path)],
+                "review": {"width": cfg.review.width, "crf": cfg.review.crf}, "audio_bitrate": cfg.render.audio_bitrate,
+                "music": music_doc})
     out_dir = _renders_dir(s)
     out = out_dir / f"window-{key}.mp4"
     cached = _cached(out)
@@ -531,9 +579,11 @@ def preview(ws: Path, proposal: str, junction: Any = None, quality: str = "proxy
     head, a changed context or a proposal file that no longer follows from its operations is refused.  No revision is written."""
     ws = Path(ws)
     quality = _quality(quality)
-    doc = S.check_proposal(ws, proposal)
-    s = S.load(ws)
-    ctx = s.context()
+    pid = S.check_proposal_id(proposal)
+    with S._locked(ws, shared=True) as d:  # as session.check_proposal, keeping the session and the context it checked against
+        s = S._fresh(ws, None)
+        doc = S._revalidated(s, d, pid)
+        ctx = s.context()
     tl = Timeline.from_dict(doc["timeline"])
     out = _render_window(ws, s, tl, ctx, junction, quality) if junction is not None else _render_cut(ws, s, tl, ctx, quality)
     return dict(out, proposal=doc["id"], head=doc["head"], timeline_sha256=doc["timeline_sha256"], changes=doc["changes"],
@@ -556,12 +606,15 @@ def _frames_arg(frames: Any) -> int:
 def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, hold: bool = True, kind: Optional[str] = None,
                    frames: Optional[int] = None) -> Dict[str, Any]:
     """Protect (``hold``) or release the transition at an editor pin's junction: sets or clears the pin's ``hold_transition`` and
-    ``held_transition`` ({"kind", "frames"}) in ``editorial.json`` through ``PinStore``; nothing else of the pin, or of any other pin, is
-    changed.
+    ``held_transition`` ({"kind", "frames"}) in ``editorial.json``.  The pins are read through ``PinStore``; the file is written
+    surgically (``_write_pin``), so nothing else in it changes: no other field of the pin, no other pin (a malformed one included) and no
+    other top-level key.
 
     The pin is named by its label (``pin``: ``s1->s3``) or by the junction of the head revision it holds (``junction``).  Without ``kind``
-    and ``frames``, the transition held is the one at the pin's junction in the head revision (the pin must be held there); with them, that
-    transition (``kind`` cut, dissolve or dip_to_black; ``frames`` whole, 0 only for a cut).
+    and ``frames``, the transition held is the one at the pin's junction in the head revision (the pin must be held there).  ``kind`` and
+    ``frames`` (``kind`` cut, dissolve or dip_to_black; ``frames`` whole, 0 only for a cut) are for a pin the head does not hold (e.g. one
+    the pipeline has not applied yet); at a pin the head holds they must be the head's transition, since the rules keep a protected
+    transition as it is and another one could never be reached there.
 
     The pins are part of the edit context, so a change makes every proposal made before it stale: ``apply`` and ``preview`` refuse them
     until they are proposed again (the result lists them)."""
@@ -630,24 +683,28 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 held = dict(now)
             else:
                 held = _label(kind, int(n_frames or 0))
+                if now is not None and held != now:
+                    raise SessionError(
+                        f"pin {pin_label(target)} is held at junction {junction_ids(head)[site]} of the head revision {s.head}, where the "
+                        f"transition is a {_text(now)}: the rules keep a protected junction's transition as it is, so a {_text(held)} "
+                        f"could never be reached there.  Omit kind and frames to protect the {_text(now)}, or change the transition first "
+                        "(propose and apply set_transition), then protect it")
             new = dataclasses.replace(target, hold_transition=True, held_transition=held)
         else:
             new = dataclasses.replace(target, hold_transition=False, held_transition=None)
         changed = new.to_dict() != target.to_dict()
+        live: List[str] = _live_proposals(s, ctx) if changed and s is not None and ctx is not None else []
         if changed:
-            store.put(new)
-        stale_proposals: List[str] = []
-        if changed and s is not None:
-            stale_proposals = _proposals_at(s)
+            _write_pin(ws, target, new)
+        stale_proposals = live
     mismatch = bool(new.hold_transition and now is not None and not _same_transition(new.held_transition, now))
     if not changed:
         note = "nothing changed: editorial.json was not written"
     else:
         note = ("editorial.json changed: the pins are part of the edit context, so every proposal made before this must be proposed again "
                 "(apply and preview refuse them)")
-    if mismatch:
-        note += (f"; the head revision has a {_text(now)} at this junction, not the {_text(new.held_transition)} held: the rules keep the "
-                 "junction's transition as it is in each proposal's base")
+    if mismatch:  # (a release keeps no transition; a protection set here is the head's: this is only for safety)
+        note += (f"; the head revision has a {_text(now)} at this junction, not the {_text(new.held_transition)} held")
     ids = junction_ids(head) if head is not None else []
     return {"pin": pin_label(new), "hold_transition": new.hold_transition, "held_transition": new.held_transition,
             "previous": {"hold_transition": target.hold_transition, "held_transition": target.held_transition}, "changed": changed,
@@ -655,15 +712,53 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
             "context_changed": changed, "proposals_to_propose_again": stale_proposals, "note": note}
 
 
-def _proposals_at(s: S.Session) -> List[str]:
-    """The stored proposals made at the head (the only ones ``apply`` could still take), which a change of the context has made stale."""
+def _live_proposals(s: S.Session, ctx: EditContext) -> List[str]:
+    """The stored proposals ``apply`` would still take before the pins change (made at the head, with the session's reserved clip ids and
+    the current context): the ones the change makes stale.  Proposals that were stale already are left out."""
     out = []
     d = s.dir / "proposals"
+    sha, reserved = S.context_sha256(ctx), s.reserved_ids()
     for p in sorted(d.glob("*.json")) if d.is_dir() else []:
         try:
             doc = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(doc, dict) and doc.get("head") == s.head and S._PROPOSAL_ID.fullmatch(p.stem):
+        if (isinstance(doc, dict) and S._PROPOSAL_ID.fullmatch(p.stem) and doc.get("head") == s.head and doc.get("context_sha256") == sha
+                and doc.get("reserved_ids") == reserved):
             out.append(p.stem)
     return out
+
+
+_PIN_ERRORS = (KeyError, ValueError, TypeError, AttributeError, OverflowError)
+
+
+def _write_pin(ws: Path, target: Pin, new: Pin) -> None:
+    """Write ``new``'s protection into ``editorial.json`` surgically: only the ``hold_transition`` and ``held_transition`` of the entry
+    ``PinStore`` reads as ``target`` (the first well-formed entry with its two shots) change.  Every other entry (a malformed one
+    included), every other field of that entry and every other top-level key are kept as they are; ``PinStore.put`` would drop what it
+    does not understand."""
+    path = Path(ws) / "editorial.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SessionError(f"cannot read {path.name} ({exc})") from None
+    if not isinstance(raw, dict) or not isinstance(raw.get("pins"), list):
+        raise SessionError(f"{path.name} holds no list of pins: nothing was written")
+    for i, entry in enumerate(raw["pins"]):
+        try:
+            found = isinstance(entry, dict) and Pin.from_dict(entry).key == target.key
+        except _PIN_ERRORS:
+            continue
+        if found:
+            break
+    else:
+        raise SessionError(f"pin {pin_label(target)} is no longer in {path.name}: nothing was written")
+    entry = dict(raw["pins"][i])
+    if new.hold_transition:
+        entry["hold_transition"] = True
+        entry["held_transition"] = dict(new.held_transition or {})
+    else:
+        entry.pop("hold_transition", None)
+        entry.pop("held_transition", None)
+    raw["pins"][i] = entry
+    S._atomic_write(path, json.dumps(raw, indent=2))

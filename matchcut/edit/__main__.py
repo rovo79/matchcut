@@ -22,7 +22,9 @@ import contextlib
 import json
 import math
 import os
+import signal
 import sys
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,7 +76,29 @@ def _arguments(text: str) -> Dict[str, Any]:
         raise Usage(f"the arguments{where} are not valid JSON: {str(exc)[:200]}") from None
     if not isinstance(args, dict):
         raise Usage(f"the arguments must be one JSON object, not {type(args).__name__ if args is not None else 'null'}")
+    where = _surrogate(args)
+    if where is not None:
+        raise Usage(f"the arguments hold a lone UTF-16 surrogate ({where}): every key and string must be valid Unicode")
     return args
+
+
+def _surrogate(doc: Any) -> Optional[str]:
+    """Where ``doc`` holds a key or a string with a lone surrogate (JSON's ``\\ud800`` escapes parse to one; nothing can encode it), or
+    None.  Iterative: a deeply nested document cannot exhaust the stack."""
+    stack: List[Tuple[str, Any]] = [("arguments", doc)]
+    while stack:
+        path, x = stack.pop()
+        if isinstance(x, str):
+            if any("\ud800" <= ch <= "\udfff" for ch in x):
+                return path
+        elif isinstance(x, dict):
+            for k, v in x.items():
+                if any("\ud800" <= ch <= "\udfff" for ch in k):
+                    return f"a key of {path}"
+                stack.append((f"{path}.{k}", v))
+        elif isinstance(x, list):
+            stack.extend((f"{path}[{i}]", v) for i, v in enumerate(x))
+    return None
 
 
 def _refusal(exc: Exception) -> Dict[str, Any]:
@@ -126,7 +150,7 @@ def run(argv: List[str]) -> Tuple[int, Dict[str, Any]]:
 
         if isinstance(exc, Refused):
             return EXIT_REFUSED, dict(_refusal(exc), command=command)
-        if os.environ.get("MATCHCUT_DEBUG"):
+        if os.environ.get("MATCHCUT_DEBUG", "").strip().lower() in ("1", "true", "yes"):
             traceback.print_exc(file=sys.stderr)
         if isinstance(exc, (MediaError, InterchangeError, OSError)):
             text = " ".join(str(exc).split())[:500] or type(exc).__name__
@@ -156,17 +180,53 @@ def _dumps(doc: Dict[str, Any]) -> str:
     return json.dumps(clean(doc), ensure_ascii=False, default=_plain, allow_nan=False)
 
 
+class _Terminated(BaseException):
+    """SIGTERM while a command runs: raised like KeyboardInterrupt, so every ``finally`` runs (temporary render files are removed, the
+    ffmpeg child is killed by ``subprocess.run``) and the CLI still prints its one JSON object."""
+
+
+def _on_term(signum: int, frame: Any) -> None:
+    raise _Terminated()
+
+
+def _write(text: str) -> None:
+    """Write the result to stdout as UTF-8; a character no encoding can carry (a lone surrogate in a message) is escaped, which keeps the
+    JSON valid.  If even that fails, a fixed JSON error is written: stdout always gets one JSON object."""
+    data = (text + "\n").encode("utf-8", "backslashreplace")
+    try:
+        sys.stdout.flush()
+        buf = getattr(sys.stdout, "buffer", None)
+        if buf is not None:
+            buf.write(data)
+            buf.flush()
+        else:
+            sys.stdout.write(data.decode("utf-8"))
+            sys.stdout.flush()
+    except Exception:  # noqa: BLE001
+        try:
+            os.write(1, b'{"error": "internal error: the result could not be written", "kind": "internal"}\n')
+        except OSError:
+            pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     sys.stdout.flush()
+    old_term = None
+    if threading.current_thread() is threading.main_thread():
+        old_term = signal.signal(signal.SIGTERM, _on_term)
     saved = os.dup(1)
     os.dup2(2, 1)  # whatever the command prints (ffmpeg, a stray print) goes to stderr; only the result goes to stdout
+    text = ""
+    code = EXIT_REFUSED
     try:
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 code, doc = run(argv)
         except KeyboardInterrupt:
             code, doc = EXIT_REFUSED, {"error": "interrupted", "kind": "error"}
+        except _Terminated:
+            code, doc = EXIT_REFUSED, {"error": "terminated", "kind": "error"}
         try:
             text = _dumps(doc)
         except Exception as exc:  # noqa: BLE001
@@ -175,8 +235,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     finally:
         os.dup2(saved, 1)
         os.close(saved)
-    sys.stdout.write(text + "\n")
-    sys.stdout.flush()
+        if old_term is not None:
+            signal.signal(signal.SIGTERM, old_term)
+    _write(text)
     return code
 
 

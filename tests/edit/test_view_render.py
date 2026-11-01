@@ -276,3 +276,49 @@ def test_a_stale_session_still_renders_and_says_so(coded, tmp_path):
     f = V.frames(w, 1)
     assert f["stale"] and "changed since" in f["stale_reason"]
     assert stripes(Path(f["outgoing"]["path"])) == 59
+
+
+# ----------------------------------------------------------------------------------------------- review fix: frames on MPEG-TS sources
+TS_CLIPS = [("c001", 1, 110, 160, "b1"), ("c002", 3, 320, 380, "b1"), ("c003", 7, 740, 790, "b2"), ("c004", 5, 520, 570, "b2")]
+
+
+@pytest.fixture(scope="session")
+def ts_sources(tmp_path_factory) -> Dict[str, Path]:
+    """MPEG-TS sources (no seek index, so a grab seeks by the keyframe gap): a remux of GOP-50 footage, a long-GOP (300) one, and one whose
+    video starts 2 s after its audio."""
+    import subprocess
+    root = tmp_path_factory.mktemp("ts")
+    out: Dict[str, Path] = {}
+    for name, gop in (("short", 50), ("long", 300)):
+        mp4 = sig.make_coded_footage(root / f"{name}.mp4", seconds=32, rate="25", gop=gop)
+        out[name] = root / f"{name}.ts"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(out[name])], check=True)
+    stripe = 320 // sig.BITS
+    lum = f"if(lt(X,{stripe * sig.BITS}),255*mod(floor(N/pow(2,floor(X/{stripe}))),2),128)"
+    out["late"] = root / "late.ts"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-itsoffset", "2", "-f", "lavfi", "-i",
+                    f"color=c=black:s=320x180:r=25:d=30,format=gray,geq=lum='{lum}'", "-f", "lavfi", "-i",
+                    "aevalsrc=exprs='0.5*sin(2*PI*(200+40*floor(t))*t)':s=48000:d=32", "-map", "0:v", "-map", "1:a", "-c:v", "libx264",
+                    "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-g", "50", "-c:a", "aac", str(out["late"])], check=True)
+    return out
+
+
+@pytest.mark.parametrize("kind", ["short", "long", "late"])
+def test_frames_on_mpeg_ts_are_the_frames_the_render_shows(ts_sources, tmp_path, kind):
+    """Review fix: a grab that seeked a TS input without reading its audio landed ~1.5 s early (320 came back as 283)."""
+    from matchcut.pipeline.render import seek_margin
+    w = write_workspace(tmp_path / "ws", ts_sources[kind], Fraction(25), TS_CLIPS)
+    cfg = json.loads((w / "config.json").read_text())
+    cfg["render"]["proxy_width"] = 320
+    (w / "config.json").write_text(json.dumps(cfg))
+    S.start(w)
+    assert seek_margin(str(ts_sources[kind])) > 0.25  # the unindexed path: a seek past 0 for every frame here
+    rendered = sig.frame_numbers(Path(V.render(w)["path"]))
+    for n in (1, 2, 3):
+        f = V.frames(w, n)
+        for side in ("outgoing", "incoming"):
+            s = f[side]
+            got = stripes(Path(s["path"]))
+            assert got == rendered[s["record_frame"]], (kind, n, side, got, rendered[s["record_frame"]])
+            if kind != "late":  # (the late video's stripes count from its own first frame, 2 s in)
+                assert got == s["source_frame"], (kind, n, side, got)

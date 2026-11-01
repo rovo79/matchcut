@@ -95,9 +95,10 @@ def test_clips_by_id_or_key(tl, ctx):
 
 def test_junctions_by_number_or_id_including_a_repeated_shot_pair(ctx):
     tl = cut(ctx, [("c001", 1, 110, 150), ("c002", 2, 210, 250), ("c003", 1, 160, 200), ("c004", 2, 255, 295)])
-    assert [find_junction(tl, r) for r in (1, "2", 3, "s1-s2", "s2-s1", "s1-s2#2")] == [0, 1, 2, 0, 1, 2]
+    assert [find_junction(tl, r) for r in (1, "2", 3, "s1-s2", "s2-s1", "s1-s2#2", 2.0)] == [0, 1, 2, 0, 1, 2, 1]  # 2.0: as whole() reads it
     for bad, why in ((0, "no junction 0"), (4, "no junction 4: this cut has 3 junctions (1..3)"), ("s1-s2#3", "no junction s1-s2#3"),
-                     (True, "number or its id"), (2.0, "number or its id"), (None, "number or its id")):
+                     (True, "number or its id"), (2.5, "number or its id"), (float("nan"), "number or its id"), (4.0, "no junction 4"),
+                     (None, "number or its id")):
         with pytest.raises(Refused) as exc:
             find_junction(tl, bad)
         assert why in str(exc.value)

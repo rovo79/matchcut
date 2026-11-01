@@ -26,7 +26,7 @@ from .rules import GUARDS
 REVISION_ID = r"^r\d{3,}$"
 PROPOSAL_ID = r"^[0-9a-f]{12}$"
 PIN_LABEL = r"^s\d{1,7}->s\d{1,7}$"
-JUNCTION_ID = r"^(\d{1,9}|s-?\d{1,7}-s-?\d{1,7}(#\d{1,7})?)$"
+JUNCTION_ID = r"^([1-9]\d{0,8}|s-?\d{1,7}-s-?\d{1,7}(#\d{1,7})?)$"
 
 
 class ArgumentError(ValueError):

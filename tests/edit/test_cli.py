@@ -84,6 +84,11 @@ BAD = [
     ("render", '{"quality": "draft"}', 2, "quality must be one of proxy, full"),
     ("pin_transition", '{"pin": "s0->s1", "hold": true, "kind": "dissolve", "frames": 2.5}', 2, "frames must be a whole number"),
     ("pin_transition", '{"pin": "s0->s1"}', 2, "hold is required"),
+    ("frames", '{"junction": "0"}', 2, "junction"),
+    ("inspect", '{"revision": "\\ud800"}', 2, "lone UTF-16 surrogate (arguments.revision)"),
+    ("inspect", '{"\\ud83d": 1}', 2, "lone UTF-16 surrogate (a key of arguments)"),
+    ("propose", '{"ops": [{"op": "trim", "clip": "c\\ud800", "edge": "out", "frames": -3}]}', 2, "surrogate (arguments.ops[0].clip)"),
+    ("frames", '{"junction": 2.0}', 0, ""),
     # well-formed requests the session refuses
     ("checkout", '{"revision": "r999"}', 1, "no revision r999"),
     ("apply", '{"proposal": "0123456789ab"}', 1, "no proposal 0123456789ab"),
@@ -104,6 +109,8 @@ def test_bad_input_is_one_json_error_with_its_exit_code(ws, command, arguments, 
     argv = [str(ws), command] + ([arguments] if arguments is not None else [])
     got, doc = call(*argv)
     assert got == code, doc
+    if code == 0:
+        return
     assert message in doc["error"], doc
     assert doc["kind"] == ("usage" if code == 2 else "refused")
     if code == 2 and command in T.BY_NAME and "errors" in doc:
@@ -204,6 +211,9 @@ def test_main_keeps_stdout_for_the_json(ws, monkeypatch, capfd):
     (["WS", "propose", '{"ops": []}'], 2, "at least 1 item"),
     (["/no/such/workspace", "log"], 2, "no workspace"),
     (["WS", "checkout", '{"revision": "r042"}'], 1, "no revision r042"),
+    (["WS", "inspect", '{"revision": "\\ud800"}'], 2, "surrogate"),
+    (["WS", "inspect", '{"\\ud83d": 1}'], 2, "surrogate"),
+    (["WS", "propose", '{"ops":[{"op":"trim","clip":"c\\ud800","edge":"out","frames":-3}]}'], 2, "surrogate"),
 ])
 def test_bad_input_in_a_subprocess(ws, argv, code, message):
     got, doc, err = run_cli(*[str(ws) if a == "WS" else a for a in argv])
@@ -249,3 +259,64 @@ def test_end_to_end_through_the_cli(ws, tmp_path):
     assert code == 1 and "no pin s0->s1" in doc["error"]
     renders = ws / "edits" / "renders"
     assert sorted(p.suffix for p in renders.iterdir() if p.is_file()) == [".jpg", ".jpg", ".mp4", ".mp4"]
+
+
+@pytest.mark.parametrize("value, traced", [("1", True), ("true", True), ("YES", True), ("0", False), ("false", False), ("", False),
+                                           ("no", False)])
+def test_matchcut_debug_counts_only_when_on(ws, monkeypatch, capsys, value, traced):
+    def boom(w, a):
+        raise ZeroDivisionError("division by zero")
+    monkeypatch.setitem(T.BY_NAME, "log", T.Tool("log", "x", T._obj(), boom))
+    monkeypatch.setenv("MATCHCUT_DEBUG", value)
+    assert call(str(ws), "log")[0] == 1
+    assert ("Traceback" in capsys.readouterr().err) is traced
+
+
+def test_a_message_with_a_lone_surrogate_is_still_one_json_object(ws, monkeypatch, capfd):
+    """Review fix: a lone surrogate in the result (a file name, a message) made the final write raise; it is escaped now."""
+    monkeypatch.setitem(T.BY_NAME, "log", T.Tool("log", "x", T._obj(), lambda w, a: {"name": "c\ud800"}))
+    assert cli.main([str(ws), "log"]) == 0
+    out, err = capfd.readouterr()
+    assert json.loads(out) == {"name": "c\ud800"} and out.count("\n") == 1 and "Traceback" not in err
+
+    def refuse(w, a):
+        raise S.SessionError("no clip c\udc80")
+    monkeypatch.setitem(T.BY_NAME, "log", T.Tool("log", "x", T._obj(), refuse))
+    assert cli.main([str(ws), "log"]) == 1
+    out, _ = capfd.readouterr()
+    assert json.loads(out)["error"] == "no clip c\udc80"
+
+
+def test_sigterm_during_a_command_is_one_json_error(ws, monkeypatch, capfd):
+    import signal
+
+    def killed(w, a):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("not reached")
+    monkeypatch.setitem(T.BY_NAME, "log", T.Tool("log", "x", T._obj(), killed))
+    before = signal.getsignal(signal.SIGTERM)
+    assert cli.main([str(ws), "log"]) == 1
+    out, _ = capfd.readouterr()
+    assert json.loads(out) == {"error": "terminated", "kind": "error"}
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_sigterm_mid_render_leaves_no_temporary_file(ws):
+    """A real CLI render, terminated while ffmpeg runs: the CLI prints its JSON error and removes its temporary file."""
+    import signal
+    import time
+    e = dict(os.environ, PYTHONPATH=str(REPO))
+    cfg = json.loads((ws / "config.json").read_text())
+    cfg["render"].update(width=1920, preset="veryslow", crf=0)  # slow enough to be caught in the act
+    (ws / "config.json").write_text(json.dumps(cfg))
+    proc = subprocess.Popen([sys.executable, "-m", "matchcut.edit", str(ws), "render", '{"quality": "full"}'], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env=e, cwd=str(REPO))
+    tmp = ws / "edits" / "renders" / ".tmp"
+    deadline = time.time() + 60
+    while time.time() < deadline and not (tmp.is_dir() and any(tmp.iterdir())):
+        time.sleep(0.05)
+    assert tmp.is_dir() and any(tmp.iterdir()), "the render never started"
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 1 and json.loads(out) == {"error": "terminated", "kind": "error"}
+    assert [p for p in (ws / "edits" / "renders").rglob("*") if p.is_file()] == []
