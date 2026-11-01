@@ -430,3 +430,19 @@ def test_operations_are_exact_in_frames_at_every_rate(rate):
     laid = layout(out, rate)
     assert [(r.in_f, r.out_f, r.tr) for r in laid] == [(x[1], x[2], x[4]) for x in frames_of(out, ctx)]
     assert all(c.source_in == ctx.s(r.in_f) and c.source_out == ctx.s(r.out_f) for c, r in zip(out.clips[:1], laid[:1]))
+
+
+def test_new_ids_skip_the_reserved_ids_of_the_session(tl, ctx):
+    one = run(tl, ctx, op="insert", shot=6, in_frame=600, out_frame=640, after="c001").timeline
+    gone = apply_op(one, {"op": "remove", "clip": "e001"}, ctx).timeline
+    assert apply_op(gone, {"op": "insert", "shot": 6, "in_frame": 650, "out_frame": 690, "after": "c001"}, ctx).timeline.clips[1].id == "e001"
+    again = apply_op(gone, {"op": "insert", "shot": 6, "in_frame": 650, "out_frame": 690, "after": "c001"}, ctx, reserved_ids={"e001"})
+    assert again.timeline.clips[1].id == "e002"
+    assert apply_op(tl, {"op": "replace", "clip": "c003", "shot": 6}, ctx, reserved_ids=["e001", "e002"]).timeline.clips[2].id == "e003"
+    assert new_clip_id(tl, {"e001", "e003"}) == "e002"
+    # within one batch an id is never issued twice
+    batch = apply_ops(tl, [{"op": "insert", "shot": 6, "in_frame": 600, "out_frame": 640, "after": "c001"}, {"op": "remove", "clip": "e001"},
+                           {"op": "insert", "shot": 6, "in_frame": 650, "out_frame": 690, "after": "c001"}], ctx)
+    assert batch.timeline.clips[1].id == "e002" and changes(tl, batch.timeline, ctx) == ["added e002 (shot 6, frames 650-690)"]
+    assert apply_ops(gone, [{"op": "insert", "shot": 6, "in_frame": 650, "out_frame": 690, "after": "c001"}], ctx,
+                     reserved_ids=("e001",)).timeline.clips[1].id == "e002"

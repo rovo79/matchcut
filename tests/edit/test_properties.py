@@ -20,7 +20,7 @@ from matchcut.edit.model import EditContext, Refused
 from matchcut.edit.ops import apply_ops, held_pins
 from matchcut.edit.rules import problems, timing
 from matchcut.interchange.common import junction_ids, layout, record_frames
-from matchcut.pipeline.editorial import Pin, apply_pins, pin_outcome
+from matchcut.pipeline.editorial import Pin, apply_pins, pin_outcome, pin_site
 from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.timeline import HUMAN_STAGE, Clip, Timeline, Transition, clip_origin
 
@@ -39,7 +39,7 @@ def random_context(rng: random.Random) -> EditContext:
 
 def random_cut(rng: random.Random, ctx: EditContext) -> Tuple[Timeline, EditContext]:
     """A valid cut: clips inside their shots and at least the minimum long, transitions within the limit, maybe a match cut and a pin."""
-    n = rng.randint(3, 8)
+    n = rng.randint(4, 9)
     beats = sorted(rng.choice(["b1", "b2", "b3"]) for _ in range(n))
     tl = Timeline(source="s.mp4", fps=float(ctx.rate))
     lengths: List[int] = []
@@ -150,21 +150,40 @@ def check_accepted(before: Timeline, after: Timeline, touched, ops: List[Dict[st
         elif op["op"] == "set_transition":
             j = op["junction"]  # 1-based: the incoming clip is clip j, in both cuts
             assert after.clips[j].id == before.clips[j].id and delta == -(la[j].tr - lb[j].tr)
-    # pins and match cuts
-    for pin, _ in held_pins(before, ctx):
-        d = pin_outcome(after, pin, HUMAN_STAGE)
-        assert d is not None and d.action == "pinned", d and d.detail
+    # pins (judged with pin_outcome / pin_site directly, not through the rules' held_pins) and the transitions they protect
+    for pin in ctx.pins:
+        d0 = pin_outcome(before, pin, HUMAN_STAGE)
+        if d0 is None or d0.action != "pinned":
+            continue
+        site = pin_site(before, pin)
+        pair = (before.clips[site].id, before.clips[site + 1].id)
+        d1 = pin_outcome(after, pin, HUMAN_STAGE)
+        assert d1 is not None and d1.action == "pinned", d1 and d1.detail
+        assert pair in ja and ja[pair][:2] == jb[pair][:2], pair  # the very clips, adjacent, same cut points
+        if pin.hold_transition:
+            assert ja[pair][2:4] == jb[pair][2:4], (pair, jb[pair], ja[pair])
+    # match cuts: adjacent, same cut points, a hard cut
     for i in range(len(before.clips) - 1):
         a, b = before.clips[i], before.clips[i + 1]
         if is_match_cut(a, b):
             assert (a.id, b.id) in ja and ja[(a.id, b.id)][:2] == jb[(a.id, b.id)][:2] and ja[(a.id, b.id)][3] == 0
-    # no new violation (the base has none)
+    # nothing gets worse: shot bounds, the minimum length, transition limits (a base the pipeline left imperfect stays as it was, or better)
+    old_rows = {c.id: (c, r) for c, r in zip(before.clips, lb)}
     for c, r in zip(after.clips, la):
         lo, hi = ctx.shot_frames(c.shot_index)
-        assert lo <= r.in_f and r.out_f <= hi, c.id
-        assert r.out_f - r.in_f >= ctx.min_frames, c.id
+        prev = old_rows.get(c.id)
+        same = prev is not None and prev[0].shot_index == c.shot_index and prev[0].origin == c.origin
+        excess = max(0, lo - r.in_f) + max(0, r.out_f - hi)
+        was = (max(0, lo - prev[1].in_f) + max(0, prev[1].out_f - hi)) if same else 0
+        assert excess <= was, c.id
+        if r.out_f - r.in_f < ctx.min_frames:
+            assert same and r.out_f - r.in_f >= prev[1].out_f - prev[1].in_f, c.id
+    def over(rows, i):  # noqa: E306
+        return rows[i].tr - ctx.max_fraction * min(rows[i - 1].out_f - rows[i - 1].in_f, rows[i].out_f - rows[i].in_f)
+    pos_b = {(before.clips[i - 1].id, before.clips[i].id): i for i in range(1, len(before.clips))}
     for i in range(1, len(la)):
-        assert la[i].tr <= ctx.max_fraction * min(la[i - 1].out_f - la[i - 1].in_f, la[i].out_f - la[i].in_f)
+        k = pos_b.get((after.clips[i - 1].id, after.clips[i].id))
+        assert over(la, i) <= max(0, over(lb, k) if k is not None else 0), (after.clips[i - 1].id, after.clips[i].id)
     assert after.clips[0].transition_in.is_cut
     # the timing report and the record-frame guard agree with the layout
     t = timing(before, after, ctx)
@@ -179,31 +198,87 @@ def check_accepted(before: Timeline, after: Timeline, touched, ops: List[Dict[st
     assert t["duration_frames"] == [record_frames(lb), record_frames(la)]
 
 
-@pytest.mark.parametrize("seed", range(40))
-def test_random_edit_sequences_keep_every_invariant(seed):
-    rng = random.Random(seed)
-    ctx = random_context(rng)
-    tl, ctx = random_cut(rng, ctx)
-    assert problems(tl, tl, set(), ctx) == []
+def imperfect(rng: random.Random, tl: Timeline, ctx: EditContext) -> Timeline:
+    """What the pipeline can leave: one clip a few frames under the minimum, one transition over the fraction limit (the cut still lays
+    out).  Neither is on a pinned or match-cut junction."""
+    out = tl.copy()
+    rows = layout(out, ctx.rate)
+    free = [k for k, c in enumerate(out.clips) if not (c.locked_in or c.locked_out)]
+    if free:
+        k = rng.choice(free)
+        c, r = out.clips[k], rows[k]
+        c.source_out = ctx.s(r.in_f + ctx.min_frames - rng.randint(1, 3))
+        n = ctx.min_frames - 3
+        for x in (c, out.clips[k + 1] if k + 1 < len(out.clips) else None):
+            if x is not None and not x.transition_in.is_cut and ctx.f(x.transition_in.duration) > n // 3:
+                x.transition_in = Transition(x.transition_in.kind, ctx.s(max(1, n // 3)))
+    sites = {s for _, s in held_pins(out, ctx)}
+    rows = layout(out, ctx.rate)
+    for i in rng.sample(range(1, len(out.clips)), len(out.clips) - 1):
+        a, b = out.clips[i - 1], out.clips[i]
+        if is_match_cut(a, b) or i - 1 in sites:
+            continue
+        limit = int(ctx.max_fraction * min(rows[i - 1].out_f - rows[i - 1].in_f, rows[i].out_f - rows[i].in_f))
+        trial = out.copy()
+        trial.clips[i].transition_in = Transition("dissolve", ctx.s(limit + rng.randint(1, 4)))
+        try:
+            layout(trial, ctx.rate)
+        except Exception:
+            continue
+        out = trial
+        break
+    return out
+
+
+def run_sequence(rng: random.Random, tl: Timeline, ctx: EditContext, steps: int) -> Tuple[int, int]:
+    """Random proposals from ``tl``, each accepted one checked and taken as the next head, as a session does (it reserves every id it
+    has seen).  (accepted, refused)."""
     accepted = refused = 0
-    for _ in range(30):
+    reserved = {c.id for c in tl.clips}
+    for _ in range(steps):
         ops = [random_op(rng, tl, ctx) for _ in range(rng.choice([1, 1, 1, 2, 3]))]
         snapshot = tl.to_dict()
         try:
-            res = apply_ops(tl, ops, ctx)
+            res = apply_ops(tl, ops, ctx, reserved)
         except Refused:
             assert tl.to_dict() == snapshot
             refused += 1
             continue
         assert tl.to_dict() == snapshot  # never mutated
+        assert not ({c.id for c in res.timeline.clips} - {c.id for c in tl.clips}) & reserved  # a new id is never one used before
         probs = problems(tl, res.timeline, res.touched, ctx)
         if probs:
             refused += 1
             continue
         check_accepted(tl, res.timeline, res.touched, ops, ctx)
         accepted += 1
+        reserved |= {c.id for c in res.timeline.clips}
         tl = res.timeline
-    assert accepted >= 2, (accepted, refused)  # a small cut held by a pin and a match cut accepts few edits
+    return accepted, refused
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_random_edit_sequences_keep_every_invariant(seed):
+    rng = random.Random(seed)
+    ctx = random_context(rng)
+    tl, ctx = random_cut(rng, ctx)
+    assert problems(tl, tl, set(), ctx) == []
+    accepted, refused = run_sequence(rng, tl, ctx, 60)
+    assert accepted >= 10, (accepted, refused)  # one proposal in six at least (about a third over all seeds)
+
+
+@pytest.mark.parametrize("seed", range(30))
+def test_random_edits_on_an_imperfect_base_make_nothing_worse(seed):
+    rng = random.Random(500 + seed)
+    ctx = random_context(rng)
+    tl, ctx = random_cut(rng, ctx)
+    base = imperfect(rng, tl, ctx)
+    rows = layout(base, ctx.rate)
+    under = [r for r in rows if r.out_f - r.in_f < ctx.min_frames]
+    over = [i for i in range(1, len(rows)) if rows[i].tr > ctx.max_fraction * min(rows[i - 1].out_f - rows[i - 1].in_f, rows[i].out_f - rows[i].in_f)]
+    assert under or over
+    accepted, refused = run_sequence(rng, base, ctx, 60)
+    assert accepted >= 10, (accepted, refused)
 
 
 @pytest.mark.parametrize("seed", range(20))

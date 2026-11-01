@@ -99,7 +99,7 @@ def context_from(cfg: PipelineConfig, rate: Union[Fraction, float], bounds: Mapp
         max_fraction_of_clip=float(cfg.transitions.max_fraction_of_clip),
         pins=tuple(pins),
         music=music,
-        music_start=float(cfg.music.start),
+        music_start=max(0.0, float(cfg.music.start)),  # the renderer clamps it so
         snap_window=float(cfg.music.snap_window),
         prefer_downbeats=bool(cfg.music.prefer_downbeats_at_beat_changes),
     )

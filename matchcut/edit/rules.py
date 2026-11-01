@@ -16,14 +16,15 @@ Transitions overlap their two clips (a new dissolve moves every later record pos
 """
 from __future__ import annotations
 
+from collections import Counter
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from matchcut.interchange import InterchangeError
 from matchcut.interchange.common import junction_ids, layout
-from matchcut.pipeline.editorial import pin_outcome, pin_site
+from matchcut.pipeline.editorial import pin_outcome
 from matchcut.pipeline.passes import is_match_cut
-from matchcut.pipeline.timeline import HUMAN_STAGE, Clip, Timeline, clip_origin
+from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, clip_origin
 
 from .model import EditContext, Refused, Row, frame_rows, running_frames
 from .ops import beat_frame, find_junction, held_pins, lock_reason, pin_label, transition_limit
@@ -38,7 +39,7 @@ def _label(kind: str, frames: int) -> str:
     return "cut" if not frames else f"{kind} {frames}f"
 
 
-def _junctions(tl: Timeline, rows: Sequence[Row]) -> Dict[Pair, int]:
+def _junctions(tl: Timeline) -> Dict[Pair, int]:
     """(outgoing id, incoming id) -> junction index."""
     return {(tl.clips[i].id, tl.clips[i + 1].id): i for i in range(len(tl.clips) - 1)}
 
@@ -85,15 +86,17 @@ def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: Edi
     rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
     old = {c.id: (c, r) for c, r in zip(before.clips, rb)}
 
-    # Timeline.validate: duplicate ids, unknown shots, unknown transition kinds (shot bounds and lengths are checked in frames below)
-    def validated(tl: Timeline) -> List[str]:
-        return [p for p in tl.validate(ctx.bounds, 0.0) if "outside shot" not in p and "below" not in p]
-    known = set(validated(before))
-    out += [p for p in validated(after) if p not in known]
-
-    # shot bounds and the minimum length, per clip
+    # what Timeline.validate checks, compared clip by clip: duplicate ids, unknown shots, unknown transition kinds, shot bounds (in frames)
+    # and the minimum length; only a problem the clip did not have before, or a worse one, counts
+    count_b, count_a = Counter(c.id for c in before.clips), Counter(c.id for c in after.clips)
+    out += [f"duplicate clip id {cid}" for cid, n in count_a.items() if n > 1 and n > count_b.get(cid, 0)]
     for c, r in zip(after.clips, ra):
         prev = old.get(c.id)
+        if not ctx.has_shot(c.shot_index) and (prev is None or prev[0].shot_index != c.shot_index):
+            out.append(f"{c.id}: unknown shot {c.shot_index}")
+        kind = c.transition_in.kind
+        if kind not in TRANSITION_KINDS and (prev is None or prev[0].transition_in.kind != kind):
+            out.append(f"{c.id}: unknown transition {kind}")
         ex = _shot_excess(ctx, c, r)
         if ex is not None and ex[0]:
             was = _shot_excess(ctx, prev[0], prev[1]) if prev is not None and prev[0].shot_index == c.shot_index else None
@@ -112,8 +115,8 @@ def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: Edi
             prev = old.get(c.id)
             if prev is None or prev[0].transition_in != t:
                 out.append(f"the {t.kind} into {c.id} is not a whole number of frames ({t.duration}s)")
-    jb = _junctions(before, rb)
-    for (a, b), i in _junctions(after, ra).items():
+    jb, ja = _junctions(before), _junctions(after)
+    for (a, b), i in ja.items():
         tr = ra[i + 1].tr
         if not tr:
             continue
@@ -145,21 +148,31 @@ def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: Edi
             except InterchangeError:
                 pass
 
-    # editor pins and the transitions they protect
+    # editor pins and the transitions they protect.  Within a session clip ids are stable, so the very two clips the pin holds in ``before``
+    # must still be adjacent, with the same cut points (``pin_outcome`` alone would accept another clip of the same shot at the same point
+    # for a pin taken without clip instances)
     for pin, site in held_pins(before, ctx):
+        a, b = before.clips[site].id, before.clips[site + 1].id
+        k = ja.get((a, b))
+        if k is None:
+            gone = [x for x in (a, b) if x not in count_a]
+            why = f"{' and '.join(gone)} removed" if gone else f"its clips {a}|{b} are no longer adjacent"
+            out.append(f"breaks the editor pin {pin_label(pin)}: {why}")
+            continue
+        if _cut(ra, k)[:2] != _cut(rb, site)[:2]:
+            out.append(f"breaks the editor pin {pin_label(pin)}: the cut {a}|{b} moved")
+            continue
         d = pin_outcome(after, pin, HUMAN_STAGE)
         if d is None or d.action != "pinned":
             out.append(f"breaks the editor pin {pin_label(pin)}: {d.detail if d is not None and d.detail else 'the pin is lost'}")
             continue
         if pin.hold_transition:
-            now = pin_site(after, pin)
             t0 = (rb[site + 1].kind, rb[site + 1].tr)
-            t1 = (ra[now + 1].kind, ra[now + 1].tr) if now is not None else ("cut", 0)
+            t1 = (ra[k + 1].kind, ra[k + 1].tr)
             if t0 != t1:
                 out.append(f"changes the transition the editor pin {pin_label(pin)} protects ({_label(*t0)} -> {_label(*t1)})")
 
     # match cuts
-    ja = _junctions(after, ra)
     for i in range(len(before.clips) - 1):
         a, b = before.clips[i], before.clips[i + 1]
         if not is_match_cut(a, b):
@@ -193,7 +206,7 @@ def guard_problems(before: Timeline, after: Timeline, ctx: EditContext, guards: 
         return [f"guards must be an object with any of {', '.join(GUARDS)}, not {guards!r}"]
     out: List[str] = [f"unknown guard {k!r} (guards: {', '.join(GUARDS)})" for k in guards if k not in GUARDS]
     rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
-    ja = _junctions(after, ra)
+    ja = _junctions(after)
     ids_a = junction_ids(after)
 
     if "max_duration_change_frames" in guards:
@@ -240,13 +253,15 @@ def guard_problems(before: Timeline, after: Timeline, ctx: EditContext, guards: 
             for ref, jid, k in followed("keep_on_beat"):
                 i = find_junction(before, ref)
                 a, b = before.clips[i].id, before.clips[i + 1].id
+                if beat_offset(before, rb, i, ctx) != 0:
+                    continue  # it was off the beat already: the timing report shows it, the guard does not refuse an unrelated edit
                 if k is None:
-                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}) is no longer a junction")
+                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}) was on the beat and is no longer a junction")
                     continue
                 off = beat_offset(after, ra, k, ctx)
                 if off != 0:
                     where = f"{abs(off)} frame{'s' if abs(off) != 1 else ''} {'after' if off > 0 else 'before'} the beat" if off is not None else "with no beat"
-                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}, {ids_a[k]} after the edit) would be {where}")
+                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}, {ids_a[k]} after the edit) was on the beat and would be {where}")
     return out
 
 
@@ -256,7 +271,7 @@ def timing(before: Timeline, after: Timeline, ctx: EditContext) -> Dict[str, Any
     its id in ``after``) whose record frame changed; junctions added and removed; with music, every junction's beat offset before and after
     and the junctions that left or reached a beat."""
     rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
-    jb, ja = _junctions(before, rb), _junctions(after, ra)
+    jb, ja = _junctions(before), _junctions(after)
     ids_b, ids_a = junction_ids(before), junction_ids(after)
     db, da = running_frames(rb), running_frames(ra)
     moved, added, offsets, left, reached = [], [], [], [], []
@@ -279,19 +294,27 @@ def timing(before: Timeline, after: Timeline, ctx: EditContext) -> Dict[str, Any
             "beat_offsets": offsets if ctx.music is not None else None, "left_beat": left, "reached_beat": reached}
 
 
+def same_clip(x: Clip, y: Clip) -> bool:
+    """Whether two clips with the same id are the same clip instance: the same shot and the same stamped ``origin`` (an unstamped origin is
+    derived from the clip's range by ``clip_origin``, so it would change with every trim; two unstamped clips of one shot are the same)."""
+    return x.shot_index == y.shot_index and (x.origin == y.origin or not (x.origin or y.origin))
+
+
 def changes(before: Timeline, after: Timeline, ctx: EditContext) -> List[str]:
     """What ``after`` changes relative to ``before``, by clip id (ids are stable within a session, so nothing is matched): removed and
-    added clips, edge moves in source frames, incoming transitions, and the new order of the clips both have."""
+    added clips, edge moves in source frames, incoming transitions, and the new order of the clips both have.  A clip whose id is the same
+    but whose shot or instance (``same_clip``) is not is reported as removed and added, never as an edge move."""
     rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
     b = {c.id: (c, r) for c, r in zip(before.clips, rb)}
     a = {c.id: (c, r) for c, r in zip(after.clips, ra)}
+    kept = {cid for cid in a if cid in b and same_clip(b[cid][0], a[cid][0])}
     out: List[str] = []
     for cid, (c, r) in b.items():
-        if cid not in a:
+        if cid not in kept:
             out.append(f"removed {cid} (shot {c.shot_index}, frames {r.in_f}-{r.out_f})")
     prev_a = {c.id: (after.clips[i - 1].id if i else None) for i, c in enumerate(after.clips)}
     for cid, (c, r) in a.items():
-        if cid not in b:
+        if cid not in kept:
             tr = f", incoming {_label(r.kind, r.tr)}" if r.tr else ""
             out.append(f"added {cid} (shot {c.shot_index}, frames {r.in_f}-{r.out_f}{tr})")
             continue
@@ -307,8 +330,8 @@ def changes(before: Timeline, after: Timeline, ctx: EditContext) -> List[str]:
                 out.append(f"{prev_a[cid]}|{cid}: {_label(*t0)} -> {_label(*t1)}")
             else:
                 out.append(f"{cid}: incoming {_label(*t0)} dropped (it is the first clip now)")
-    common_b = [c.id for c in before.clips if c.id in a]
-    common_a = [c.id for c in after.clips if c.id in b]
+    common_b = [c.id for c in before.clips if c.id in kept]
+    common_a = [c.id for c in after.clips if c.id in kept]
     if common_a != common_b:
         out.append("order: " + " ".join(common_a))
     return out

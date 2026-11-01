@@ -143,10 +143,11 @@ def pinned(tl, ctx):
 
 def test_removing_or_moving_a_pinned_clip_breaks_the_pin(pinned):
     tl, ctx = pinned
-    assert propose(tl, ctx, [{"op": "remove", "clip": "c002"}])[1] == ["breaks the editor pin s1->s2: clip removed (shot 1)"]
-    assert propose(tl, ctx, [{"op": "move", "clip": "c003", "after": "c005"}])[1] == ["breaks the editor pin s1->s2: clips are no longer adjacent"]
+    assert propose(tl, ctx, [{"op": "remove", "clip": "c002"}])[1] == ["breaks the editor pin s1->s2: c002 removed"]
+    assert propose(tl, ctx, [{"op": "move", "clip": "c003", "after": "c005"}])[1] == [
+        "breaks the editor pin s1->s2: its clips c002|c003 are no longer adjacent"]
     assert propose(tl, ctx, [{"op": "insert", "shot": 6, "in_frame": 600, "out_frame": 640, "after": "c002"}])[1] == [
-        "breaks the editor pin s1->s2: clips are no longer adjacent"]
+        "breaks the editor pin s1->s2: its clips c002|c003 are no longer adjacent"]
 
 
 def test_a_pin_survives_edits_around_it(pinned):
@@ -232,7 +233,7 @@ def test_keep_on_beat_and_the_beat_report():
     tl = cut(ctx, [("c001", 0, 10, 50), ("c002", 1, 110, 170), ("c003", 2, 220, 263), ("c004", 3, 320, 370)])  # junctions at 40, 100, 143
     ops = [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}]
     res, probs = propose(tl, ctx, ops, {"keep_on_beat": ["s1-s2"]})
-    assert probs == ["guard keep_on_beat: junction s1-s2 (c002|c003, s1-s2 after the edit) would be 4 frames after the beat"]
+    assert probs == ["guard keep_on_beat: junction s1-s2 (c002|c003, s1-s2 after the edit) was on the beat and would be 4 frames after the beat"]
     t = timing(tl, res.timeline, ctx)
     assert [(o["id"], o["before"], o["after"]) for o in t["beat_offsets"]] == [("s0-s1", 0, 4), ("s1-s2", 0, 4), ("s2-s3", 3, -3)]
     assert t["left_beat"] == ["s0-s1", "s1-s2"] and t["reached_beat"] == []
@@ -289,3 +290,76 @@ def test_describe(tl, ctx):
     assert j[1]["beat_change"] and not j[1]["pinned"] and j[3]["match_cut"] and not j[3]["hold_transition"]
     with_music = describe(tl, ctx_for(R25, music=click(beat=0.4)))
     assert [x["beat_offset_frames"] for x in with_music["junctions"]] == [2, 2, 2, 2]
+
+
+# -- review fixes ----------------------------------------------------------------------------------------------------------------
+def test_a_legacy_pin_is_held_by_its_very_clips_not_by_another_clip_of_the_same_shot(tl, ctx):
+    """A pin taken without clip instances (no out_origin / in_origin) is matched by shots and points; within a session the two clips it
+    held must still be the ones at the junction."""
+    from matchcut.pipeline.editorial import Pin, apply_pins
+    a, b = tl.clips[1], tl.clips[2]
+    legacy = Pin(a.shot_index, b.shot_index, round(a.source_out, 3), round(b.source_in, 3), hold_transition=True)
+    assert legacy.out_origin == "" and legacy.in_origin == ""
+    pinned, _ = apply_pins(tl, [legacy], ctx.bounds, ctx.min_clip_seconds)
+    pc = with_pins(ctx, [legacy])
+    ops = [{"op": "move", "clip": "c002", "after": "c004"}, {"op": "insert", "shot": 1, "in_frame": 110, "out_frame": 170, "before": "c003"}]
+    res, probs = propose(pinned, pc, ops)
+    assert [c.id for c in res.timeline.clips] == ["c001", "e001", "c003", "c004", "c002", "c005"]
+    from matchcut.pipeline.editorial import pin_outcome
+    from matchcut.pipeline.timeline import HUMAN_STAGE
+    assert pin_outcome(res.timeline, legacy, HUMAN_STAGE).action == "pinned"  # the shot-and-point match alone is fooled
+    assert probs == ["breaks the editor pin s1->s2: its clips c002|c003 are no longer adjacent"]
+    after = pinned.copy()  # the same clips, but the cut moved by a frame
+    after.clips[1].source_out = ctx.s(171)
+    after.clips[2].source_in = ctx.s(221)
+    assert problems(pinned, after, {"c002", "c003"}, pc)[0] == "breaks the editor pin s1->s2: the cut c002|c003 moved"
+
+
+def test_keep_on_beat_refuses_only_a_junction_it_takes_off_the_beat():
+    ctx = ctx_for(R25, music=click(beat=0.4, per_bar=4))
+    tl = cut(ctx, [("c001", 0, 10, 50), ("c002", 1, 110, 170), ("c003", 2, 220, 263), ("c004", 3, 320, 370)])  # junction 3 is 3 frames off
+    unrelated = [{"op": "trim", "clip": "c004", "edge": "out", "frames": -5}]
+    assert propose(tl, ctx, unrelated, {"keep_on_beat": [1, 2, 3]})[1] == []
+    res, probs = propose(tl, ctx, [{"op": "roll", "junction": 3, "frames": 2}], {"keep_on_beat": [3]})
+    assert probs == [] and timing(tl, res.timeline, ctx)["beat_offsets"][2] == {"id": "s2-s3", "clips": ["c003", "c004"], "before": 3, "after": 5}
+    assert propose(tl, ctx, [{"op": "remove", "clip": "c004"}], {"keep_on_beat": [3]})[1] == []
+    assert propose(tl, ctx, [{"op": "remove", "clip": "c003"}], {"keep_on_beat": [2]})[1] == [
+        "guard keep_on_beat: junction s1-s2 (c002|c003) was on the beat and is no longer a junction"]
+
+
+def test_changes_report_a_reused_id_as_removed_and_added(tl, ctx):
+    after = tl.copy()
+    c = after.clips[2]
+    c.shot_index, c.origin = 6, "edit:6@600-650"
+    c.source_in, c.source_out = ctx.s(600), ctx.s(650)
+    assert changes(tl, after, ctx) == ["removed c003 (shot 2, frames 220-270)", "added c003 (shot 6, frames 600-650)"]
+    after = tl.copy()
+    after.clips[2].origin = "edit:2@220-270"  # same shot, another instance
+    assert changes(tl, after, ctx) == ["removed c003 (shot 2, frames 220-270)", "added c003 (shot 2, frames 220-270)"]
+    trimmed = apply_ops(tl, [{"op": "trim", "clip": "c003", "edge": "out", "frames": 2}], ctx).timeline
+    trimmed.clips[2].origin = ""  # an unstamped origin follows the range: a trim is still an edge move
+    base = tl.copy()
+    base.clips[2].origin = ""
+    assert changes(base, trimmed, ctx) == ["c003: out +2f"]
+
+
+def test_structural_validate_counts_only_new_problems(tl, ctx):
+    bad = tl.copy()
+    bad.clips[3].transition_in = Transition("wipe", 0.4)
+    bad.clips.append(Clip("c005", 4, 18.0, 19.0))
+    assert set(problems(tl, bad, {"c004", "c005"}, ctx)) >= {"duplicate clip id c005", "c004: unknown transition wipe"}
+    worse = bad.copy()  # the same problems again are not new; a further trim elsewhere is fine
+    worse.clips[0].source_in = ctx.s(12)
+    assert problems(bad, worse, {"c001", "c005"}, ctx) == []
+    alien = tl.copy()
+    alien.clips[2].shot_index = 42
+    assert problems(tl, alien, {"c003"}, ctx) == ["c003: unknown shot 42"]
+    assert problems(alien, alien.copy(), set(), ctx) == []
+
+
+def test_context_from_clamps_a_negative_music_start():
+    from matchcut.edit.model import context_from
+    from matchcut.pipeline.config import PipelineConfig
+    cfg = PipelineConfig()
+    cfg.music.start = -2.0
+    assert context_from(cfg, R25, {}).music_start == 0.0

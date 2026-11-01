@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from typing import AbstractSet, Any, Callable, Collection, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
 from matchcut.interchange.common import junction_ids
 from matchcut.pipeline.editorial import Pin, pin_outcome, pin_site
@@ -176,10 +176,10 @@ def _set(ctx: EditContext, c: Clip, in_f: int, out_f: int, new: bool = False) ->
         c.source_out = ctx.s(out_f)
 
 
-def new_clip_id(tl: Timeline) -> str:
-    """The first ``e<n>`` (``e001``, ``e002`` ...) that no clip of ``tl`` has, and that no decision of its history names: an id a session
-    once gave a clip is not given again on the same line of revisions while its history records it."""
-    taken = {c.id for c in tl.clips}
+def new_clip_id(tl: Timeline, reserved: Collection[str] = ()) -> str:
+    """The first ``e<n>`` (``e001``, ``e002`` ...) that no clip of ``tl`` has, that no decision of its history names, and that is not in
+    ``reserved`` (every id the session has ever issued or used): an id is never given to a second clip."""
+    taken = {c.id for c in tl.clips} | set(reserved)
     for d in tl.history:
         taken.update(d.clip_ids)
     n = 1
@@ -188,10 +188,11 @@ def new_clip_id(tl: Timeline) -> str:
     return f"e{n:03d}"
 
 
-def _new_clip(tl: Timeline, ctx: EditContext, shot: int, in_f: int, out_f: int, beat_id: str, purpose: str) -> Clip:
+def _new_clip(tl: Timeline, ctx: EditContext, shot: int, in_f: int, out_f: int, beat_id: str, purpose: str,
+              reserved: Collection[str] = ()) -> Clip:
     if not ctx.has_shot(shot):
         raise Refused(f"no shot {shot}")
-    c = Clip(id=new_clip_id(tl), shot_index=shot, source_in=0.0, source_out=0.0, beat_id=beat_id, purpose=purpose)
+    c = Clip(id=new_clip_id(tl, reserved), shot_index=shot, source_in=0.0, source_out=0.0, beat_id=beat_id, purpose=purpose)
     _set(ctx, c, in_f, out_f, new=True)
     key = f"edit:{shot}@{in_f}-{out_f}"
     taken = {clip_origin(x) for x in tl.clips}
@@ -272,7 +273,7 @@ def _slip(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str],
     return {c.id}, f"slip {c.id} {n:+d}f"
 
 
-def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext, reserved: AbstractSet[str] = frozenset()) -> Tuple[Set[str], str]:
     """Put footage of another shot in a clip's place: ``frames`` long (default: the same length), from ``in_frame`` (default: the middle of
     the shot).  The new clip keeps the old one's incoming transition and story beat."""
     old = find_clip(tl, _ref(op, "clip"))
@@ -291,19 +292,19 @@ def _replace(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[st
         if hi - lo < length:
             raise Refused(f"shot {shot} has {hi - lo} frames, fewer than the {length} needed")
         start = lo + (hi - lo - length) // 2
-    new = _new_clip(tl, ctx, shot, start, start + length, old.beat_id, f"replaces {old.id}")
+    new = _new_clip(tl, ctx, shot, start, start + length, old.beat_id, f"replaces {old.id}", reserved)
     new.transition_in = Transition(old.transition_in.kind, old.transition_in.duration)
     tl.clips[tl.clips.index(old)] = new
     touched = {old.id, new.id} | _first_is_cut(tl)
     return touched, f"replace {old.id} (shot {old.shot_index}) with {new.id} (shot {shot}, frames {start}-{start + length})"
 
 
-def _insert(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
+def _insert(tl: Timeline, op: Dict[str, Any], ctx: EditContext, reserved: AbstractSet[str] = frozenset()) -> Tuple[Set[str], str]:
     """A new clip of ``shot`` (frames ``in_frame``-``out_frame``) before or after a clip, with a cut.  The clip that follows it keeps its own
     incoming transition."""
     shot, i, o = whole(op, "shot"), whole(op, "in_frame"), whole(op, "out_frame")
     side, anchor = _where(tl, op)
-    new = _new_clip(tl, ctx, shot, i, o, anchor.beat_id, "inserted")
+    new = _new_clip(tl, ctx, shot, i, o, anchor.beat_id, "inserted", reserved)
     _put(tl, new, side, anchor)
     return {new.id} | _first_is_cut(tl), f"insert {new.id} (shot {shot}, frames {i}-{o}) {side} {anchor.id}"
 
@@ -425,8 +426,14 @@ _OPS: Dict[str, Callable[[Timeline, Dict[str, Any], EditContext], Tuple[Set[str]
 }
 
 
-def apply_op(tl: Timeline, op: Any, ctx: EditContext) -> OpResult:
-    """Apply one operation to a copy of ``tl``; ``tl`` is never changed.  Raises ``Refused`` (one line) when it cannot be applied."""
+_NEW_CLIPS = ("replace", "insert")  # the operations that issue a new clip id
+
+
+def apply_op(tl: Timeline, op: Any, ctx: EditContext, reserved_ids: Collection[str] = ()) -> OpResult:
+    """Apply one operation to a copy of ``tl``; ``tl`` is never changed.  Raises ``Refused`` (one line) when it cannot be applied.
+
+    ``reserved_ids`` are ids a new clip may not take: every id the session has ever issued or used (the session keeps them), so an id never
+    names two different clips across revisions."""
     if not isinstance(op, dict):
         raise Refused(f"an operation is an object with an \"op\", not {op!r}")
     name = op.get("op")
@@ -436,22 +443,28 @@ def apply_op(tl: Timeline, op: Any, ctx: EditContext) -> OpResult:
     if extra:
         raise Refused(f"{name} does not take {', '.join(extra)} (it takes {', '.join(ARGS[name])})")
     out = tl.copy()
-    touched, detail = _OPS[name](out, op, ctx)
+    if name in _NEW_CLIPS:
+        touched, detail = _OPS[name](out, op, ctx, frozenset(reserved_ids))  # type: ignore[call-arg]
+    else:
+        touched, detail = _OPS[name](out, op, ctx)
     return OpResult(out, frozenset(touched), detail)
 
 
-def apply_ops(tl: Timeline, ops: Sequence[Any], ctx: EditContext) -> OpsResult:
+def apply_ops(tl: Timeline, ops: Sequence[Any], ctx: EditContext, reserved_ids: Collection[str] = ()) -> OpsResult:
     """Apply ``ops`` in order to a copy of ``tl``, all or nothing: the first refusal is raised with its position (``Refused.index``) and
-    nothing is returned.  The touched ids are the union over the operations."""
+    nothing is returned.  The touched ids are the union over the operations.  An id used anywhere in the batch (or in ``reserved_ids``) is
+    never issued again within it."""
     if isinstance(ops, (str, bytes, dict)) or not isinstance(ops, Sequence):
         raise Refused("ops must be a list of operations")
+    reserved = set(reserved_ids) | {c.id for c in tl.clips}
     cur, touched, details = tl, set(), []  # type: Timeline, Set[str], List[str]
     for k, op in enumerate(ops):
         try:
-            res = apply_op(cur, op, ctx)
+            res = apply_op(cur, op, ctx, reserved)
         except Refused as exc:
             name = op.get("op") if isinstance(op, dict) else None
             raise Refused(f"op {k + 1}{f' ({name})' if isinstance(name, str) else ''}: {exc}", k) from None
         cur, details = res.timeline, details + [res.detail]
         touched |= res.touched
+        reserved |= {c.id for c in cur.clips}
     return OpsResult(cur if cur is not tl else tl.copy(), frozenset(touched), tuple(details))
