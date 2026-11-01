@@ -7,6 +7,7 @@ failed render is never reused.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import functools
 import os
 import subprocess
@@ -92,11 +93,38 @@ def _audio_duration(path: str) -> Optional[float]:
         return None
 
 
+def held(path: Path) -> bool:
+    """True when another open file holds an advisory ``flock`` on ``path`` (a render writing it), False when this process can take one
+    (it is released at once) or the file is gone.  ``flock`` locks follow the open file description and work across pid namespaces on
+    the same kernel, where ``os.kill(pid, 0)`` says nothing about a process in another namespace."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True  # locked by a writer (or the lock cannot be taken here): leave the file alone
+    finally:
+        os.close(fd)  # releases a lock this call took
+    return False
+
+
+_HELD: Dict[str, int] = {}  # temporary file -> the fd that holds its flock (released by _discard)
+
+
 def _tmp(out_dir: Path, suffix: str) -> Path:
+    """A new temporary file in ``<out_dir>/.tmp``, held under an exclusive advisory ``flock`` until ``_discard`` (an edit session's sweep of
+    ``renders/.tmp`` never removes a locked file, whichever process or pid namespace writes it)."""
     tmp_dir = out_dir / ".tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(suffix=suffix, dir=tmp_dir)
-    os.close(fd)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return Path(name)
+    _HELD[name] = fd
     return Path(name)
 
 
@@ -106,6 +134,12 @@ def _discard(*paths: Path) -> None:
             f.unlink()
         except OSError:
             pass
+        fd = _HELD.pop(str(f), None)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 def render_window(

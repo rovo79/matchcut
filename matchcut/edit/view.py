@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import fcntl
 import hashlib
 import io
 import json
@@ -40,6 +41,7 @@ from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome
 from matchcut.pipeline.frames import to_frames
 from matchcut.pipeline.media import MediaError, MediaInfo, _require, probe, run
 from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Timeline
+from matchcut.review.render import held
 
 from . import rules
 from . import session as S
@@ -123,9 +125,10 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _sweep_tmp(d: Path, max_age: float = TMP_MAX_AGE_SECONDS, quiet: float = TMP_QUIET_SECONDS) -> None:
-    """Remove what a killed render left in ``renders/.tmp`` (best effort): a file older than ``max_age`` seconds, or one named for a
-    process that is gone (``<pid>-...``, as ``_tmp`` names them) and not written for ``quiet`` seconds.  A render in progress keeps its
-    file fresh, so it is never swept."""
+    """Remove what a killed render left in ``renders/.tmp`` (best effort): a file no writer holds locked (``held``; every writer of a
+    temporary file here keeps an exclusive ``flock`` on it until it is moved into place or removed) that is older than ``max_age`` seconds,
+    or that is named for a process that is gone (``<pid>-...``, as ``_tmp`` names them) and not written for ``quiet`` seconds.  A file
+    being written is locked, so it is never swept, whatever its age and whichever pid namespace its writer runs in."""
     try:
         entries = list(d.iterdir())
     except OSError:
@@ -133,12 +136,12 @@ def _sweep_tmp(d: Path, max_age: float = TMP_MAX_AGE_SECONDS, quiet: float = TMP
     now = time.time()
     for f in entries:
         try:
-            if not f.is_file():
+            if f.is_symlink() or not f.is_file():
                 continue
             age = now - f.stat().st_mtime
             m = re.match(r"([0-9]{1,9})-", f.name)
             gone = m is not None and int(m.group(1)) != os.getpid() and not _pid_alive(int(m.group(1)))
-            if age > max_age or (gone and age > quiet):
+            if (age > max_age or (gone and age > quiet)) and not held(f):
                 f.unlink()
         except OSError:
             pass
@@ -170,6 +173,23 @@ def _tmp(out_dir: Path, suffix: str) -> Path:
     d = out_dir / ".tmp"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{os.getpid()}-{uuid.uuid4().hex[:12]}{suffix}"
+
+
+@contextlib.contextmanager
+def _writing(out_dir: Path, suffix: str) -> Iterator[Path]:
+    """A new temporary file in ``<out_dir>/.tmp``, created here and held under an exclusive ``flock`` for the whole block (whoever writes
+    it: this process, or an ffmpeg child that opens the same path), so ``_sweep_tmp`` never removes it.  Removed at the end unless the
+    block moved it into place; the lock is released after that."""
+    path = _tmp(out_dir, suffix)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield path
+    finally:
+        try:
+            path.unlink(missing_ok=True)
+        finally:
+            os.close(fd)
 
 
 def _one_line(exc: BaseException) -> str:
@@ -420,12 +440,9 @@ def _frame_file(ws: Path, media: MediaInfo, n: int, rate: Fraction, out_dir: Pat
     img = Image.open(io.BytesIO(_grab(media, n, rate))).convert("RGB")
     if img.width > MAX_FRAME_WIDTH:
         img = img.resize((MAX_FRAME_WIDTH, max(1, round(img.height * MAX_FRAME_WIDTH / img.width))), Image.LANCZOS)
-    tmp = _tmp(out_dir, ".jpg")
-    try:
+    with _writing(out_dir, ".jpg") as tmp:
         img.save(tmp, "JPEG", quality=JPEG_QUALITY)
         os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
     return path, False
 
 
@@ -498,14 +515,12 @@ def _render_cut(ws: Path, s: S.Session, tl: Timeline, ctx: EditContext, quality:
     out = out_dir / f"cut-{key}.mp4"
     cached = _cached(out)
     if not cached:
-        tmp = _tmp(out_dir, ".mp4")
         try:
-            pipeline_render.render(tl, media, rcfg, tmp, music=music, music_duration=music_duration)
-            os.replace(tmp, out)
+            with _writing(out_dir, ".mp4") as tmp:  # locked from before ffmpeg starts until it is moved into place
+                pipeline_render.render(tl, media, rcfg, tmp, music=music, music_duration=music_duration)
+                os.replace(tmp, out)
         except (MediaError, ValueError) as exc:
             raise SessionError(f"the render failed: {_one_line(exc)}") from None
-        finally:
-            tmp.unlink(missing_ok=True)
     total = running_frames(frame_rows(tl, ctx.rate))
     return {"kind": "cut", "path": str(out), "file": _rel(ws, out), "cached": cached, "quality": quality, "frames": total,
             "seconds": _seconds(total, ctx.rate), "rate": str(ctx.rate), "music": bool(music)}

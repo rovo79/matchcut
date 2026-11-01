@@ -534,3 +534,67 @@ def test_stale_temporary_files_are_swept(ws, fake_renders):
 
 def test_render_version_is_bumped_past_the_frames_fix():
     assert V.RENDER_VERSION >= 2  # frame-*.jpg files grabbed without the source audio (wrong on MPEG-TS) are never reused
+
+
+LOCKER = """
+import fcntl, os, sys
+fds = []
+for name in sys.argv[1:]:
+    fd = os.open(name, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    fds.append(fd)
+print("locked", flush=True)
+sys.stdin.read()
+"""
+
+
+def test_a_file_another_process_holds_locked_is_never_swept(ws, fake_renders):
+    """A writer in another pid namespace looks dead to ``os.kill``: its lock, not its pid, keeps its file.  Old and named for a dead pid,
+    a locked file stays; once the lock is gone it is swept."""
+    import sys
+    tmp = ws / "edits" / "renders" / ".tmp"
+    tmp.mkdir(parents=True)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    old, foreign = tmp / "tmpzz9.full.mp4", tmp / f"{dead.pid}-0123456789ab.mp4"
+    for f in (old, foreign):
+        f.write_bytes(b"partial")
+        os.utime(f, (time.time() - 7200, time.time() - 7200))
+    locker = subprocess.Popen([sys.executable, "-c", LOCKER, str(old), str(foreign)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert locker.stdout.readline().strip() == "locked"
+        assert V.held(old) and V.held(foreign)
+        V.render(ws)
+        V._sweep_tmp(tmp, max_age=0.0, quiet=0.0)
+        assert old.exists() and foreign.exists()
+    finally:
+        locker.communicate("")
+    assert not V.held(old)
+    V._sweep_tmp(tmp)
+    assert not old.exists() and not foreign.exists()
+
+
+def test_a_render_holds_its_temporary_file_locked_while_it_is_written(ws, monkeypatch):
+    seen = {}
+
+    def cut(tl, media, cfg, out, **kw):
+        Path(out).write_bytes(b"x" * 10)  # (ffmpeg opens the same path: the same inode, so the lock holds)
+        os.utime(out, (time.time() - 7200, time.time() - 7200))
+        seen["held"] = V.held(Path(out))
+        V._sweep_tmp(Path(out).parent, max_age=0.0, quiet=0.0)
+        seen["kept"] = Path(out).exists()
+        return out
+    monkeypatch.setattr(V.pipeline_render, "render", cut)
+    V.render(ws)
+    assert seen == {"held": True, "kept": True}
+    assert list((ws / "edits" / "renders" / ".tmp").iterdir()) == []
+
+
+def test_a_review_window_temp_file_is_locked_until_discarded(tmp_path):
+    import matchcut.review.render as RR
+    f = RR._tmp(tmp_path, ".mp4")
+    try:
+        assert RR.held(f)
+    finally:
+        RR._discard(f)
+    assert not f.exists() and str(f) not in RR._HELD

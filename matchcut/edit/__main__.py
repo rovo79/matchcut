@@ -185,8 +185,14 @@ class _Terminated(BaseException):
     ffmpeg child is killed by ``subprocess.run``) and the CLI still prints its one JSON object."""
 
 
+_TERM = {"defer": False, "seen": False}  # defer: the result is being written, so SIGTERM only records itself (the object is written whole)
+TERMINATED = json.dumps({"error": "terminated", "kind": "error"})
+
+
 def _on_term(signum: int, frame: Any) -> None:
-    raise _Terminated()
+    _TERM["seen"] = True
+    if not _TERM["defer"]:
+        raise _Terminated()
 
 
 def _write(text: str) -> None:
@@ -212,14 +218,16 @@ def _write(text: str) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     sys.stdout.flush()
+    _TERM.update(defer=False, seen=False)
     old_term = None
-    if threading.current_thread() is threading.main_thread():
-        old_term = signal.signal(signal.SIGTERM, _on_term)
-    saved = os.dup(1)
-    os.dup2(2, 1)  # whatever the command prints (ffmpeg, a stray print) goes to stderr; only the result goes to stdout
-    text = ""
+    saved: Optional[int] = None
+    text = TERMINATED  # what is printed if a SIGTERM lands before there is a result
     code = EXIT_REFUSED
     try:
+        if threading.current_thread() is threading.main_thread():
+            old_term = signal.signal(signal.SIGTERM, _on_term)
+        saved = os.dup(1)
+        os.dup2(2, 1)  # whatever the command prints (ffmpeg, a stray print) goes to stderr; only the result goes to stdout
         try:
             with contextlib.redirect_stdout(sys.stderr):
                 code, doc = run(argv)
@@ -229,15 +237,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             code, doc = EXIT_REFUSED, {"error": "terminated", "kind": "error"}
         try:
             text = _dumps(doc)
+        except _Terminated:
+            code, text = EXIT_REFUSED, TERMINATED
         except Exception as exc:  # noqa: BLE001
             code, text = EXIT_REFUSED, json.dumps({"error": f"internal error: the result is not JSON ({type(exc).__name__})", "kind": "internal"})
         sys.stdout.flush()
+    except _Terminated:
+        code, text = EXIT_REFUSED, TERMINATED
     finally:
-        os.dup2(saved, 1)
-        os.close(saved)
-        if old_term is not None:
-            signal.signal(signal.SIGTERM, old_term)
+        while True:  # from here on a SIGTERM only records itself; one that lands before that is the result
+            try:
+                _TERM["defer"] = True
+                break
+            except _Terminated:
+                code, text = EXIT_REFUSED, TERMINATED
+        if saved is not None:
+            os.dup2(saved, 1)
+            os.close(saved)
     _write(text)
+    _TERM["defer"] = False
+    if old_term is not None:
+        signal.signal(signal.SIGTERM, old_term)
     return code
 
 

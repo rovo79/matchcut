@@ -320,3 +320,51 @@ def test_sigterm_mid_render_leaves_no_temporary_file(ws):
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 1 and json.loads(out) == {"error": "terminated", "kind": "error"}
     assert [p for p in (ws / "edits" / "renders").rglob("*") if p.is_file()] == []
+
+
+def test_sigterm_while_the_result_is_serialised_is_one_json_error(ws, monkeypatch, capfd):
+    import signal
+    real = cli._dumps
+
+    def dumps(doc):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return real(doc)
+    monkeypatch.setattr(cli, "_dumps", dumps)
+    before = signal.getsignal(signal.SIGTERM)
+    assert cli.main([str(ws), "log"]) == 1
+    out, err = capfd.readouterr()
+    assert json.loads(out) == {"error": "terminated", "kind": "error"} and out.count("\n") == 1 and "Traceback" not in err
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_sigterm_while_the_result_is_written_does_not_cut_it(ws, monkeypatch, capfd):
+    """Once the result is being written a SIGTERM only records itself: stdout gets the whole object."""
+    import signal
+    real = cli._write
+
+    def write(text):
+        os.kill(os.getpid(), signal.SIGTERM)
+        real(text)
+    monkeypatch.setattr(cli, "_write", write)
+    assert cli.main([str(ws), "log"]) == 0
+    out, err = capfd.readouterr()
+    assert json.loads(out)["head"] == "r000" and "Traceback" not in err
+
+
+def test_sigterm_while_the_handler_is_installed_is_one_json_error(ws, monkeypatch, capfd):
+    """A SIGTERM between installing the handler and running the command (here: while stdout is redirected) is caught too."""
+    import signal
+    real = os.dup
+    calls = []
+
+    def dup(fd):
+        if not calls:
+            calls.append(fd)
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real(fd)
+    monkeypatch.setattr(cli.os, "dup", dup)
+    before = signal.getsignal(signal.SIGTERM)
+    assert cli.main([str(ws), "log"]) == 1
+    out, err = capfd.readouterr()
+    assert json.loads(out) == {"error": "terminated", "kind": "error"} and "Traceback" not in err
+    assert signal.getsignal(signal.SIGTERM) == before
