@@ -342,6 +342,7 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
         option = next(o for o in render_mod.GRAPH_FILE_OPTIONS if o in cmd)
         seen["graph"] = Path(cmd[cmd.index(option) + 1]).read_text()
     monkeypatch.setattr(render_mod, "run", fake_run)
+    monkeypatch.setattr(render_mod, "seek_margin", lambda path: render_mod.SEEK_MARGIN_SECONDS)  # (run is faked: no ffprobe here)
     monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 2000)
     media = probe(str(coded))
     tl = timeline(str(coded), media.fps, [(k * 0.5, k * 0.5 + 0.4) for k in range(20)])
@@ -381,6 +382,7 @@ def test_the_graph_file_is_removed_when_ffmpeg_fails(monkeypatch, coded, tmp_pat
     def failing_run(cmd, capture=True):
         raise render_mod.MediaError("ffmpeg failed")
     monkeypatch.setattr(render_mod, "run", failing_run)
+    monkeypatch.setattr(render_mod, "seek_margin", lambda path: render_mod.SEEK_MARGIN_SECONDS)
     monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)
     media = probe(str(coded))
     with pytest.raises(render_mod.MediaError):
@@ -629,18 +631,22 @@ def test_a_trim_that_leaves_a_clip_shorter_than_its_dissolve_is_refused(audio_ta
         render(tl, media, RCFG, tmp_path / "short.mp4")
 
 
-def test_an_mpeg_ts_source_with_long_gops_is_read_from_its_start(tmp_path):
-    """MPEG-TS (AVCHD .mts) has no index: an input seek can land past the only keyframe and decode nothing.  Its clips read from the start
-    of the file: reverse order and a dissolve, frame-exact, every tone right."""
+def test_an_mpeg_ts_source_with_long_gops_seeks_by_its_keyframe_gap(tmp_path, caplog):
+    """MPEG-TS (AVCHD .mts) has no index: a seek lands on a timestamp, not a keyframe, and an input seeked 0.25 s early decoded nothing
+    (47 of 140 frames).  Its inputs are seeked by the file's longest keyframe gap instead: reverse order and a dissolve, frame-exact, every
+    tone right; and a clip from 0.0 keeps its first frame (the video starts a fraction of a frame after the audio) with no warning."""
     import subprocess as sp
 
     mp4 = sig.make_coded_footage(tmp_path / "long_gop.mp4", seconds=12, gop=300)
     ts = tmp_path / "long_gop.ts"
     sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(ts)], check=True)
     assert not render_mod.seekable(str(ts)) and render_mod.seekable(str(mp4))
+    assert render_mod.seek_margin(str(ts)) > 1.0 and render_mod.seek_margin(str(mp4)) == render_mod.SEEK_MARGIN_SECONDS
     media = probe(str(ts))
-    tl = timeline(str(ts), media.fps, [(8.0, 10.0), (5.0, 7.0), (1.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
-    out = do_render(tl, media, tmp_path / "ts_out.mp4")
+    tl = timeline(str(ts), media.fps, [(8.0, 10.0), (5.0, 7.0), (0.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "ts_out.mp4")
+    assert not any("first frame" in r.getMessage() for r in caplog.records)
     assert_video_exact(tl, out, media.fps)
     assert_av_lengths(out, media.fps)
     assert_source_tones(tl, sig.audio(out))

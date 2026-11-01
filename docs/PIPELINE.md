@@ -126,9 +126,13 @@ Each clip reads the source through its own ffmpeg input:
 
 - **Where it reads:** the input is seeked to the last frame at least 0.25 s before the clip's in-point (or to 0), and reads to 0.5 s past
   its out-point.
-  - Seeking is used only in containers with an index (MP4/MOV, Matroska/WebM, AVI, MXF, ASF, FLV).
-  - In MPEG-TS (AVCHD `.mts`/`.m2ts`), MPEG program streams and raw streams, a seek can land past the only keyframe in reach and decode
-    nothing. Their clips read from the start of the file instead, which is slower for long files.
+  - **Containers with an index** (MP4/MOV, Matroska/WebM, AVI, MXF, ASF, FLV) seek to the keyframe before the seek point.
+  - **Containers without one** (MPEG-TS such as AVCHD `.mts`/`.m2ts`, MPEG program streams, Ogg, DV, raw streams): a seek lands on a
+    timestamp, not a keyframe, so with only 0.25 s of margin a long-GOP TS rendered 47 of its 140 frames.
+    - Their inputs are seeked earlier by the file's longest keyframe gap, read once from the packets' keyframe flags without decoding.
+    - A 2-minute 720p TS with 30 shuffled clips renders frame-exact in about the time of the same streams in MP4 (14.2 s against 14.8 s).
+    - A file with no flagged keyframes is read from the start for every clip, with a warning. That is slow on long files: about 17 times
+      slower for a 5-minute 1080p file with 30 clips.
 - **Trims:** they are exact, made on the decoded frames and samples, relative to that seek. Video trims start 0.5 ms early, so a point
   stored to 4 decimals still selects its own frame at 29.97 and 30 fps.
 - **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).

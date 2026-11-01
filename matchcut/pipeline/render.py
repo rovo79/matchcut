@@ -3,8 +3,9 @@
 Every clip reads the source through its own ffmpeg input, seeked to just before the clip (``clip_inputs``). With one shared input,
 clips that play out of source order (or repeat a range) made ffmpeg buffer, starve or stall the branches it could not feed yet: the
 audio of a reordered dissolve came out empty, a reordered cut under music came out short, a repeated range never finished, and a
-reordered video held seconds of raw frames in memory.  Each input decodes only its clip (plus ``SEEK_MARGIN_SECONDS`` before it),
-and the trims stay exact: they are applied to the decoded frames, relative to the seek point.
+reordered video held seconds of raw frames in memory.  Each input decodes its clip plus a lead-in before it (``seek_margin``: longer in
+MPEG-TS, the whole file before it when no keyframes are flagged), and the trims stay exact: they are applied to the decoded frames,
+relative to the seek point.
 """
 from __future__ import annotations
 
@@ -59,7 +60,7 @@ def _format_names(path: str, mtime_ns: int) -> tuple:
 
 
 def seekable(path: str) -> bool:
-    """Whether ffmpeg can seek ``path`` by an index (see ``INDEXED_FORMATS``); unknown or unreadable files are read from the start."""
+    """Whether ffmpeg can seek ``path`` by an index (see ``INDEXED_FORMATS``); unknown or unreadable files are not."""
     try:
         names = _format_names(str(path), os.stat(path).st_mtime_ns)
     except (MediaError, OSError):
@@ -67,14 +68,57 @@ def seekable(path: str) -> bool:
     return any(n in INDEXED_FORMATS for n in names)
 
 
-def clip_inputs(tl: Timeline, fps: float, seek: bool = True) -> List[ClipInput]:
-    """One input per clip.  ``seek`` on: on the frame grid, ``SEEK_MARGIN_SECONDS`` before the in-point (or 0); off: from the start of the file."""
+@functools.lru_cache(maxsize=64)
+def _keyframe_gap(path: str, mtime_ns: int) -> Optional[float]:
+    """The longest stretch, in seconds, between the video's keyframes (from the start of the stream and to its end), read from the packets'
+    keyframe flags without decoding; None when no keyframe is flagged or the packets cannot be read."""
+    try:
+        proc = run([_require("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,flags", "-of", "csv=p=0", path])
+    except MediaError:
+        return None
+    times, keys = [], []
+    for line in proc.stdout.decode("utf-8", "replace").splitlines():
+        parts = line.split(",")
+        try:
+            t = float(parts[0])
+        except (ValueError, IndexError):
+            continue
+        times.append(t)
+        if len(parts) > 1 and "K" in parts[1]:
+            keys.append(t)
+    if not keys or not times:
+        return None
+    marks = [min(times)] + sorted(keys) + [max(times)]
+    return max(b - a for a, b in zip(marks, marks[1:]))
+
+
+def seek_margin(path: str) -> Optional[float]:
+    """How far before a clip's in-point its input is seeked, or None to read it from the start of the file.
+
+    Indexed containers seek to the keyframe before the seek point: ``SEEK_MARGIN_SECONDS``.  In the others (MPEG-TS such as AVCHD, MPEG
+    program streams) a seek lands on a timestamp, not a keyframe, and frames before the next keyframe are lost; the margin is then the
+    file's longest keyframe gap plus ``SEEK_MARGIN_SECONDS``, so a keyframe always comes before the in-point.  Without flagged keyframes,
+    the clip is read from the start (slow on long files; logged)."""
+    if seekable(path):
+        return SEEK_MARGIN_SECONDS
+    try:
+        gap = _keyframe_gap(str(path), os.stat(path).st_mtime_ns)
+    except OSError:
+        gap = None
+    if gap is None:
+        log.warning("%s: no seek index and no flagged keyframes: every clip is read from the start of the file (slow for long files)", Path(path).name)
+        return None
+    return gap + SEEK_MARGIN_SECONDS
+
+
+def clip_inputs(tl: Timeline, fps: float, margin: Optional[float] = SEEK_MARGIN_SECONDS) -> List[ClipInput]:
+    """One input per clip, seeked on the frame grid ``margin`` seconds before the in-point (or to 0); ``margin`` None: from the start."""
     out: List[ClipInput] = []
     for i, c in enumerate(tl.clips):
-        if not seek:
+        if margin is None:
             out.append(ClipInput(i, 0.0, round(c.source_out + READ_MARGIN_SECONDS, 6), round(c.source_in, 6), round(c.source_out, 6)))
             continue
-        seek_at = max(0.0, math.floor((c.source_in - SEEK_MARGIN_SECONDS) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - SEEK_MARGIN_SECONDS)
+        seek_at = max(0.0, math.floor((c.source_in - margin) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - margin)
         seek_at = round(seek_at, 6)
         out.append(ClipInput(i, seek_at, round(c.source_out - seek_at + READ_MARGIN_SECONDS, 6), round(c.source_in - seek_at, 6), round(c.source_out - seek_at, 6)))
     return out
@@ -91,7 +135,7 @@ def build_filter_graph(
     cfg: RenderConfig,
     music: Optional[MusicConfig] = None,
     music_duration: Optional[float] = None,
-    seek: bool = True,
+    margin: Optional[float] = SEEK_MARGIN_SECONDS,
 ) -> str:
     """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``.
 
@@ -106,7 +150,7 @@ def build_filter_graph(
     has_music = bool(music is not None and music.path)
     audio = media.has_audio and not (has_music and music.only)
     eps = TRIM_EPSILON_SECONDS
-    for ci in clip_inputs(tl, fps, seek):
+    for ci in clip_inputs(tl, fps, margin):
         i = ci.index
         parts.append(
             f"[{i}:v]trim=start={max(0.0, ci.start - eps):.6f}:end={ci.end - eps:.6f},setpts=PTS-STARTPTS,"
@@ -209,12 +253,13 @@ def fit_ranges(tl: Timeline, media: MediaInfo) -> Timeline:
             where += f" (the file, with its audio, runs to {extent.container_end:.3f} s)"
         if frames(c.source_in) >= end_f - 0.5:
             raise RangeError(f"clip {c.id} starts at {c.source_in:.3f} s, at or after the end of the video: {where}")
-        if frames(c.source_out) <= start_f + 0.5:
+        first_slot = math.floor(start_f + 1e-3)  # the grid slot the first frame falls in: a trim from it already selects that frame
+        if frames(c.source_out) <= first_slot + 0.5:
             raise RangeError(f"clip {c.id} ends at {c.source_out:.3f} s, before the first frame of the video: {where}")
         trimmed = False
-        if frames(c.source_in) < start_f - slack:
+        if frames(c.source_in) < first_slot - slack:
             trimmed = True
-            first = math.ceil(start_f - 1e-3) / fps
+            first = first_slot / fps
             log.warning("clip %s starts at %.3f s, before the first frame of the picture: rendered from %.3f s (%s)", c.id, c.source_in, first, where)
             c.source_in = round(first, 6)
         if extent.exact and frames(c.source_out) > end_f + slack:
@@ -326,12 +371,12 @@ def render(
     _ensure_open_files(len(tl.clips))
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
-    can_seek = seekable(media.path)  # decided once: the graph's trims and the inputs' seeks must agree
-    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration, seek=can_seek)
+    margin = seek_margin(media.path)  # decided once: the graph's trims and the inputs' seeks must agree
+    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration, margin=margin)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n"]
     threads = ["-threads", "1"] if len(tl.clips) > SINGLE_THREAD_DECODE_ABOVE else []
-    for ci in clip_inputs(tl, media.fps, can_seek):
+    for ci in clip_inputs(tl, media.fps, margin):
         cmd += [*threads, "-ss", f"{ci.seek:.6f}", "-t", f"{ci.length:.6f}", "-i", media.path]
     if has_music:
         cmd += ["-i", str(music.path)]
