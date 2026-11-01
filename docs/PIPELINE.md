@@ -172,7 +172,8 @@ Each clip reads the source through its own ffmpeg input:
       file's audio can run on past its picture.
     - Matroska/WebM, which record no stream duration: the stream's `DURATION` tag.
     - A file with neither: the container's end, used only to refuse clips that start past it.
-- **Shot detection** ends the last shot where the picture ends, so new runs do not produce such clips.
+- **Shot detection:** when the container runs more than a frame past the picture, the last shot ends where the picture ends, so new runs
+  do not produce such clips. A tail within a frame leaves shots as they were.
 - **Tested on:** ffmpeg 6.1, plus a stand-in for ffmpeg 9's graph-file option. ffmpeg 7 adds threads per input.
 
 ## Music

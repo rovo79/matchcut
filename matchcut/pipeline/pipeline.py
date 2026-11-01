@@ -233,9 +233,13 @@ class Pipeline:
                 )
                 analysis = Analysis(series=series, cells=cells, audio_energy=energy, audio_hop_seconds=self.cfg.analysis.audio_hop_seconds)
                 analysis.save(analysis_path)
-                # the last shot ends where the picture ends, not the container: the audio can run on past it
+                # when the audio runs on more than a frame past the picture (phone footage often does), the last shot ends where the
+                # picture ends, not at the container's end; a tail within a frame (an AAC frame's padding) leaves the shots as they were
                 extent = video_extent(media.path)
-                shots = detect_shots(series, self.cfg.shots, duration=extent.end if extent is not None and extent.exact else media.duration)
+                last = media.duration
+                if extent is not None and extent.exact and media.fps > 0 and (media.duration - extent.end) * media.fps > 1.0:
+                    last = extent.end
+                shots = detect_shots(series, self.cfg.shots, duration=last)
                 save_shots(shots, shots_path)
                 log.info("ingest: %d shots detected", len(shots))
             frames = FrameCache(media.path, self.ws / "frames", self.cfg.sampling)
