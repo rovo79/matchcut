@@ -71,8 +71,7 @@ def build_filter_graph(
 
     Transitions are placed by frame count: each clip contributes its whole frames, each transition its whole frames, and an xfade starts
     ``TRIM_EPSILON_SECONDS`` before its first frame's time, written to the microsecond against the exact frame rate (``30000/1001``, not
-    ``29.9700``).  Rounded seconds started transitions a frame late at 29.97 and 30 fps.
-"""
+    ``29.9700``).  Rounded seconds started transitions a frame late at 29.97 and 30 fps."""
     fps = media.fps
     rate = _rate_text(fps)
     width = cfg.proxy_width if cfg.proxy else cfg.width
