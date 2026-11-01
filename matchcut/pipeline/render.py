@@ -97,7 +97,8 @@ def seek_margin(path: str) -> Optional[float]:
 
     Indexed containers seek to the keyframe before the seek point: ``SEEK_MARGIN_SECONDS``.  In the others (MPEG-TS such as AVCHD, MPEG
     program streams) a seek lands on a timestamp, not a keyframe, and frames before the next keyframe are lost; the margin is then the
-    file's longest keyframe gap plus ``SEEK_MARGIN_SECONDS``, so a keyframe always comes before the in-point.  Without flagged keyframes,
+    file's longest keyframe gap, twice over, plus ``SEEK_MARGIN_SECONDS``: a keyframe always comes before the in-point, and an intra-refresh
+    stream (whose recovery points are flagged as keyframes but complete a picture only a refresh period later) has a whole picture by then.  Without flagged keyframes,
     the clip is read from the start (slow on long files; logged)."""
     if seekable(path):
         return SEEK_MARGIN_SECONDS
@@ -108,7 +109,7 @@ def seek_margin(path: str) -> Optional[float]:
     if gap is None:
         log.warning("%s: no seek index and no flagged keyframes: every clip is read from the start of the file (slow for long files)", Path(path).name)
         return None
-    return gap + SEEK_MARGIN_SECONDS
+    return 2 * gap + SEEK_MARGIN_SECONDS
 
 
 def clip_inputs(tl: Timeline, fps: float, margin: Optional[float] = SEEK_MARGIN_SECONDS) -> List[ClipInput]:
@@ -158,6 +159,10 @@ def build_filter_graph(
         )
         if audio:
             parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
+        elif media.has_audio:
+            # the source's audio is not used (music only): consume it anyway; ffmpeg times a seeked MPEG-TS/PS input differently when its
+            # audio is left unread, and the video trims then land on the wrong frames
+            parts.append(f"[{i}:a]anullsink")
 
     # whole frames, rounded as interchange.common.to_frames rounds them (halves away from zero, with a millionth of a frame of slack, so a
     # float sum such as 0.3 + 0.3 + 0.3 = 0.8999... s still rounds 22.5 frames up, as the exporters' layout does)

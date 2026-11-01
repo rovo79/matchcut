@@ -631,22 +631,36 @@ def test_a_trim_that_leaves_a_clip_shorter_than_its_dissolve_is_refused(audio_ta
         render(tl, media, RCFG, tmp_path / "short.mp4")
 
 
-def test_an_mpeg_ts_source_with_long_gops_seeks_by_its_keyframe_gap(tmp_path, caplog):
+@pytest.mark.parametrize("x264, audio_mode", [
+    ("keyint=300", "source"), ("keyint=300", "music only"), ("keyint=300", "source and music"),
+    ("intra-refresh=1:keyint=50", "source"), ("intra-refresh=1:keyint=50", "music only"),
+])
+def test_an_mpeg_ts_source_seeks_by_its_keyframe_gap(ticks, tmp_path, caplog, x264, audio_mode):
     """MPEG-TS (AVCHD .mts) has no index: a seek lands on a timestamp, not a keyframe, and an input seeked 0.25 s early decoded nothing
-    (47 of 140 frames).  Its inputs are seeked by the file's longest keyframe gap instead: reverse order and a dissolve, frame-exact, every
-    tone right; and a clip from 0.0 keeps its first frame (the video starts a fraction of a frame after the audio) with no warning."""
+    (47 of 140 frames).  Its inputs are seeked by twice the file's longest keyframe gap (an intra-refresh stream's recovery points are
+    flagged as keyframes but complete a picture a refresh later).  Reverse order and a dissolve, frame-exact, the right sound; a clip from
+    0.0 keeps its first frame with no warning; and music only (where the source audio is not read, and ffmpeg timed the TS differently)."""
     import subprocess as sp
 
-    mp4 = sig.make_coded_footage(tmp_path / "long_gop.mp4", seconds=12, gop=300)
-    ts = tmp_path / "long_gop.ts"
+    mp4 = tmp_path / "coded.mp4"
+    stripe = 320 // sig.BITS
+    lum = f"if(lt(X,{stripe * sig.BITS}),255*mod(floor(N/pow(2,floor(X/{stripe}))),2),128)"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d=12,format=gray,geq=lum='{lum}'",
+            "-f", "lavfi", "-i", "aevalsrc=exprs='0.5*sin(2*PI*(200+40*floor(t))*t)':s=48000:d=12", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-x264-params", x264, "-c:a", "aac", "-b:a", "192k", str(mp4)], check=True)
+    ts = tmp_path / "coded.ts"
     sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(ts)], check=True)
     assert not render_mod.seekable(str(ts)) and render_mod.seekable(str(mp4))
-    assert render_mod.seek_margin(str(ts)) > 1.0 and render_mod.seek_margin(str(mp4)) == render_mod.SEEK_MARGIN_SECONDS
+    assert render_mod.seek_margin(str(ts)) > render_mod.SEEK_MARGIN_SECONDS and render_mod.seek_margin(str(mp4)) == render_mod.SEEK_MARGIN_SECONDS
     media = probe(str(ts))
     tl = timeline(str(ts), media.fps, [(8.0, 10.0), (5.0, 7.0), (0.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    music = None if audio_mode == "source" else MusicConfig(path=str(ticks), only=audio_mode == "music only", gain_db=-6.0)
     with caplog.at_level("WARNING", logger="matchcut.pipeline"):
-        out = do_render(tl, media, tmp_path / "ts_out.mp4")
+        out = do_render(tl, media, tmp_path / "ts_out.mp4", music)
     assert not any("first frame" in r.getMessage() for r in caplog.records)
     assert_video_exact(tl, out, media.fps)
     assert_av_lengths(out, media.fps)
-    assert_source_tones(tl, sig.audio(out))
+    y = sig.audio(out)
+    assert_source_tones(tl, y, present=audio_mode != "music only")
+    if music is not None:
+        assert_ticks(tl, y)

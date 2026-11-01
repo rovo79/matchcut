@@ -129,7 +129,10 @@ Each clip reads the source through its own ffmpeg input:
   - **Containers with an index** (MP4/MOV, Matroska/WebM, AVI, MXF, ASF, FLV) seek to the keyframe before the seek point.
   - **Containers without one** (MPEG-TS such as AVCHD `.mts`/`.m2ts`, MPEG program streams, Ogg, DV, raw streams): a seek lands on a
     timestamp, not a keyframe, so with only 0.25 s of margin a long-GOP TS rendered 47 of its 140 frames.
-    - Their inputs are seeked earlier by the file's longest keyframe gap, read once from the packets' keyframe flags without decoding.
+    - Their inputs are seeked earlier by twice the file's longest keyframe gap, read once from the packets' keyframe flags without decoding.
+      Twice, because an intra-refresh stream flags recovery points that complete a picture only a refresh period later.
+    - With music only, the source audio is still read and dropped: a seeked MPEG-TS/PS input that leaves its audio unread is timed
+      differently by ffmpeg, and the video trims land on the wrong frames.
     - A 2-minute 720p TS with 30 shuffled clips renders frame-exact in about the time of the same streams in MP4 (14.2 s against 14.8 s).
     - A file with no flagged keyframes is read from the start for every clip, with a warning. That is slow on long files: about 17 times
       slower for a 5-minute 1080p file with 30 clips.
