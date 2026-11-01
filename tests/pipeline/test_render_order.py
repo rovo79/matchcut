@@ -471,23 +471,94 @@ def audio_tail(tmp_path_factory) -> Path:
     return out
 
 
+@pytest.fixture(scope="module")
+def audio_tail_mkv(audio_tail) -> Path:
+    """The same file in Matroska: its video stream records no duration (only a DURATION tag)."""
+    import subprocess as sp
+
+    out = audio_tail.with_suffix(".mkv")
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio_tail), "-c", "copy", str(out)], check=True)
+    return out
+
+
+@pytest.mark.parametrize("container", ["mp4", "mkv"])
 @pytest.mark.parametrize("ranges, transition, message", [
-    ([(1.0, 3.0), (10.5, 11.5)], Transition("dissolve", 0.4), "starts at 10.500 s, at or after the end of the video"),  # the hang on main
+    # past the end of the file: the input that made ffmpeg wait forever (main hangs here)
+    ([(1.0, 3.0), (12.5, 13.5)], Transition("dissolve", 0.4), "starts at 12.500 s, at or after the end of the video"),
+    # inside the file's audio tail but after the picture
+    ([(1.0, 3.0), (10.5, 11.5)], Transition("dissolve", 0.4), "starts at 10.500 s, at or after the end of the video"),
     ([(1.0, 3.0), (10.5, 11.5)], Transition(), "starts at 10.500 s, at or after the end of the video"),
-    ([(1.0, 3.0), (8.0, 11.5)], Transition(), "ends at 11.500 s, more than a frame past the end of the video"),
     ([(-0.5, 1.0), (3.0, 4.0)], Transition(), "before the start"),
     ([(1.0, 1.02), (3.0, 4.0)], Transition(), "shorter than one frame"),
 ])
-def test_a_range_the_video_cannot_play_is_refused_before_ffmpeg_starts(monkeypatch, audio_tail, tmp_path, ranges, transition, message):
-    media = probe(str(audio_tail))
+def test_a_range_the_video_cannot_play_is_refused_before_ffmpeg_starts(audio_tail, audio_tail_mkv, tmp_path, container, ranges, transition, message):
+    """Run for real (ffmpeg is not patched out): a regression shows as a timeout here, not as a pass."""
+    src = audio_tail if container == "mp4" else audio_tail_mkv
+    media = probe(str(src))
     assert media.duration > 11.5  # the container (with the audio) runs past the video's 10 s
-    monkeypatch.setattr(render_mod, "run", lambda *a, **k: pytest.fail("ffmpeg must not start"))
-    tl = timeline(str(audio_tail), media.fps, ranges, [Transition(), transition])
-    with pytest.raises(render_mod.MediaError, match=message) as err:
-        with deadline(20):
+    tl = timeline(str(src), media.fps, ranges, [Transition(), transition])
+    with pytest.raises(render_mod.RangeError, match=message) as err:
+        with deadline(30):
             render(tl, media, RCFG, tmp_path / "bad.mp4")
     if "end of the video" in message:
-        assert "runs 0.000-10.000 s" in str(err.value) and "with its audio, runs to 12." in str(err.value)
+        import re
+
+        assert re.search(r"runs 0\.0\d\d-10\.0\d\d s", str(err.value)) and "with its audio, runs to 12." in str(err.value), str(err.value)
+    assert not (tmp_path / "bad.mp4").exists()
+
+
+def test_an_out_point_past_the_picture_is_rendered_to_the_last_frame_with_a_warning(audio_tail, tmp_path, caplog):
+    """Older workspaces ended their last shot at the container's end: such a clip renders to the video's last frame (warned), it is not
+    refused; the stage itself is not changed."""
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (8.0, 11.5)])
+    before = tl.to_dict()
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "over.mp4")
+    assert any("past the end of the picture: rendered to 10.000 s" in r.getMessage() for r in caplog.records)
+    assert tl.to_dict() == before
+    st = sig.streams(out)
+    assert int(st["video"]["nb_read_frames"]) == 100 and abs(float(st["audio"]["duration"]) - 4.0) < 0.002
+
+
+def test_a_clip_ending_exactly_at_the_last_frame_at_60_fps_is_not_trimmed(tmp_path, caplog):
+    """1111 frames at 60 fps end at 18.51666...; the stored 4-decimal point 18.5167 is not past the picture."""
+    import subprocess as sp
+
+    src = tmp_path / "f60.mp4"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=60", "-f", "lavfi", "-i", "sine=f=440:r=48000",
+            "-frames:v", "1111", "-t", "18.6", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    media = probe(str(src))
+    tl = timeline(str(src), media.fps, [(1.0, 2.0), (17.0, round(1111 / 60, 4))])
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "f60_out.mp4")
+    assert not any("past the end of the picture" in r.getMessage() for r in caplog.records)
+    assert int(sig.streams(out)["video"]["nb_read_frames"]) == 60 + 91
+
+
+def test_the_pipeline_ends_its_last_shot_at_the_picture_and_renders(demo_video, tmp_path):
+    """Footage whose audio runs 0.1 s past its picture (as phone footage often does): the last shot ends with the picture, and the run
+    renders (it was refused: the last clip ended at the container's end)."""
+    import subprocess as sp
+
+    from matchcut.pipeline.config import PipelineConfig
+    from matchcut.pipeline.pipeline import Pipeline
+    from matchcut.pipeline.shots import load_shots
+
+    src = tmp_path / "tail_demo.mp4"
+    v = probe(str(demo_video)).duration
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(demo_video), "-f", "lavfi", "-i", f"sine=f=440:r=48000:d={v + 0.12:.2f}",
+            "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", str(src)], check=True)
+    extent = __import__("matchcut.pipeline.media", fromlist=["video_extent"]).video_extent(str(src))
+    assert extent.container_end - extent.end > 0.08
+    cfg = PipelineConfig(source=str(src), workspace=str(tmp_path / "ws"), target_duration=30.0)
+    cfg.llm.backend = "mock"
+    cfg.render.proxy = True
+    final = Pipeline(cfg).run()
+    shots = load_shots(tmp_path / "ws" / "shots.json")
+    assert abs(shots[-1].end - extent.end) < 1e-6
+    assert all(c.source_out <= extent.end + 1e-4 for c in final.clips)
+    assert (tmp_path / "ws" / "final_proxy.mp4").exists()
 
 
 def test_a_clip_ending_within_a_frame_of_the_video_end_still_renders(audio_tail, tmp_path):

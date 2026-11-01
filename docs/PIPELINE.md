@@ -151,20 +151,28 @@ Each clip reads the source through its own ffmpeg input:
   - **Decoding:** each clip decodes from the keyframe at or before its seek point, so up to one frame group plus 0.25 s before its in-point.
   - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file.
     - The option is the one the installed ffmpeg accepts, found by asking it once per binary.
-    - It is `-/filter_complex` on ffmpeg 7.1 and later, the only form in ffmpeg 9, which removed `-filter_complex_script`.
+    - It is `-/filter_complex` on newer versions: the generic `-/option` file syntax arrived around ffmpeg 7.0/7.1, and it is the only
+      form in ffmpeg 9, which removed `-filter_complex_script`.
     - Older versions use `-filter_complex_script`.
     - An ffmpeg that accepts neither gets a one-line error.
   - **Known slowdown:** cuts of many very short clips render slower than with the shared input. The reviewer measured a 1080p cut of
     100 × 0.4 s clips at 28.6 s, against 9.0 s before, because each clip decodes its own lead-in from a keyframe.
     - `MATCHCUT_PERF=1 pytest tests/pipeline/test_render_perf.py` measures that case and fails above its budget.
     - Any shared-input optimisation must keep `tests/pipeline/test_render_order.py`'s frame and audio checks passing.
-- **Ranges checked first:** a clip the video cannot play is refused before ffmpeg starts, with a one-line error. That covers a clip that:
-  - starts at or after the end of the video stream (a dissolve into one used to make ffmpeg wait forever);
-  - ends more than a frame past the end of the video stream;
-  - starts before the file;
-  - is shorter than a frame.
-
-  The end is the video stream's, measured from the start of the file, not the container's: a file's audio can run on past its picture.
+- **Ranges checked first:** before ffmpeg starts, each clip is checked against the video stream, in frames.
+  - **Refused, with a one-line error,** is a clip that:
+    - starts before the file;
+    - is shorter than a frame;
+    - starts at or after the end of the video (half a frame before it). A dissolve into a clip past the end of the file used to make
+      ffmpeg wait forever.
+  - **Rendered with a warning** is an out-point that runs past the last frame of the picture, when the clip starts inside it. It is
+    rendered to the last frame, and the stage itself is not changed. Older workspaces ended their last shot at the container's end.
+  - **Where the end comes from:**
+    - MP4/MOV: the video stream's duration or frame count, measured from the start of the file. The container's end is not used: a
+      file's audio can run on past its picture.
+    - Matroska/WebM, which record no stream duration: the stream's `DURATION` tag.
+    - A file with neither: the container's end, used only to refuse clips that start past it.
+- **Shot detection** ends the last shot where the picture ends, so new runs do not produce such clips.
 - **Tested on:** ffmpeg 6.1, plus a stand-in for ffmpeg 9's graph-file option. ffmpeg 7 adds threads per input.
 
 ## Music

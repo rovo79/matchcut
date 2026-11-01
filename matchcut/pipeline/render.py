@@ -151,49 +151,77 @@ def _rate_text(fps: float) -> str:
     return f"{exact.numerator}/{exact.denominator}" if abs(float(exact) - fps) < 1e-6 * max(fps, 1.0) else f"{fps:.6f}"
 
 
-def check_ranges(tl: Timeline, media: MediaInfo) -> None:
-    """Refuse, before ffmpeg starts, a clip whose source range the video cannot play: one that starts at or after the end of the video
-    (a dissolve into such a clip made ffmpeg wait forever), ends more than a frame past it (the picture would come out short under
-    full-length audio), starts before the file, or is shorter than a frame.  The end is the video stream's, not the container's."""
+class RangeError(MediaError):
+    """A clip's source range the video cannot play; raised before ffmpeg starts."""
+
+
+def fit_ranges(tl: Timeline, media: MediaInfo) -> Timeline:
+    """The timeline the renderer will play, checked against the video stream before ffmpeg starts.
+
+    Refused, with one line (``RangeError``): a clip that starts before the file, is shorter than a frame, or starts at or after the end of
+    the video stream (half a frame before it, or the container's end when the stream records no length).  A dissolve into a clip past
+    the end of the file made ffmpeg wait forever.
+
+    Kept, with a warning: an out-point that runs past the end of the picture, when the clip starts inside it.  Shots used to end at the
+    container's end, and the audio can run past the picture, so older workspaces have such clips; the copy ends them at the video's
+    last frame (the stage itself is not changed).  The end is the video stream's own, in frames, never the container's."""
     fps = media.fps if media.fps > 0 else 25.0
-    frame = 1.0 / fps
     extent = video_extent(media.path)
-    for c in tl.clips:
+    out = tl.copy()
+    name = Path(media.path).name
+    for c in out.clips:
         if c.source_in < -1e-6:
-            raise MediaError(f"clip {c.id} starts at {c.source_in:.3f} s, before the start of {Path(media.path).name}")
-        if c.source_out - c.source_in < frame - 1e-6:
-            raise MediaError(f"clip {c.id} is shorter than one frame ({c.source_in:.3f}-{c.source_out:.3f} s)")
+            raise RangeError(f"clip {c.id} starts at {c.source_in:.3f} s, before the start of {name}")
+        if (c.source_out - c.source_in) * fps < 1 - 1e-3:
+            raise RangeError(f"clip {c.id} is shorter than one frame ({c.source_in:.3f}-{c.source_out:.3f} s)")
         if extent is None:
             continue
-        v_start, v_end, container = extent
-        where = f"the video of {Path(media.path).name} runs {v_start:.3f}-{v_end:.3f} s"
-        if container is not None and container > v_end + frame / 2:
-            where += f" (the file, with its audio, runs to {container:.3f} s)"
-        if c.source_in >= v_end - frame / 2:
-            raise MediaError(f"clip {c.id} starts at {c.source_in:.3f} s, at or after the end of the video: {where}")
-        if c.source_out > v_end + frame + 1e-6:
-            raise MediaError(f"clip {c.id} ends at {c.source_out:.3f} s, more than a frame past the end of the video: {where}")
+        end_f = extent.end * fps
+        where = (f"the video of {name} runs {extent.start:.3f}-{extent.end:.3f} s" if extent.exact else
+                 f"{name} records no length for its video; the file ends at {extent.end:.3f} s")
+        if extent.exact and extent.container_end is not None and extent.container_end > extent.end + 0.5 / fps:
+            where += f" (the file, with its audio, runs to {extent.container_end:.3f} s)"
+        if c.source_in * fps >= end_f - 0.5:
+            raise RangeError(f"clip {c.id} starts at {c.source_in:.3f} s, at or after the end of the video: {where}")
+        if extent.exact and c.source_out * fps > end_f + 0.01:  # past the last frame (stored points are 4 decimals: 1e-4 s slack)
+            last = math.floor(end_f + 1e-3) / fps
+            if (last - c.source_in) * fps < 1 - 1e-3:
+                raise RangeError(f"clip {c.id} has less than a frame of picture before the end of the video: {where}")
+            log.warning("clip %s ends at %.3f s, past the end of the picture: rendered to %.3f s (%s)", c.id, c.source_out, last, where)
+            c.source_out = round(last, 6)
+    return out
 
 
 GRAPH_FILE_OPTIONS = ("-/filter_complex", "-filter_complex_script")  # ffmpeg 7.1+ (the only one in ffmpeg 9), then older versions
 
 
+_UNSUPPORTED = ("Unrecognized option", "Option not found", "unrecognized option")
+
+
 @functools.lru_cache(maxsize=8)
 def graph_file_option(ffmpeg: str) -> str:
     """The option that makes *this* ffmpeg read its filter graph from a file, found by asking it: ``-/filter_complex`` (ffmpeg 7.1 and later;
-    ffmpeg 9 removed ``-filter_complex_script``) or ``-filter_complex_script`` (older versions).  Each candidate runs a tiny graph."""
+    ffmpeg 9 removed ``-filter_complex_script``) or ``-filter_complex_script`` (older versions).  An option counts as unsupported only when
+    ffmpeg says it does not know it: a probe that fails for another reason (a build without the probe's filters) still found the option."""
     fd, name = tempfile.mkstemp(prefix=".graph-probe-", suffix=".txt")
     try:
         with os.fdopen(fd, "w") as fh:
             fh.write("anullsrc=r=8000:cl=mono,atrim=duration=0.01[o]")
         for option in GRAPH_FILE_OPTIONS:
-            proc = subprocess.run([ffmpeg, "-hide_banner", "-v", "error", "-nostdin", option, name, "-map", "[o]", "-f", "null", "-"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
-            if proc.returncode == 0:
+            try:
+                proc = subprocess.run([ffmpeg, "-hide_banner", "-v", "error", "-nostdin", option, name, "-map", "[o]", "-f", "null", "-"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+            except subprocess.TimeoutExpired as exc:
+                raise MediaError(f"{ffmpeg} did not answer within 60 s when asked about {option}") from exc
+            stderr = proc.stderr.decode("utf-8", "replace")
+            if proc.returncode == 0 or not any(marker in stderr for marker in _UNSUPPORTED):
                 return option
     finally:
         Path(name).unlink(missing_ok=True)
-    version = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True).stdout.splitlines()[:1]
+    try:
+        version = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=30).stdout.splitlines()[:1]
+    except (subprocess.TimeoutExpired, OSError):
+        version = []
     raise MediaError(f"{ffmpeg} ({version[0] if version else 'unknown version'}) accepts neither {' nor '.join(GRAPH_FILE_OPTIONS)}: "
                      "it cannot read this cut's filter graph from a file")
 
@@ -256,7 +284,7 @@ def render(
 ) -> Path:
     if not tl.clips:
         raise ValueError("cannot render an empty timeline")
-    check_ranges(tl, media)
+    tl = fit_ranges(tl, media)
     _ensure_open_files(len(tl.clips))
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
