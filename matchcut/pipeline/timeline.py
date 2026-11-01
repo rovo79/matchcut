@@ -180,6 +180,27 @@ class Timeline:
             out.clips[0].transition_in = Transition()
         return out
 
+    def transition_rounding_problems(self, rounded: "Timeline") -> List[Decision]:
+        """What rounding the transitions to whole frames (``rounded`` = ``self.snap_transitions()``) did that changes the cut, as decisions to
+        record: a transition that rounded to no frame (it is a cut now), or one that now takes all of a clip's frames.  Ordinary rounding of a
+        fraction of a frame is not reported (the exports and the render always rounded it so)."""
+        out: List[Decision] = []
+        fps = self.fps
+        frames = lambda t: int(math.floor(t * fps + 0.5 + 1e-6))  # noqa: E731
+        for i in range(1, min(len(self.clips), len(rounded.clips))):
+            before, after = self.clips[i].transition_in, rounded.clips[i].transition_in
+            prev, cur = rounded.clips[i - 1], rounded.clips[i]
+            ids = [prev.id, cur.id]
+            if not before.is_cut and after.is_cut:
+                out.append(Decision("final", "transition_dropped", ids,
+                                    f"{before.kind} of {before.duration:.3f} s between {prev.id} and {cur.id} rounds to no frame: it is a cut now",
+                                    data={"kind": before.kind, "seconds": before.duration}))
+            elif not after.is_cut and frames(after.duration) >= min(frames(prev.duration), frames(cur.duration)):
+                out.append(Decision("final", "transition_too_long", ids,
+                                    f"{after.kind} of {frames(after.duration)} frames between {prev.id} and {cur.id} is as long as one of its clips "
+                                    "after rounding to whole frames: the editor and the exports cannot lay it out", data={"frames": frames(after.duration)}))
+        return out
+
     def renumber(self) -> None:
         for i, c in enumerate(self.clips):
             c.id = f"c{i + 1:03d}"
@@ -254,25 +275,46 @@ class Timeline:
 
     # -- exports ---------------------------------------------------------
     def to_edl(self, title: Optional[str] = None) -> str:
-        """CMX3600-style EDL (single video track, source reel AX)."""
+        """CMX3600-style EDL (single video track, source reel AX).
+
+        Every number is a whole frame, rounded as the interchange exporters' layout rounds it (``interchange.common.layout``): source points
+        half up, transitions over the running total, record positions from the frame counts.  So this EDL, the M2a exports and the render
+        agree to the frame, including a dissolve of exactly half a frame more than a whole number."""
         lines = [f"TITLE: {title or self.name}", "FCM: NON-DROP FRAME", ""]
-        tc = lambda t: seconds_to_timecode(t, self.fps)  # noqa: E731
-        rec = 0.0
+        fps = self.fps
+        base = int(round(fps)) or 1
+
+        def frames(t: float) -> int:
+            return int(math.floor(max(t, 0.0) * fps + 0.5 + 1e-6))
+
+        def tc(n: int) -> str:
+            secs, f = divmod(max(n, 0), base)
+            return f"{secs // 3600:02d}:{(secs % 3600) // 60:02d}:{secs % 60:02d}:{f:02d}"
+
+        rec = 0  # record frame where the current clip starts
+        cum, done = 0.0, 0
         event = 0
         for i, c in enumerate(self.clips):
             tr = c.transition_in
+            in_f = frames(c.source_in)
+            out_f = max(frames(c.source_out), in_f + 1)
+            tr_f = 0
             if i > 0 and not tr.is_cut:
+                cum += tr.duration
+                tr_f = max(frames(cum) - done, 0)
+                done += tr_f
+            if tr_f:
                 prev = self.clips[i - 1]
-                rec -= tr.duration
-                frames = int(round(tr.duration * self.fps))
+                rec -= tr_f
                 event += 1
+                prev_out = max(frames(prev.source_out), frames(prev.source_in) + 1)
                 lines.append(
                     f"{event:03d}  AX       V     C        "
-                    f"{tc(prev.source_out)} {tc(prev.source_out)} {tc(rec)} {tc(rec)}"
+                    f"{tc(prev_out)} {tc(prev_out)} {tc(rec)} {tc(rec)}"
                 )
                 lines.append(
-                    f"{event:03d}  AX       V     D    {frames:03d} "
-                    f"{tc(c.source_in)} {tc(c.source_out)} {tc(rec)} {tc(rec + c.duration)}"
+                    f"{event:03d}  AX       V     D    {tr_f:03d} "
+                    f"{tc(in_f)} {tc(out_f)} {tc(rec)} {tc(rec + out_f - in_f)}"
                 )
                 lines.append(f"* FROM CLIP NAME: shot_{prev.shot_index:04d}")
                 lines.append(f"* TO CLIP NAME: shot_{c.shot_index:04d}")
@@ -281,12 +323,12 @@ class Timeline:
                 event += 1
                 lines.append(
                     f"{event:03d}  AX       V     C        "
-                    f"{tc(c.source_in)} {tc(c.source_out)} {tc(rec)} {tc(rec + c.duration)}"
+                    f"{tc(in_f)} {tc(out_f)} {tc(rec)} {tc(rec + out_f - in_f)}"
                 )
                 lines.append(f"* FROM CLIP NAME: shot_{c.shot_index:04d}")
             if c.purpose:
                 lines.append(f"* COMMENT: {c.beat_id} {c.purpose}".strip())
-            rec += c.duration
+            rec += out_f - in_f
             lines.append("")
         return "\n".join(lines)
 

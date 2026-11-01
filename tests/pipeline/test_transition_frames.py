@@ -18,7 +18,7 @@ from matchcut.pipeline.timeline import Clip, Timeline, Transition
 
 from . import signals as sig
 
-RATES = [Fraction(25), Fraction(30000, 1001), Fraction(24000, 1001), Fraction(50)]
+RATES = [Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30), Fraction(50), Fraction(60000, 1001)]
 
 
 def _random_timeline(rnd: random.Random, rate: Fraction) -> Timeline:
@@ -115,3 +115,80 @@ def test_m2a_export_of_an_existing_workspace_is_unchanged(tmp_path):
     tl.clips = [Clip("c001", 0, 0.0, 2.0), Clip("c002", 1, 4.0, 6.0, transition_in=Transition("dissolve", 0.336))]
     snapped, _ = export_timeline(tl, None, Fraction(25))
     assert [c.transition_in for c in snapped.clips] == [c.transition_in for c in tl.clips]
+
+
+def _edl_events(text: str):
+    """(transition frames, source in, source out, record in, record out) per event line, as frame numbers, from a pipeline EDL."""
+    def frames(tc: str, base: int) -> int:
+        h, m, sec, f = (int(x) for x in tc.split(":"))
+        return ((h * 60 + m) * 60 + sec) * base + f
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 8 and parts[1] == "AX" and parts[0].isdigit():
+            tr = int(parts[4]) if parts[3] == "D" else 0
+            tcs = parts[-4:]
+            out.append((parts[3], tr, tcs))
+    return out
+
+
+@pytest.mark.parametrize("rate", RATES, ids=str)
+def test_the_pipeline_edl_agrees_with_the_exporters_layout(rate):
+    """final.edl (Timeline.to_edl) gives every dissolve the frames the M2a layout gives it, at the same record frame: half-frame ties and
+    long runs of fractional dissolves included (it used Python's round(), ties to even, one dissolve at a time)."""
+    rnd = random.Random(int(rate * 7))
+    base = int(round(float(rate)))
+    for _ in range(100):
+        tl = _random_timeline(rnd, rate)
+        if rnd.random() < 0.5:  # exact ties: transitions of an odd number of half frames
+            for c in tl.clips[1:]:
+                if not c.transition_in.is_cut:
+                    c.transition_in = Transition(c.transition_in.kind, round((2 * rnd.randint(3, 8) + 1) / (2 * float(rate)), 6))
+        rows = layout(tl, rate)
+        dissolves = [e for e in _edl_events(tl.to_edl("t")) if e[0] == "D"]
+        want = [(r.tr, r.rec) for r in rows if r.tr]
+        got = []
+        for _, tr, tcs in dissolves:
+            h, m, sec, f = (int(x) for x in tcs[2].split(":"))
+            got.append((tr, ((h * 60 + m) * 60 + sec) * base + f))
+        assert got == want, (str(rate), got, want)
+
+
+def test_rounding_that_changes_the_cut_is_reported_not_silent():
+    """A dissolve that rounds to no frame becomes a cut, and one that rounds to a whole clip cannot be laid out: both are recorded."""
+    tl = Timeline(source="x.mp4", fps=25.0)
+    tl.clips = [Clip("c001", 0, 0, 2), Clip("c002", 1, 3, 5, transition_in=Transition("dissolve", 0.015)),
+                Clip("c003", 2, 6, 6.08), Clip("c004", 3, 7, 9, transition_in=Transition("dip_to_black", 0.07))]
+    rounded = tl.snap_transitions()
+    found = {(d.action, tuple(d.clip_ids)) for d in tl.transition_rounding_problems(rounded)}
+    assert ("transition_dropped", ("c001", "c002")) in found
+    assert ("transition_too_long", ("c003", "c004")) in found  # 2 frames (0.07 s) against a 2-frame clip
+    ordinary = Timeline(source="x.mp4", fps=25.0)
+    ordinary.clips = [Clip("c001", 0, 0, 2), Clip("c002", 1, 3, 5, transition_in=Transition("dissolve", 0.336))]
+    assert ordinary.transition_rounding_problems(ordinary.snap_transitions()) == []  # 8.4 -> 8 frames: ordinary rounding, not reported
+
+
+def test_pins_and_match_cuts_are_untouched_by_whole_frame_transitions():
+    """Rounding transitions changes only transition lengths: cut points, locks, tags (pins, match cuts) and order stay as they were."""
+    tl = Timeline(source="x.mp4", fps=30000 / 1001)
+    tl.clips = [Clip("c001", 0, 0.0, 2.0), Clip("c002", 1, 3.0, 5.0, transition_in=Transition("dissolve", 0.336), locked_in=True, tags=["pinned"]),
+                Clip("c003", 2, 6.0, 8.0, locked_out=True, tags=["match_out:3"]), Clip("c004", 3, 8.5, 10.0, locked_in=True, tags=["match_in:2"])]
+    tl.clips[0].locked_out = True
+    tl.clips[0].tags = ["pinned"]
+    out = tl.snap_transitions()
+    for a, b in zip(tl.clips, out.clips):
+        assert (a.id, a.shot_index, a.source_in, a.source_out, a.locked_in, a.locked_out, a.tags) == (b.id, b.shot_index, b.source_in, b.source_out, b.locked_in, b.locked_out, b.tags)
+    assert out.clips[3].transition_in.is_cut  # the match cut stays a hard cut
+
+
+@pytest.mark.parametrize("rate", [Fraction(30000, 1001), Fraction(25)], ids=str)
+def test_a_long_sequence_of_fractional_transitions_stays_on_the_layout(rate):
+    """200 clips, every junction a fractional dissolve: the stored frames equal the layout's, and the cut stays within half a frame."""
+    fps = float(rate)
+    tl = Timeline(source="x.mp4", fps=fps)
+    for i in range(200):
+        tl.clips.append(Clip(f"c{i + 1:03d}", i, round(i * 3 * 60 / fps, 4), round((i * 3 * 60 + 60) / fps, 4),
+                             transition_in=Transition("dissolve", 0.337) if i else Transition()))
+    out = tl.snap_transitions()
+    assert [r.tr for r in layout(tl, rate)] == [round(c.transition_in.duration * fps) if not c.transition_in.is_cut else 0 for c in out.clips]
+    assert abs(record_frames(layout(out, rate)) - tl.duration * fps) <= 0.5 + 1e-6

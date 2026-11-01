@@ -326,7 +326,12 @@ class Pipeline:
         if unknown:
             self._current_stage = f"pass:{unknown[0]}"
         final = run_passes(tl, ctx, names, save_dir=passes_dir, on_event=self._emit, after_pass=after_pass, cancel=self.cancel)
-        final = snap_to_frames(final, ctx.shot_bounds).snap_transitions()  # whole frames, as exported and rendered
+        snapped = snap_to_frames(final, ctx.shot_bounds)
+        final = snapped.snap_transitions()  # whole frames, as exported and rendered
+        for d in snapped.transition_rounding_problems(final):  # rounding never changes the cut silently
+            log.warning("final: %s", d.detail)
+            final.history.append(d)
+            self._emit(events.Decision(pass_name=d.pass_name, action=d.action, clip_ids=list(d.clip_ids), detail=d.detail, score=d.score, data=dict(d.data)))
         final.name = "final cut"
         final.stage = "final"
         final.save(self.ws / "final.json")
