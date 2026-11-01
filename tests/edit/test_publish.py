@@ -71,7 +71,7 @@ def test_publish_writes_the_edit_stage_its_record_and_an_immutable_copy(ws):
         "schema": "matchcut.edit_publish/1", "session": s.session_id, "revision": rid, "timeline_sha256": s.revision(rid)["timeline_sha256"],
         "edit_file": "edit.json", "edit_sha256": digest, "base_stage": "final", "base_file": "final.json", "base_sha256": sha(ws / "final.json"),
         "latest_stage": "final", "latest_stage_file": "final.json", "latest_stage_sha256": sha(ws / "final.json"), "decisions": 2,
-        "published": f"edits/published/{rid}-{digest[:12]}.json"}
+        "published": f"edits/published/{rid}-{digest[:12]}.json", "transition_mismatches": []}
     assert rec["published_at"] and out["replaced"] is None and out["previous"] is None and out["edit_sha256"] == digest
     assert (ws / rec["published"]).read_bytes() == data
     tl = Timeline.load(ws / "edit.json")

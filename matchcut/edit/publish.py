@@ -9,7 +9,9 @@
   it is fresh (``junctions.stale_edit``);
 - ``WS/edit_publish.json`` (``matchcut.edit_publish/1``): the session id, the revision and its timeline sha256, the sha256 of
   ``edit.json``, the base stage and its sha256 when the session started, the latest canonical stage and its sha256, the time, the number
-  of agent decisions and the published copy's path; a copy of every record is kept in ``edits/published/records/``
+  of agent decisions, the published copy's path and ``transition_mismatches`` (``rules.transition_mismatches`` of the published cut:
+  the protected pins whose transition differs from the one they hold, left untouched by the edits); a copy of every record is kept in
+  ``edits/published/records/``
   (``<UTC second>-<nnn>-<rev>-<sha12>.json``, ``nnn`` counting within the second, so the names sort in the order they were written);
 - one line in ``WS/edits/published/log.jsonl`` (append-only): when the copy went live, from which session and revision, its sha256, the
   revision published before (``previous``), one whose interrupted publish this completes (``recovered``), and whether an edit stage was
@@ -161,7 +163,7 @@ def _pin_states(ws: Path, tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]
 
     out = []
     for entry in _pins(tl, frame_rows(tl, ctx.rate), ctx, junction_ids(tl)):
-        e = {k: entry[k] for k in ("pin", "state", "reason", "junction", "hold_transition", "held_transition")}
+        e = {k: entry[k] for k in ("pin", "state", "reason", "junction", "hold_transition", "held_transition", "transition_mismatch")}
         if e["state"] == "pending":
             e["state"] = "not_held"
             e["reason"] = ("not held by this edit: the pin was stored after the pipeline's last run, so the base stage does not hold it "
@@ -210,7 +212,8 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
     ``replaced`` (where an earlier edit stage was moved, or None), ``previous`` (the revision the session published before, or None),
     ``recovered`` (the revision whose publish this one completes, when an earlier publish was cut short before its record, or None),
     ``human_left_out`` (why a human stage this publish superseded is left out, or None) and ``pins`` (every stored pin and where it stands
-    in the published cut)."""
+    in the published cut, with ``transition_mismatch``).  The record's ``transition_mismatches`` lists the protected pins whose transition
+    the published cut leaves different from the held one (``rules.transition_mismatches``)."""
     ws = Path(ws)
     rid = None if rev is None else S.check_revision_id(rev)
     with S._locked(ws) as d, stage_lock(ws, error=SessionError):
@@ -237,6 +240,7 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             raise SessionError(f"revision {rid} is not an edit stage timeline (stage {tl.stage!r})")  # pragma: no cover
         context = s.context()
         broken = _pin_problems(s.timeline("r000"), tl, context)
+        mismatches = rules.transition_mismatches(tl, context)  # untouched ones: any other transition there is refused just above
         if broken:
             label, line = broken[0]
             raise SessionError(f"pin {label} was added or changed since {rid} was made, and {rid} {line}: propose the edits again "
@@ -281,7 +285,7 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             "edit_file": EDIT_FILE, "edit_sha256": sha,
             "base_stage": s.base_stage, "base_file": s.state["base_file"], "base_sha256": s.state["base_sha256"],
             "latest_stage": latest_name, "latest_stage_file": _rel(ws, latest_path), "latest_stage_sha256": latest_sha,
-            "published_at": S._now(), "decisions": len(agent), "published": _rel(ws, copy),
+            "published_at": S._now(), "decisions": len(agent), "published": _rel(ws, copy), "transition_mismatches": mismatches,
         }
         if moved is not None:
             record["replaced"] = _rel(ws, moved)
@@ -299,7 +303,8 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         # whose record is missing (the session's next publish recovers it, logging it again with "recovered"), never a record without one
         _log(d, {"published_at": record["published_at"], "session": s.session_id, "revision": rid, "edit_sha256": sha,
                  "published": record["published"], "replaced": record.get("replaced"), "superseded_human": bool(superseded),
-                 "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous, "recovered": recovered})
+                 "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous, "recovered": recovered,
+                 "transition_mismatches": len(mismatches)})
         S._atomic_write(record_path, text)
         left_out = stale_human(ws) if superseded else None
         pins = _pin_states(ws, tl, context)

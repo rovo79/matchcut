@@ -113,8 +113,9 @@ def pin_problems(before: Timeline, after: Timeline, ctx: EditContext) -> List[Tu
 
 def transition_mismatches(tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
     """Every protected editor pin ``tl`` holds whose junction's transition is not the one the pin holds (a protection set with an explicit
-    transition, or a session on a stage the pipeline built ignoring the protection), with the two ways to resolve it: a proposal setting
-    the held transition (the only other change the rules allow there), or ``pin_transition`` protecting the junction's transition."""
+    transition, or a session on a stage the pipeline built ignoring the protection), with how to resolve it: a proposal setting the held
+    transition (the only other change the rules allow there); re-protecting the junction's transition with ``pin_transition`` instead
+    replaces the protection the editor chose, so the repair offers it only as the editor's decision."""
     rows = frame_rows(tl, ctx.rate)
     ids = junction_ids(tl)
     out: List[Dict[str, Any]] = []
@@ -134,8 +135,9 @@ def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int
     if held[1]:
         op["frames"] = held[1]
     return (f"the editor pin {pin_label(pin)} holds a {_label(*held)} but junction {n} has a {_label(*now)}: propose "
-            f"{json.dumps(op)} to give it the held transition (the only change allowed there), or run pin_transition "
-            f'{{"pin": "{pin_label(pin)}", "hold": true}} to protect the {_label(*now)} instead; left as it is, it still publishes')
+            f"{json.dumps(op)} to give it the held transition (the only change allowed there); or, if the editor agrees, re-protect the "
+            f'current {_label(*now)} with pin_transition {{"pin": "{pin_label(pin)}", "hold": true}} (that replaces the protection the '
+            "editor chose); left as it is, it still publishes")
 
 
 def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: EditContext, guards: Optional[Dict[str, Any]] = None) -> List[str]:

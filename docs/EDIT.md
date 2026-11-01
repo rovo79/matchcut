@@ -116,8 +116,8 @@ $ python -m matchcut.edit WS publish
 {"schema": "matchcut.edit_publish/1", "session": "dc8f9a5e-...", "revision": "r001", "timeline_sha256": "a477ae...",
  "edit_file": "edit.json", "edit_sha256": "9f5b4c...", "base_stage": "final", "base_file": "final.json", "base_sha256": "0fe5cf...",
  "latest_stage": "final", "latest_stage_file": "final.json", "latest_stage_sha256": "0fe5cf...", "published_at": "2026-11-01T16:24:20+00:00",
- "decisions": 2, "published": "edits/published/r001-9f5b4c501634.json", "replaced": null, "previous": null, "recovered": null,
- "human_left_out": null, "pins": []}
+ "decisions": 2, "published": "edits/published/r001-9f5b4c501634.json", "transition_mismatches": [], "replaced": null, "previous": null,
+ "recovered": null, "human_left_out": null, "pins": []}
 
 $ python -m matchcut.pipeline.cli junctions WS
 4 junctions in edit (4 stages)
@@ -187,7 +187,8 @@ export holds shared; each waits at most 30 seconds for it, then refuses: `anothe
   badges keep working;
 - `WS/edit_publish.json` (`matchcut.edit_publish/1`): the session id, the revision and its timeline sha256, the sha256 of `edit.json`, the
   base stage and its sha256 when the session started, the latest canonical stage and its sha256, the time, the number of agent decisions,
-  and the path of the published copy;
+  the path of the published copy, and `transition_mismatches` (the protected pins whose transition in the published cut is not the one
+  they hold, left untouched by the edits, each with its `repair`; see [Pins](#pins-and-pin_transition));
 - `WS/edits/published/<rev>-<sha12>.json`: an immutable copy of the same bytes;
 - a copy of the record in `edits/published/records/`, and one line in `edits/published/log.jsonl`.
 
@@ -197,7 +198,8 @@ record, which the session's next publish recovers and logs again; a record is ne
 It never touches `final.json`, a pass file, `human.json` or `human_import.json`. The result is the record plus `replaced`, `previous` (the
 revision this session published before; after a recovered publish, the one the old record names), `recovered` (the revision whose
 interrupted publish this completes, or null), `human_left_out` and `pins` (every stored pin and where it stands in the published cut:
-`held`, or `not_held` with the reason).
+`held`, or `not_held` with the reason; `transition_mismatch` says whether a held, protected pin's transition differs from the one it
+holds). The log line carries the number of such mismatches.
 
 What can be published, and when publishing is refused:
 
@@ -285,10 +287,12 @@ Only a new or worse violation counts, so the junction's transition can differ fr
   protection.
 
 `start` and `inspect` list such pins in `transition_mismatches` (and `inspect` flags the junction and the pin with `transition_mismatch`),
-each with its `repair`: propose `{"op": "set_transition", "junction": N, "kind": ..., "frames": ...}` with the held transition, or run
-`pin_transition {"pin": ..., "hold": true}` to protect the current one instead. Left as it is, the cut still publishes: `publish` accepts a
+each with its `repair`: first, propose `{"op": "set_transition", "junction": N, "kind": ..., "frames": ...}` with the held transition;
+or, **if the editor agrees**, re-protect the current transition with `pin_transition {"pin": ..., "hold": true}` (that replaces the
+protection the editor chose, so it is the editor's decision, not the agent's). Left as it is, the cut still publishes: `publish` accepts a
 transition at a protected pin that is `r000`'s or the held one, and refuses only another one (a revision made before the protection
-changed).
+changed); its result and `edit_publish.json` list the mismatches left untouched in `transition_mismatches`, and each `pins` entry says
+`transition_mismatch`.
 
 On the published `edit` stage a pinned junction keeps its `pinned` badge in `junctions` and the TUI (a publish refuses a revision that
 releases a pin its base holds), and `junctions` ends with a line per stored pin: `held by this edit`, or `not held by this edit (...)` for a

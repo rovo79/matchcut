@@ -403,6 +403,10 @@ def test_start_and_inspect_flag_a_protected_transition_r000_lacks_and_say_how_to
         "s0->s1", 1, "s0-s1", {"kind": "cut", "frames": 0}, {"kind": "dissolve", "frames": 4})
     assert '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}' in m["repair"]
     assert 'pin_transition {"pin": "s0->s1", "hold": true}' in m["repair"]
+    # the set_transition repair comes first; re-protecting the current transition overrides the editor's choice, so it is theirs to make
+    assert m["repair"].index("set_transition") < m["repair"].index("pin_transition")
+    assert 'or, if the editor agrees, re-protect the current cut with pin_transition {"pin": "s0->s1", "hold": true}' in m["repair"]
+    assert "instead" not in m["repair"]
     d = V.inspect(w)
     assert d["transition_mismatches"] == [m] and d["junctions"][0]["transition_mismatch"]
     assert next(p for p in d["pins"] if p["pin"] == "s0->s1")["reason"] == m["repair"]
@@ -433,6 +437,42 @@ def test_an_untouched_mismatch_publishes(make_ws, make_mismatch):
     rid = edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
     assert P.publish(w)["revision"] == rid
     assert Timeline.load(w / "edit.json").clips[1].transition_in.is_cut
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_publish_reports_an_untouched_mismatch_in_its_result_record_and_log(make_ws, make_mismatch):
+    """Not only as prose in pins[].reason: the result and edit_publish.json list it (as start and inspect do), each pins entry says
+    transition_mismatch, and the log line counts it."""
+    w = make_ws()
+    make_mismatch(w)
+    start = S.start(w, restart=True)
+    edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
+    out = P.publish(w)
+    [m] = out["transition_mismatches"]
+    assert m == start["transition_mismatches"][0] == V.inspect(w)["transition_mismatches"][0]
+    assert (m["pin"], m["n"], m["transition"], m["held_transition"]) == ("s0->s1", 1, {"kind": "cut", "frames": 0},
+                                                                         {"kind": "dissolve", "frames": 4})
+    record = json.loads((w / "edit_publish.json").read_text())
+    assert record["transition_mismatches"] == [m]
+    [pin] = out["pins"]
+    assert pin["state"] == "held" and pin["transition_mismatch"] is True and pin["reason"] == m["repair"]
+    line = json.loads((w / "edits" / "published" / "log.jsonl").read_text().splitlines()[-1])
+    assert line["transition_mismatches"] == 1
+    # the tool's result carries the same
+    edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 1}])
+    assert T.call(w, "publish", {})["transition_mismatches"] == [m]
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_publish_after_the_repair_reports_no_mismatch(make_ws, make_mismatch):
+    w = make_ws()
+    make_mismatch(w)
+    S.start(w, restart=True)
+    edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}])
+    out = P.publish(w)
+    assert out["transition_mismatches"] == [] and json.loads((w / "edit_publish.json").read_text())["transition_mismatches"] == []
+    assert [(p["pin"], p["transition_mismatch"]) for p in out["pins"]] == [("s0->s1", False)]
+    assert json.loads((w / "edits" / "published" / "log.jsonl").read_text().splitlines()[-1])["transition_mismatches"] == 0
 
 
 @pytest.mark.parametrize("make_mismatch", MISMATCHES)
