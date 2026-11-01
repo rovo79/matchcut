@@ -525,3 +525,54 @@ def test_a_revision_with_a_third_transition_is_refused_at_publish(make_ws):
         P.publish(w, r1)
     assert not (w / "edit.json").exists()
     assert P.publish(w)["revision"] == "r002"
+
+
+# ----------------------------------------------------------------------------------------------- the stage lock file cannot be made
+@pytest.fixture
+def refuse_stage_lock_file(monkeypatch):
+    """Call it to make ``os.open`` refuse WS/.stage.lock from then on, as on a read-only workspace."""
+    real = os.open
+
+    def refuse(path, *a, **k):
+        if Path(path).name == ".stage.lock":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, *a, **k)
+    return lambda: monkeypatch.setattr(os, "open", refuse)
+
+
+def test_without_an_edit_stage_an_export_goes_ahead_when_the_stage_lock_cannot_be_made(make_ws, refuse_stage_lock_file, tmp_path):
+    """Review fix: nothing can race an export of a workspace with no edit stage and no edit session, so it runs without the lock."""
+    w = make_ws()
+    cfg = PipelineConfig.load(w / "config.json")
+    refuse_stage_lock_file()
+    res = export_workspace(w, cfg, stages=("final",), formats=("otio",), out_dir=tmp_path / "out")
+    assert (tmp_path / "out" / "final.otio").exists() and res is not None
+    assert not (w / ".stage.lock").exists()
+    with stage_lock(w):  # an import's exclusive hold too
+        pass
+
+
+@pytest.mark.parametrize("what", ["session", "edit stage"])
+def test_with_an_edit_session_or_stage_a_stage_lock_file_that_cannot_be_made_is_a_clear_refusal(make_ws, refuse_stage_lock_file,
+                                                                                                  tmp_path, what):
+    from matchcut.interchange import InterchangeError
+    w = make_ws()
+    S.start(w)
+    if what == "edit stage":
+        edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+        P.publish(w)
+        os.rename(w / "edits", w / "edits.moved")  # an edit stage without a session
+    (w / ".stage.lock").unlink(missing_ok=True)
+    refuse_stage_lock_file()
+    cfg = PipelineConfig.load(w / "config.json")
+    message = r"cannot open the stage lock .*\.stage\.lock \(Permission denied\): .* has an edit stage or an edit session"
+    with pytest.raises(InterchangeError, match=message):
+        export_workspace(w, cfg, stages=("final",), formats=("otio",), out_dir=tmp_path / "out")
+    assert not (tmp_path / "out").exists()
+    with pytest.raises(InterchangeError, match=message):
+        import_timeline(w, cfg, w / "nothing.otio")
+    if what == "session":
+        edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+        with pytest.raises(Refused, match=message):
+            P.publish(w)
+        assert not (w / "edit.json").exists()

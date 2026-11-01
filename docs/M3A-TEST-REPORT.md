@@ -27,10 +27,10 @@ recorded run, `prototypes/editing_api/recorded-run-renderer-fix/proof.json` (90 
 - **Acceptance tests:** `tests/edit/test_acceptance_proof.py`, 93 tests: 88 passed, 5 skipped (the MCP checks), 0 failed.
 - **Findings: 2 shortfalls, both fixed here with tests.** M3a's `inspect` gave no shot descriptions and no story-beat target length, both of
   which the prototype checked (P05, P07). One undocumented behaviour (a proposal that changes nothing is refused) is now in EDIT.md.
-- **`tests/edit`:** 761 passed, 5 skipped.
-- **Full suite** (without the two research files, `-k "not perf"`): 1835 passed, 5 skipped, 31 deselected, 0 failed (837 s). The
-  filter deselects more than the perf case: 30 of the 31 are `test_properties.py::test_random_edits_on_an_imperfect_base_make_nothing_worse`
-  ("im*perf*ect"). They ran, and passed, in the `tests/edit` run.
+- **`tests/edit`:** 769 passed, 5 skipped (after the final review fixes).
+- **Full suite** (without the two research files, and with only the perf case deselected, `--deselect tests/pipeline/test_render_perf.py`):
+  1874 passed, 5 skipped, 1 deselected, 0 failed (833 s). An earlier run filtered with `-k "not perf"`, which also deselected the 30
+  `test_properties.py::test_random_edits_on_an_imperfect_base_make_nothing_worse` cases ("im*perf*ect"); this filter runs them.
 - **Collection errors, not passes:** `tests/test_data.py` and `tests/test_experiments.py` fail to collect (they need `torch` and `toolz`).
   Run without the ignores, pytest stops at collection: `2 errors in 1.68s`, **no test runs**. These are collection errors, not passes or
   failures of M3a.
@@ -144,13 +144,13 @@ every decisive clip), staleness and byte-identical determinism hold as the proto
 | command | result | time |
 |---|---|---|
 | `python -m pytest tests/edit/test_acceptance_proof.py -q` | 88 passed, 5 skipped | 39 s |
-| `python -m pytest tests/edit -q` | 761 passed, 5 skipped | 245 s |
-| `python -m pytest tests -q --ignore=tests/test_data.py --ignore=tests/test_experiments.py -k "not perf"` | 1835 passed, 5 skipped, 31 deselected (snapshots: 5 passed) | 837 s |
+| `python -m pytest tests/edit -q` | 769 passed, 5 skipped | 245 s |
+| `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | 1874 passed, 5 skipped, 1 deselected (snapshots: 5 passed) | 833 s |
 | `python -m pytest tests -q` | interrupted: 2 errors during collection, 0 tests run | 2 s |
 | `MATCHCUT_PERF=1 python -m pytest tests/pipeline/test_render_perf.py -q -s` | 1 passed: `100 x 0.4 s clips at 1080p: 34.3 s, peak 3020 MB` (budget 60 s) | 46 s |
 
-The 5 skipped tests, in `tests/edit` and in the full suite, are the MCP checks. The 31 deselected are the perf case and the 30
-`imperfect` property cases (see the summary); all 30 passed in the `tests/edit` run.
+The 5 skipped tests, in `tests/edit` and in the full suite, are the MCP checks. The 1 deselected is the perf case (run on its own, below);
+the 30 `imperfect` property cases run and pass in the full suite.
 
 **Collection errors, reported apart from the passes.** Without the ignores, pytest cannot import two research test modules and runs
 nothing:

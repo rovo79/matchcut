@@ -762,3 +762,52 @@ def test_the_tui_watches_the_edit_stage_files_even_while_it_is_not_listed(mock_w
     cfg.workspace = str(mock_workspace)
     files = RunState(cfg).timeline_files()
     assert mock_workspace / "edit.json" in files and mock_workspace / "edit_publish.json" in files
+
+
+# -- a transition protection survives the TUI's l / v ---------------------------------------------
+def test_locking_or_reverting_again_keeps_the_transition_protection_and_clearing_says_it_is_released(mock_workspace, tmp_path, monkeypatch):
+    """Review fix: l (lock) and v (revert) replace the pin's cut points but keep the protection the edit CLI's pin_transition set (it is about the
+    junction's transition, not its cut points: a revert that moves them keeps it too); x removes the pin and says the protection goes with it."""
+    from matchcut.edit.view import pin_transition
+
+    ws = own_copy(mock_workspace, tmp_path)
+    notes = []
+
+    async def body():
+        app = app_for(ws)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            j = view.current_junction()
+            label = f"s{j.out_shot}->s{j.in_shot}"
+            await pilot.press("l")
+            assert "protected" not in notes[-1]
+            held = {"kind": "dissolve", "frames": 6}
+            assert pin_transition(ws, pin=label, hold=True, kind="dissolve", frames=6)["held_transition"] == held
+
+            await pilot.press("l")  # lock again
+            await pilot.pause()
+            pin = PinStore(ws).get(j.out_shot, j.in_shot)
+            assert (pin.origin, pin.hold_transition, pin.held_transition) == ("locked", True, held)
+            assert "its transition stays protected (dissolve of 6 frames)" in notes[-1]
+
+            await pilot.press("v")  # revert: back to the first cut's points, the protection kept
+            await pilot.pause()
+            j = view.current_junction()
+            pin = PinStore(ws).get(j.out_shot, j.in_shot)
+            assert (pin.origin, pin.hold_transition, pin.held_transition) == ("reverted", True, held)
+            assert (pin.out_time, pin.in_time) == (round(j.baseline.out_time, 3), round(j.baseline.in_time, 3))
+            assert "(reverted)" in notes[-1] and "its transition stays protected (dissolve of 6 frames)" in notes[-1]
+
+            await pilot.press("x")  # clearing the pin releases the protection, and says so
+            await pilot.pause()
+            assert PinStore(ws).get(j.out_shot, j.in_shot) is None
+            assert notes[-1].startswith("pin cleared and its transition protection (dissolve of 6 frames) is released")
+
+            await pilot.press("l")  # a new pin is unprotected
+            await pilot.pause()
+            assert not PinStore(ws).get(j.out_shot, j.in_shot).hold_transition and "protected" not in notes[-1]
+
+    run_async(body())

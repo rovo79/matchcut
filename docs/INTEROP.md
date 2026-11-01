@@ -379,7 +379,10 @@ workspace's only edit stage is stale, the refusal of a fingerprint-less file say
 (`--stage final --base WS/final.json`, with the workspace's real path). `import` holds the workspace's stage lock (`WS/.stage.lock`)
 exclusively while it reads `edit.json` and writes the human stage, a publish holds it exclusively while it writes the edit stage, and an
 export holds it shared while it reads the stages; each waits at most 30 seconds (`STAGE_LOCK_TIMEOUT`), then refuses: `another import or
-publish (or an export) is running`. Export never takes an edit session's lock, so none of them can deadlock.
+publish (or an export) is running`. Export never takes an edit session's lock, so none of them can deadlock. `WS/.stage.lock` is an empty
+file the first of them makes and nothing removes. When it cannot be made or opened (a read-only workspace exported with `--out`
+elsewhere), an export or import of a workspace with no `edit.json` and no `edits/` goes ahead without the lock, since no publish can race
+it; one with an edit stage or an edit session is refused (`cannot open the stage lock ...: make the workspace writable and try again`).
 
 **The human stage made from an edit import** records `stage: "edit"`, `stage_file: "edit.json"` and its sha256 now, the snapshot used
 (`base_snapshot`, `base_snapshot_sha256`), the latest canonical stage and its sha256, and `history_stage: "edit"` with the sha256 of

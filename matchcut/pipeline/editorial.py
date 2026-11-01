@@ -14,8 +14,8 @@ beats and never moving a clip another pin holds; pins already in place are
 applied before any pin that needs a move.
 
 A pin may also protect its junction's transition (``hold_transition`` with the ``held_transition`` it holds, optional fields set and
-cleared by the edit CLI's ``pin_transition``; older pins read as unprotected).  **The pipeline engine ignores these fields**: applying
-pins, the passes and the renderer treat a protected pin exactly like any other, so a pipeline run may still change the transition at a
+cleared by the edit CLI's ``pin_transition``; older pins read as unprotected; the TUI's lock and revert keep them).  **The pipeline
+engine ignores these fields**: applying pins, the passes and the renderer treat a protected pin exactly like any other, so a pipeline run may still change the transition at a
 protected junction.  Only an edit session (``matchcut.edit``) refuses a proposal that changes a protected transition.
 """
 from __future__ import annotations

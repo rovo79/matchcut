@@ -25,6 +25,13 @@ from ..widgets.timeline import TimelineTrack
 FRAME_IDS = ("out-frame", "in-frame", "blend-frame")
 
 
+def _transition_text(held: Optional[dict]) -> str:
+    """A held transition as the edit CLI words it: "cut", "dissolve of 6 frames"."""
+    if not held or str(held.get("kind", "cut")) == "cut" or not held.get("frames"):
+        return "cut"
+    return f"{str(held['kind']).replace('_', ' ')} of {held['frames']} frames"
+
+
 class _Busy(Exception):
     """A request for a junction that is already being prepared."""
 
@@ -345,10 +352,19 @@ class EditView(Vertical):
                 return ""
             return c.origin or (clip_origin(c) if stage == "roughcut" else "")
 
+        store = PinStore(self._state.workspace)
+        # A transition protection (set by the edit CLI's pin_transition) is about the junction's transition, not its cut points: locking
+        # or reverting the junction again keeps it, even where the cut points move.  Only the edit CLI releases it (or clearing the pin).
+        old = store.get(j.out_shot, j.in_shot)
         pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin,
-                  out_origin=instance(j.out_clip, j.out_shot), in_origin=instance(j.in_clip, j.in_shot))
-        PinStore(self._state.workspace).put(pin)
-        note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
+                  out_origin=instance(j.out_clip, j.out_shot), in_origin=instance(j.in_clip, j.in_shot),
+                  hold_transition=old.hold_transition if old is not None else False,
+                  held_transition=dict(old.held_transition) if old is not None and old.held_transition is not None else None)
+        store.put(pin)
+        message = f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s"
+        if pin.hold_transition:
+            message += f"; its transition stays protected ({_transition_text(pin.held_transition)})"
+        note = self._apply_hint(message)
         if j.baseline.stage != j.first_stage:
             note += (". these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, "
                      "unless that would split or reorder the beats or another pin holds them")
@@ -367,8 +383,12 @@ class EditView(Vertical):
         if j is None or self._state is None:
             self.app.notify("no junction selected", severity="warning")
             return
-        if PinStore(self._state.workspace).remove(j.out_shot, j.in_shot):
-            self.app.notify("pin cleared: the passes decide this junction again on the next run")
+        store = PinStore(self._state.workspace)
+        old = store.get(j.out_shot, j.in_shot)
+        if store.remove(j.out_shot, j.in_shot):
+            released = (f" and its transition protection ({_transition_text(old.held_transition)}) is released: an edit session may change "
+                        "that transition again" if old is not None and old.hold_transition else "")
+            self.app.notify(f"pin cleared{released}: the passes decide this junction again on the next run")
         else:
             self.app.notify("this junction has no pin", severity="warning")
         self._fingerprint = None

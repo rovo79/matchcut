@@ -57,7 +57,8 @@ HUMAN = "human"
 EDIT = EDIT_STAGE  # an agent's published edit session (matchcut.edit writes edit.json): exported when named, never by default
 DEFAULT_STAGES: Tuple[str, ...] = ("roughcut", "final")
 RESOLVE_SCRIPT = "open_in_resolve.py"
-STAGE_LOCK = ".stage.lock"  # WS/.stage.lock: held while the edit or the human stage is written (publish) or read and written (import)
+STAGE_LOCK = ".stage.lock"  # WS/.stage.lock: held while the edit or the human stage is written (publish) or read and written (import), and
+# shared while an export reads the stages; made by the first of them (stage_lock)
 SNAPSHOT_DIR = ".stages"  # <exports>/.stages/<stage>-<first 12 hex of the stage file's sha256>.json: the stage as it was exported
 IMPORT_SCHEMA = "matchcut.human_import/1"
 _PLACEMENT_NOTE = re.compile(r"^(gap\b|event \S+ starts \d+ frames before)")  # the readers' notes about a gap or an overlap on the record side
@@ -816,10 +817,23 @@ def stage_lock(ws: Path, shared: bool = False, timeout: Optional[float] = None,
     and holds no other stage lock: no deadlock.
 
     The wait is bounded: the lock is polled (``LOCK_NB``) for up to ``timeout`` seconds (default ``STAGE_LOCK_TIMEOUT``), then ``error``
-    (``InterchangeError``; publish passes its own refusal) is raised, saying another import or publish is running."""
+    (``InterchangeError``; publish passes its own refusal) is raised, saying another import or publish is running.
+
+    When the lock file cannot be created or opened (a read-only workspace exported with ``--out`` elsewhere): a workspace with no edit
+    stage (``edit.json``) and no edit session (``edits/``) has nothing a publish could change, so the block runs without the lock; any
+    other is refused with ``error``."""
     path = Path(ws) / STAGE_LOCK
     wait = STAGE_LOCK_TIMEOUT if timeout is None else max(0.0, float(timeout))
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:
+        if (Path(ws) / EDIT_FILE).exists() or (Path(ws) / "edits").exists():
+            raise error(f"cannot open the stage lock {path} ({exc.strerror or exc}): {ws} has an edit stage or an edit session, so a "
+                        "publish could change the stages meanwhile; make the workspace writable and try again") from None
+        fd = None  # no publish can race: the block runs without the lock
+    if fd is None:
+        yield
+        return
     try:
         deadline = time.monotonic() + wait
         while True:

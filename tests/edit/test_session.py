@@ -6,6 +6,10 @@ from __future__ import annotations
 import hashlib
 import json
 import multiprocessing
+import os
+import subprocess
+import sys
+import time
 from fractions import Fraction
 from pathlib import Path
 from typing import Dict
@@ -851,3 +855,68 @@ def test_out_of_range_numbers_are_refused_in_plain_words(ws, ops, guards, match)
         S.propose(ws, ops, guards)
     assert "-more" not in str(err.value) and len(str(err.value)) < 300
     assert tree(ws) == before
+
+
+# ----------------------------------------------------------------------------------------------- the lock's bounded wait
+HOLD = ("import fcntl, os, sys, time\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o644)\n"
+        "fcntl.flock(fd, fcntl.LOCK_SH if sys.argv[2] == 'shared' else fcntl.LOCK_EX)\n"
+        "print('held', flush=True)\n"
+        "sys.stdin.read()\n")
+
+
+class held_lock:
+    """Another process holds ``path`` (exclusive, or shared) until the block ends."""
+
+    def __init__(self, path: Path, mode: str = "exclusive"):
+        self.path, self.mode = path, mode
+
+    def __enter__(self):
+        self.proc = subprocess.Popen([sys.executable, "-c", HOLD, str(self.path), self.mode], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     text=True)
+        assert self.proc.stdout.readline().strip() == "held"
+        return self
+
+    def __exit__(self, *exc):
+        self.proc.stdin.close()  # the holder reads to the end of its stdin, then exits (and releases the lock)
+        self.proc.wait(timeout=30)
+
+
+def test_a_command_waits_a_bounded_time_for_another_holder_then_refuses(ws, monkeypatch):
+    """Review fix: the session lock is polled up to LOCK_TIMEOUT, then refused with a clear message, for a write and for a read; a shared
+    holder still lets a read in and keeps a write out."""
+    monkeypatch.setattr(S, "LOCK_TIMEOUT", 0.3)
+    before = tree(ws)
+    with held_lock(ws / "edits" / ".lock"):
+        for call in (lambda: S.propose(ws, TRIM), lambda: S.log(ws)):
+            t0 = time.monotonic()
+            with pytest.raises(S.SessionError, match=r"another edit command is running in .* \(.*edits/\.lock was still held after 0\.3 s\); "
+                                                     r"try again"):
+                call()
+            assert time.monotonic() - t0 < 10
+    assert tree(ws) == before  # the refused write wrote nothing
+    with held_lock(ws / "edits" / ".lock", "shared"):
+        assert S.log(ws)["head"] == "r000"  # shared with a reader
+        with pytest.raises(S.SessionError, match="another edit command is running"):
+            S.propose(ws, TRIM)
+    assert S.propose(ws, TRIM)["proposal"]  # released: it goes through
+    with held_lock(ws / "edits" / ".lock"):  # the refusal released the descriptor it opened: none is left behind
+        fds = len(os.listdir("/proc/self/fd")) if Path("/proc/self/fd").is_dir() else None
+        for _ in range(5):
+            with pytest.raises(S.SessionError):
+                S.log(ws)
+        assert fds is None or len(os.listdir("/proc/self/fd")) == fds
+
+
+def test_a_publish_refused_at_the_stage_lock_releases_the_session_lock(ws, monkeypatch):
+    """publish takes the session lock, then the stage lock (each bounded): refused at the stage lock, it leaves the session lock free."""
+    from matchcut.edit import publish as P
+    from matchcut.interchange import workspace as W
+    S.apply(ws, S.propose(ws, TRIM)["proposal"])
+    monkeypatch.setattr(W, "STAGE_LOCK_TIMEOUT", 0.3)
+    monkeypatch.setattr(S, "LOCK_TIMEOUT", 0.3)
+    with held_lock(ws / W.STAGE_LOCK):
+        with pytest.raises(S.SessionError, match="another import or publish"):
+            P.publish(ws)
+        assert S.propose(ws, TRIM4)["proposal"]  # the session lock was released
+    assert not (ws / "edit.json").exists()

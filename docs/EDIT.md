@@ -31,7 +31,8 @@ left out of the order (and so of `junctions`, the TUI and the exports), never de
 
 **Sessions.** `start` opens a session on a **base stage** (default: the latest canonical stage, `final`, the only base that can publish;
 `human` or an earlier canonical stage by name; `edit` is never a base, see below). `start`, `log` and `inspect` report `can_publish` and,
-when it is false, `publish_blocker` (why). One session at a time lives in `WS/edits/`:
+when it is false, `publish_blocker` (why): a stale session cannot publish either, and its blocker is `the edit session is stale: <the stale
+reason>`, the refusal `publish` gives. One session at a time lives in `WS/edits/`:
 
 | path | what |
 |---|---|
@@ -43,7 +44,7 @@ when it is false, `publish_blocker` (why). One session at a time lives in `WS/ed
 | `edits/published/records/` | a copy of every `edit_publish.json` written, `<UTC second>-<nnn>-<rev>-<sha12>.json` (`nnn` counts within the second, so the names sort in the order written) |
 | `edits/published/log.jsonl` | append-only: one line per publish (time, session, revision, sha256, `previous`, `recovered`, replaced / superseded flags) |
 | `edits/replaced/<sha12>/` | an `edit.json` (and its record) that another session's publish moved aside; `record-<sha12>/`: a record left without its `edit.json` |
-| `edits/.lock` | every writing command holds it exclusively, the read-only ones shared |
+| `edits/.lock` | every writing command holds it exclusively, the read-only ones shared; a command waits at most 30 seconds for it (`session.LOCK_TIMEOUT`), then refuses: `another edit command is running in WS (WS/edits/.lock was still held after 30 s); try again once it has finished` |
 
 `start` with `restart` (or on a stale session) moves the session to `WS/edits.replaced-<sha12>/` (`edits.stale-<sha12>/`); the lock and the
 edit stage's archive (`published/`, `replaced/`) stay in `edits/`. Nothing is ever deleted.
@@ -101,7 +102,7 @@ A session's whole life, as the CLI prints it (a 25 fps test workspace):
 ```shell
 $ python -m matchcut.edit WS start
 {"session": "dc8f9a5e-...", "base_stage": "final", "base_sha256": "0fe5cf...", "head": "r000", "normalised": [], "moved_aside": null,
- "can_publish": true, "publish_blocker": null}
+ "can_publish": true, "publish_blocker": null, "transition_mismatches": []}
 
 $ python -m matchcut.edit WS propose '{"ops": [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5},
       {"op": "set_transition", "junction": 3, "kind": "dissolve", "frames": 6}], "guards": {"max_duration_change_frames": 12}}'
@@ -182,8 +183,12 @@ command still prints one JSON object (`{"error": "terminated", "kind": "error"}`
 
 ### 1. Published agent edits are the `edit` stage
 
-`publish` writes, atomically, under the session lock and the workspace's stage lock (`WS/.stage.lock`, which an import holds too, and an
-export holds shared; each waits at most 30 seconds for it, then refuses: `another import or publish (or an export) is running in WS`):
+`publish` writes, atomically, under the session lock and then the workspace's stage lock (`WS/.stage.lock`, which an import holds too, and
+an export holds shared; each waits at most 30 seconds for it, then refuses: `another import or publish (or an export) is running in WS`).
+Nothing takes the two locks the other way round and both waits are bounded, so they cannot deadlock; a publish refused at the stage lock
+releases the session lock. `WS/.stage.lock` is an empty file made by the first publish, import or export that needs it and never removed;
+when it cannot be made or opened (a read-only workspace exported with `--out` elsewhere), an export or import of a workspace with no
+`edit.json` and no `edits/` goes ahead without it (no publish can race), and anything else is refused (`cannot open the stage lock`):
 
 - `WS/edit.json`: the revision's timeline, stage `edit`. Its history is the latest canonical stage's history plus one `agent` decision per
   change (`trimmed`, `slipped`, `transition`, `removed`, `added`, `moved`), each naming its proposal, so junction attribution and pin
@@ -266,7 +271,7 @@ left or reached a beat. Use the [guards](#guards) to refuse a proposal that move
 
 ## Pins and `pin_transition`
 
-Editor pins come from the TUI's Edit view (`l` locks the inspected cut, `r` reverts it to the first cut's points) and live in
+Editor pins come from the TUI's Edit view (`l` locks the inspected cut, `v` reverts it to the first cut's points) and live in
 `editorial.json`. An edit session reads them as part of its context: a pinned junction keeps its clips, their adjacency and both cut points.
 
 `pin_transition` protects or releases the transition at a pin's junction:
@@ -278,9 +283,12 @@ python -m matchcut.edit WS pin_transition '{"pin": "s3->s6", "hold": true, "kind
 ```
 
 It sets or clears the pin's optional `hold_transition` and `held_transition` (`{"kind", "frames"}`) in `editorial.json`, changing nothing
-else in the file; older pins read as unprotected, and the TUI's `l`/`r` keep making unprotected pins. Because the pins are part of the
-context, every proposal made before the change must be proposed again (the result lists them). **The pipeline ignores the protection**
-(see the limitations).
+else in the file; older pins read as unprotected. The TUI never sets a protection, and **keeps one**: `l` (lock again) and `v` (revert)
+on a protected pin replace its cut points and keep its `hold_transition` and `held_transition`, even when the cut points move, because
+the protection is about the junction's transition, not its points (the notification says `its transition stays protected (...)`). Only
+`pin_transition {"hold": false}` releases it, or clearing the pin (`x`), whose notification says the protection is released with it.
+Because the pins are part of the context, every proposal made before the change must be proposed again (the result lists them). **The
+pipeline ignores the protection** (see the limitations).
 
 At a protected pin a proposal may leave the transition as it is or set it to **exactly the held transition**; anything else is refused.
 Only a new or worse violation counts, so the junction's transition can differ from the held one without blocking anything:
@@ -349,6 +357,8 @@ the new `final` and redo the edits; matchcut does not carry an agent's edits acr
 - **A context change requires a re-propose.** A change to the config, shots, pins (including `pin_transition`), music or the source's rate
   makes every stored proposal unusable: `apply` and `preview` refuse it until it is proposed again.
 - One session per workspace; a second agent must wait for the lock or work in a copy.
+- **The session lock waits 30 seconds** (`session.LOCK_TIMEOUT`): any edit command, a read-only one included, that cannot take
+  `WS/edits/.lock` in that time is refused (`another edit command is running`); run it again once the other has finished.
 - **Only a session on the latest canonical stage can publish** (the default base). A session on `human` or an earlier stage can edit,
   preview and render but never publish (`can_publish: false`); its edits must be redone on `final`.
 - **Publishing over a fresh human stage is refused** unless `supersede_human: true`, which leaves the human stage out as stale (never

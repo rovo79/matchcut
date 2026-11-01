@@ -14,7 +14,8 @@ Layout:
 - ``renders/`` (made by ``view``), and the edit stage's archive ``published/`` (an immutable copy of every published revision) and
   ``replaced/`` (an edit stage another session's publish moved aside), made by ``publish``.  The archive stays in ``WS/edits/`` when a
   session is moved aside (``KEPT``): ``edit_publish.json`` names files in it;
-- ``.lock``: every command that writes holds an exclusive ``fcntl.flock`` on it; the read-only ones a shared one.
+- ``.lock``: every command that writes holds an exclusive ``fcntl.flock`` on it; the read-only ones a shared one.  A command waits at most
+  ``LOCK_TIMEOUT`` (30 s) for it, then refuses (``another edit command is running``).
 
 Everything is written atomically (a temporary file, then ``os.replace``) as deterministic JSON (sorted keys).  Timestamps live only in
 ``created``/``updated`` fields, which no hash covers, so the same commands on the same workspace give byte-identical revision timelines and
@@ -38,6 +39,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -299,6 +301,13 @@ def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
     return None
 
 
+def publish_state(ws: Path, base_stage: str, stale: Optional[str]) -> Tuple[bool, Optional[str]]:
+    """(``can_publish``, ``publish_blocker``) as ``start``, ``inspect`` and ``log`` report them: a stale session (``stale`` is its reason)
+    cannot publish, and says so before ``publish_blocker`` is asked; otherwise ``publish_blocker``."""
+    blocker = f"the edit session is stale: {stale}" if stale else publish_blocker(ws, base_stage)
+    return blocker is None, blocker
+
+
 def stale_reason(ws: Path, state: Dict[str, Any]) -> Optional[str]:
     """Why the session ``state`` no longer fits the workspace (its base stage file changed or is gone, or that stage is no longer listed),
     or None when it is fresh."""
@@ -320,17 +329,35 @@ def stale_reason(ws: Path, state: Dict[str, Any]) -> Optional[str]:
 
 
 # ----------------------------------------------------------------------------------------------- the lock
+LOCK_TIMEOUT = 30.0  # seconds a command waits for another edit command's hold on WS/edits/.lock before it refuses
+LOCK_POLL = 0.05  # seconds between two tries
+
+
 @contextlib.contextmanager
-def _locked(ws: Path, shared: bool = False, create: bool = False) -> Iterator[Path]:
+def _locked(ws: Path, shared: bool = False, create: bool = False, timeout: Optional[float] = None) -> Iterator[Path]:
     """Hold ``WS/edits/.lock`` (exclusive, or shared for a read) for the block; yields ``WS/edits``.  Only ``start`` (``create``) makes
-    ``WS/edits/``; the lock file is never moved, so every process locks the same file."""
+    ``WS/edits/``; the lock file is never moved, so every process locks the same file.
+
+    The wait is bounded, as ``interchange.workspace.stage_lock``'s: the lock is polled (``LOCK_NB``) for up to ``timeout`` seconds (default
+    ``LOCK_TIMEOUT``), then a ``SessionError`` says another edit command is running.  ``publish`` takes this lock, then the stage lock;
+    nothing takes them the other way round, and each wait is bounded, so they cannot deadlock (a refusal releases what is held)."""
     d = edits_dir(ws)
     if not create and not d.is_dir():
         raise SessionError(f"no edit session in {ws}: run start first")
     d.mkdir(parents=True, exist_ok=True)
+    wait = LOCK_TIMEOUT if timeout is None else max(0.0, float(timeout))
     fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise SessionError(f"another edit command is running in {ws} ({d / '.lock'} was still held after {wait:g} s); "
+                                       "try again once it has finished") from None
+                time.sleep(LOCK_POLL)
         yield d
     finally:
         os.close(fd)  # releases the lock
@@ -648,9 +675,9 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
                  "base_sha256": sha, "rate": str(ctx.rate), "head": "r000", "next": 1, "reserved_ids": sorted({c.id for c in r000.clips}),
                  "created": created}
         _save_state(d, state)
-    blocker = publish_blocker(ws, name)
+    can, blocker = publish_state(ws, name, stale_reason(ws, state))  # (fresh but for a race: the base stage changed already)
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
-            "moved_aside": moved.name if moved is not None else None, "can_publish": blocker is None, "publish_blocker": blocker,
+            "moved_aside": moved.name if moved is not None else None, "can_publish": can, "publish_blocker": blocker,
             "transition_mismatches": rules.transition_mismatches(r000, ctx)}
 
 
@@ -877,6 +904,6 @@ def log(ws: Path) -> Dict[str, Any]:
                          "summary": "; ".join(doc.get("details") or []) if doc.get("parent") is not None else "base",
                          "changes": len(doc.get("changes") or []), "created": doc.get("created")})
         why = s.stale()
-    blocker = publish_blocker(ws, s.base_stage)
+    can, blocker = publish_state(ws, s.base_stage, why)
     return {"session": s.session_id, "base_stage": s.base_stage, "base_sha256": s.state["base_sha256"], "head": s.head,
-            "stale": why is not None, "stale_reason": why, "can_publish": blocker is None, "publish_blocker": blocker, "revisions": revs}
+            "stale": why is not None, "stale_reason": why, "can_publish": can, "publish_blocker": blocker, "revisions": revs}

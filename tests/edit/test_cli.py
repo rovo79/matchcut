@@ -368,3 +368,34 @@ def test_sigterm_while_the_handler_is_installed_is_one_json_error(ws, monkeypatc
     out, err = capfd.readouterr()
     assert json.loads(out) == {"error": "terminated", "kind": "error"} and "Traceback" not in err
     assert signal.getsignal(signal.SIGTERM) == before
+
+
+# ----------------------------------------------------------------------------------------------- final review fixes
+@pytest.mark.parametrize("command, arguments", [("propose", json.dumps({"ops": TRIM})), ("inspect", None)])
+def test_a_session_lock_held_by_another_process_is_one_json_refusal(ws, monkeypatch, capfd, command, arguments):
+    """A held WS/edits/.lock no longer hangs a command (a write or a read): after LOCK_TIMEOUT it is one JSON refusal, exit 1."""
+    from .test_session import held_lock
+    monkeypatch.setattr(S, "LOCK_TIMEOUT", 0.3)
+    with held_lock(ws / "edits" / ".lock"):
+        assert cli.main([str(ws), command] + ([arguments] if arguments else [])) == 1
+    out, _ = capfd.readouterr()
+    lines = out.splitlines()
+    assert len(lines) == 1
+    doc = json.loads(lines[0])
+    assert doc["kind"] == "refused" and doc["command"] == command
+    assert doc["error"].startswith(f"another edit command is running in {ws} (") and "edits/.lock was still held after 0.3 s" in doc["error"]
+
+
+def test_a_stale_session_cannot_publish_and_says_why(ws):
+    """Review fix: inspect and log say can_publish false for a stale session, with the stale reason as the blocker, as publish refuses."""
+    assert call(str(ws), "log")[1]["can_publish"] is True
+    touch_final(ws)
+    code, lg = call(str(ws), "log")
+    assert code == 0 and lg["stale"] is True and lg["can_publish"] is False
+    assert lg["publish_blocker"] == f"the edit session is stale: {lg['stale_reason']}"
+    code, ins = call(str(ws), "inspect")
+    assert code == 0 and ins["session"]["can_publish"] is False and ins["session"]["publish_blocker"] == lg["publish_blocker"]
+    code, pub = call(str(ws), "publish")
+    assert code == 1 and pub["error"] == lg["publish_blocker"]
+    code, st = call(str(ws), "start")  # start moves the stale session aside: the new one can publish
+    assert code == 0 and st["can_publish"] is True and st["publish_blocker"] is None and st["moved_aside"]

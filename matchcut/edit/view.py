@@ -423,10 +423,11 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         shots.append({"shot": k, "frames": [lo, hi], "length": hi - lo, "used_by": used.get(k, []), "description": described.get(k)})
     unknown = sorted(k for k in used if not ctx.has_shot(k))
     total = d["duration_frames"]
+    can_publish, blocker = S.publish_state(ws, s.base_stage, why)
     return {
         "session": {"session": s.session_id, "base_stage": s.base_stage, "head": s.head, "revision": rid, "is_head": rid == s.head,
                     "revisions": n_revs, "stale": why is not None, "stale_reason": why,
-                    "can_publish": S.publish_blocker(ws, s.base_stage) is None, "publish_blocker": S.publish_blocker(ws, s.base_stage)},
+                    "can_publish": can_publish, "publish_blocker": blocker},
         "rate": d["rate"], "fps": d["fps"], "duration_frames": total, "duration_seconds": _seconds(total, ctx.rate),
         "clips": d["clips"],
         "junctions": d["junctions"],
