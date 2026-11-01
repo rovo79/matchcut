@@ -55,8 +55,10 @@ edit after an undo starts a branch.
 
 **Proposals.** `propose` runs a list of operations, **all or nothing**, on a copy of the head and checks every rule on the result. An
 accepted proposal is stored under a deterministic id (12 hex characters: the sha256 of the head, its timeline, the operations and guards,
-the session's issued ids and the workspace context) and nothing changes until `apply`. `apply` re-runs the operations against the head and
-refuses if the head moved, the context changed (config, shots, pins, music, source rate) or the result differs from the stored one.
+the session's issued ids and the workspace context) and nothing changes until `apply`. A proposal whose operations change nothing (a
+`snap_to_beat` on a junction already on its beat) is refused, `the operations change nothing`, with the operations' `details`; nothing
+is stored. `apply` re-runs the operations against the head and refuses if the head moved, the context changed (config, shots, pins,
+music, source rate) or the result differs from the stored one.
 
 **Frames.** Every operation and report is in whole frames at the source's exact rate (`30000/1001`, never `29.97`). Clips are named by
 id (stable for the session: new clips are `e001`, `e002`, ...; nothing is renumbered) or by their key (`clip_origin`, e.g. `1@4.800-6.800`).
@@ -129,9 +131,10 @@ $ python -m matchcut.pipeline.cli export WS --stage edit     # edit.otio, the ed
 
 `inspect` returns `session` (id, base stage, head, the revision shown, staleness), `rate`/`fps`, `duration_frames`, `clips` (id, key,
 shot, beat, source and record frames, incoming transition, locks, purpose), `junctions` (number, id, clips, record frame, transition, story
-beat change, match cut, the pin that holds it, its protection, the beat offset with music), `shots` with their use and `unused_shots`, the
-`story_beats`, the `music` beats, the stored `pins` (held or not, protected transition), the `protections` that apply and the
-`transition_mismatches` (protected pins whose junction has another transition than the one held, each with its `repair`).
+beat change, match cut, the pin that holds it, its protection, the beat offset with music), `shots` with their use and their
+`description` (the describe stage's entry from `descriptions.json`, or null) and `unused_shots`, the `story_beats` (actual length in
+`frames`; `pace`, `target_seconds` and `target_frames` from `narrative.json`), the `music` beats, the stored `pins` (held or not, protected
+transition), the `protections` that apply and the `transition_mismatches` (protected pins whose junction has another transition than the one held, each with its `repair`).
 
 ### Operations
 

@@ -78,13 +78,32 @@ def test_inspect_lists_clips_junctions_shots_and_story_beats(ws):
     used = {s["shot"]: s["used_by"] for s in d["shots"]}
     assert used == {0: ["c001"], 1: ["c002"], 2: [], 3: ["c003"], 4: [], 5: ["c004"], 6: ["c005"], 7: []}
     assert d["unused_shots"] == [2, 4, 7] and d["unknown_shots"] == []
-    assert d["shots"][3] == {"shot": 3, "frames": [300, 400], "length": 100, "used_by": ["c003"]}
+    assert d["shots"][3] == {"shot": 3, "frames": [300, 400], "length": 100, "used_by": ["c003"], "description": None}
     beats = d["story_beats"]
     assert [(b["beat"], b["clips"]) for b in beats] == [("b1", ["c001", "c002"]), ("b2", ["c003", "c004"]), ("b3", ["c005"])]
     assert beats[0]["record_frames"] == [0, 96] and beats[1]["record_frames"] == [96, 196] and beats[2]["record_frames"] == [196, 256]
     assert [b["frames"] for b in beats] == [96, 100, 60] and [b["n"] for b in beats] == [1, 2, 3]
     assert d["music"] is None and d["pins"] == [] and d["protections"] == []
     json.dumps(d)  # plain JSON
+
+
+def test_inspect_gives_each_shot_its_description_and_each_story_beat_its_target_length(ws):
+    """What an agent needs to choose footage and to judge pacing (the prototype's inspect gave both): the describe stage's entry for every
+    shot, used or not, and each story beat's target length beside its actual one."""
+    (ws / "descriptions.json").write_text(json.dumps({"2": {"shot_id": 2, "description": "a harbour at dusk", "subject": "boats",
+                                                            "tags": ["wide"], "quality": 0.8, "usable": True}, "x": {}, "4": "junk"}))
+    (ws / "narrative.json").write_text(json.dumps({"beats": [{"id": "b1", "title": "Arrival", "pace": "slow", "target_duration_s": 3.5},
+                                                             {"id": "b2", "target_duration_s": "long"}]}))
+    d = V.inspect(ws)
+    assert d["shots"][2]["description"] == {"description": "a harbour at dusk", "subject": "boats", "tags": ["wide"], "quality": 0.8,
+                                            "usable": True}
+    assert [s["description"] for s in d["shots"] if s["shot"] != 2] == [None] * 7
+    b1, b2, b3 = d["story_beats"]
+    assert (b1["pace"], b1["target_seconds"], b1["target_frames"], b1["frames"]) == ("slow", 3.5, 88, 96)
+    assert (b2["pace"], b2["target_seconds"], b2["target_frames"]) == (None, None, None)
+    assert (b3["title"], b3["pace"], b3["target_seconds"], b3["target_frames"]) == (None, None, None, None)
+    (ws / "descriptions.json").write_text("{not json")
+    assert all(s["description"] is None for s in V.inspect(ws)["shots"])
 
 
 def test_inspect_an_older_revision_and_story_titles(ws):

@@ -298,15 +298,25 @@ def _text(t: Optional[Dict[str, Any]]) -> str:
     return "cut" if not t["frames"] else f"{t['kind'].replace('_', ' ')} of {t['frames']} frames"
 
 
-def _story_beats(ws: Path, tl: Timeline, rows: List[Row]) -> List[Dict[str, Any]]:
-    """The cut's story beats in record order (a beat that recurs after a move is listed again), with their titles from ``narrative.json``
-    when it is readable."""
+def _target(value: Any, rate: Fraction) -> Tuple[Optional[float], Optional[int]]:
+    """A story beat's ``target_duration_s`` as (seconds, whole frames at ``rate``), or (None, None) when it is not a positive number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return None, None
+    return float(value), int(round(Fraction(value) * rate))
+
+
+def _story_beats(ws: Path, tl: Timeline, rows: List[Row], rate: Fraction) -> List[Dict[str, Any]]:
+    """The cut's story beats in record order (a beat that recurs after a move is listed again), with their titles, pace and target length
+    (``target_seconds`` and ``target_frames``, the narrative's ``target_duration_s``) from ``narrative.json`` when it is readable, beside
+    their actual length (``frames``)."""
     titles: Dict[str, Dict[str, Any]] = {}
     try:
         doc = json.loads((Path(ws) / "narrative.json").read_text())
         for b in doc.get("beats", []) if isinstance(doc, dict) else []:
             if isinstance(b, dict) and "id" in b:
-                titles[str(b["id"])] = {"title": b.get("title"), "intent": b.get("intent")}
+                seconds, frames = _target(b.get("target_duration_s"), rate)
+                titles[str(b["id"])] = {"title": b.get("title"), "intent": b.get("intent"), "pace": b.get("pace"),
+                                        "target_seconds": seconds, "target_frames": frames}
     except (OSError, ValueError, TypeError, AttributeError):
         pass
     runs: List[Dict[str, Any]] = []
@@ -316,11 +326,29 @@ def _story_beats(ws: Path, tl: Timeline, rows: List[Row]) -> List[Dict[str, Any]
             runs[-1]["record_frames"][1] = r.rec_out - r.tail
             continue
         runs.append({"beat": c.beat_id, "clips": [c.id], "record_frames": [r.rec + r.head, r.rec_out - r.tail],
-                     **titles.get(c.beat_id, {"title": None, "intent": None})})
+                     **titles.get(c.beat_id, {"title": None, "intent": None, "pace": None, "target_seconds": None, "target_frames": None})})
     for k, run_ in enumerate(runs):
         run_["frames"] = run_["record_frames"][1] - run_["record_frames"][0]
         run_["n"] = k + 1
     return runs
+
+
+def _descriptions(ws: Path) -> Dict[int, Dict[str, Any]]:
+    """The shots' descriptions from ``descriptions.json`` (the describe stage's), by shot index, without their ``shot_id``; {} when the file
+    is missing or unreadable."""
+    try:
+        doc = json.loads((Path(ws) / "descriptions.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    out: Dict[int, Dict[str, Any]] = {}
+    for k, v in doc.items() if isinstance(doc, dict) else []:
+        try:
+            index = int(k)
+        except (TypeError, ValueError):
+            continue
+        if isinstance(v, dict):
+            out[index] = {key: value for key, value in v.items() if key != "shot_id"}
+    return out
 
 
 def _music_beats(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> Optional[Dict[str, Any]]:
@@ -346,7 +374,8 @@ def _music_beats(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]
 
 def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
     """The cut of revision ``rev`` (default: the head), in frames at the source's exact rate: the session (head, staleness), its clips,
-    junctions (with their protections), shots and their use, story beats, music beats (beat offsets per junction, with music), every
+    junctions (with their protections), shots (their use and their ``description`` from ``descriptions.json``), story beats (actual and
+    target length), music beats (beat offsets per junction, with music), every
     editor pin (held or not, the transition it protects and whether the junction's transition still matches it) and the
     ``transition_mismatches`` (``rules.transition_mismatches``, each with how to resolve it)."""
     ws = Path(ws)
@@ -388,9 +417,10 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
     for c in tl.clips:
         used.setdefault(c.shot_index, []).append(c.id)
     shots = []
+    described = _descriptions(ws)
     for k in sorted(ctx.bounds):
         lo, hi = ctx.shot_frames(k)
-        shots.append({"shot": k, "frames": [lo, hi], "length": hi - lo, "used_by": used.get(k, [])})
+        shots.append({"shot": k, "frames": [lo, hi], "length": hi - lo, "used_by": used.get(k, []), "description": described.get(k)})
     unknown = sorted(k for k in used if not ctx.has_shot(k))
     total = d["duration_frames"]
     return {
@@ -403,7 +433,7 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         "shots": shots,
         "unused_shots": [x["shot"] for x in shots if not x["used_by"]],
         "unknown_shots": unknown,
-        "story_beats": _story_beats(ws, tl, rows),
+        "story_beats": _story_beats(ws, tl, rows, ctx.rate),
         "music": _music_beats(tl, rows, ctx, ids),
         "pins": pins,
         "protections": protections,

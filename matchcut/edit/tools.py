@@ -217,8 +217,9 @@ TOOLS: List[Tool] = [
          _obj({"stage": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,40}$", "description": "a stage name (roughcut, final, human ...)"},
                "restart": {"type": "boolean"}}),
          _start),
-    Tool("inspect", "The cut of a revision (default: the head) in frames: clips, junctions and their protections, shots and their use, "
-                    "story beats, music beats, editor pins (held or not, protected transitions) and whether the session is stale.",
+    Tool("inspect", "The cut of a revision (default: the head) in frames: clips, junctions and their protections, shots (their use and "
+                    "descriptions), story beats (actual and target length), music beats, editor pins (held or not, protected "
+                    "transitions) and whether the session is stale.",
          _obj({"revision": REVISION}),
          lambda ws, a: V.inspect(ws, a.get("revision"))),
     Tool("log", "The session's revisions (id, parent, operations, summary), the head and whether the session is stale.",
