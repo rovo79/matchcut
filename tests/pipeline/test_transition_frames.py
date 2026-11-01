@@ -234,7 +234,7 @@ def test_a_long_sequence_of_fractional_transitions_stays_on_the_layout(rate):
 
 
 @pytest.mark.parametrize("with_music", [False, True], ids=["no music", "music"])
-def test_a_dissolve_that_rounds_to_no_frame_is_recorded_with_or_without_music(tmp_path, with_music):
+def test_a_dissolve_that_rounds_to_no_frame_is_recorded_with_or_without_music(tmp_path, with_music, caplog):
     """At 12 fps a 0.06 s dissolve is under a frame: the final cut turns it into a cut and says so, whether the final stage rounds it or (with
     music) the beat-sync pass, which measures beats on whole-frame positions, rounds it first."""
     from matchcut.pipeline.demo import make_click_track, make_demo_footage
@@ -247,7 +247,9 @@ def test_a_dissolve_that_rounds_to_no_frame_is_recorded_with_or_without_music(tm
     if with_music:
         cfg.music.path = str(make_click_track(tmp_path / "click.wav"))
     pipe = Pipeline(cfg)
-    final = pipe.refine(pipe.rough_cut())
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        final = pipe.refine(pipe.rough_cut())
+    assert any("rounds to no frame" in r.getMessage() for r in caplog.records)  # logged, as well as recorded
     dropped = [d for d in final.history if d.action == "transition_dropped"]
     assert dropped, [(d.pass_name, d.action) for d in final.history[-12:]]
     assert all(c.transition_in.is_cut or c.transition_in.duration * 12 >= 1 - 1e-4 for c in final.clips)  # stored to the microsecond

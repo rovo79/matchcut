@@ -680,6 +680,7 @@ class BeatSyncPass(Pass):
         snapped = tl.snap_to_frames(ctx.shot_bounds)
         tl = snapped.snap_transitions()  # beats are measured on the whole-frame record positions the cut will have
         for d in snapped.transition_rounding_problems(tl):  # rounding never changes the cut silently (the final stage sees no change left)
+            log.warning("beatsync: %s", d.detail)
             decisions.append(self.decision(d.action, d.clip_ids, d.detail, **d.data))
         fps = tl.fps
         for i in range(1, len(tl.clips)):
