@@ -137,7 +137,7 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
     assert "[music][asrc1]sidechaincompress=threshold=0.05:ratio=6.0" in graph
     assert "[asrc0][ducked]amix=inputs=2:duration=longest:normalize=0[amixed]" in graph
     assert "[amixed]loudnorm=I=-16.0:TP=-1.5:LRA=11,aresample=48000[apre]" in graph
-    assert graph.endswith("[apre]apad=whole_dur=5.480000,atrim=duration=5.480000[aout]") and graph.count("[aout]") == 1  # as long as the video
+    assert graph.endswith("[apre]asetpts=N/SR/TB,apad=whole_dur=5.480000,atrim=duration=5.480000[aout]") and graph.count("[aout]") == 1  # as long as the video
 
 
 def test_filter_graph_music_only_and_no_duck():

@@ -75,6 +75,8 @@ def assert_av_lengths(path, fps):
     assert "audio" in st, "the render has no audio stream"
     a, v = float(st["audio"]["duration"]), float(st["video"]["duration"])
     assert abs(a - v) <= sig.av_tolerance(fps), (a, v)
+    gap = sig.audio_timestamp_gap(path)
+    assert gap < 0.001, f"the audio timestamps jump by {gap * 1000:.1f} ms: a player would play what follows late"
 
 
 def assert_source_tones(tl, y, present=True):
@@ -347,16 +349,16 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
     assert not list(tmp_path.glob(".graph-*"))
 
 
-@pytest.mark.parametrize("rate", ["30", "30000/1001"])
-def test_many_fractional_dissolves_do_not_drift(tmp_path, rate):
+@pytest.mark.parametrize("rate, dissolve", [("30", 0.75), ("30000/1001", 0.75), ("25", 0.3)])
+def test_many_fractional_dissolves_do_not_drift(tmp_path, rate, dissolve):
     """Eight 0.75 s dissolves (22.5 / 22.48 frames each): the renderer rounds the running total, as the exporters' layout does, so every clip
     starts within half a frame of Timeline.record_start and the cut is round(duration) frames long (rounding each on its own drifted by
     up to 8 frames after 15 dissolves)."""
-    coded = sig.make_coded_footage(tmp_path / "frac.mp4", seconds=40, rate=rate)
+    coded = sig.make_coded_footage(tmp_path / "frac.mp4", seconds=50, rate=rate)  # every clip inside the file (1170 frames at 25 fps)
     media = probe(str(coded))
     fps = media.fps
     f = lambda n: round(n / fps, 4)  # noqa: E731
-    tl = timeline(str(coded), fps, [(f(k * 130), f(k * 130 + 90)) for k in range(9)], [Transition()] + [Transition("dissolve", 0.75)] * 8)
+    tl = timeline(str(coded), fps, [(f(k * 130), f(k * 130 + 90)) for k in range(9)], [Transition()] + [Transition("dissolve", dissolve)] * 8)  # 0.3 s at 25 fps: 7.5-frame ties
     from fractions import Fraction
 
     from matchcut.interchange.common import layout, record_frames
@@ -383,3 +385,22 @@ def test_the_graph_file_is_removed_when_ffmpeg_fails(monkeypatch, coded, tmp_pat
     with pytest.raises(render_mod.MediaError):
         render(timeline(str(coded), media.fps, [(1.0, 2.0), (3.0, 4.0)]), media, RCFG, tmp_path / "fail.mp4")
     assert not list(tmp_path.glob(".graph-*"))
+
+
+def test_music_under_loudnorm_keeps_its_timing_to_the_end(coded, ticks, tmp_path):
+    """loudnorm leaves a 20-100 ms timestamp jump about 2.9 s before the end; trimming to the video's length by timestamp then cut real
+    audio and played the last seconds late.  Every tick (every 0.5 s of the cut, music.start 0) is where it should be, to the end."""
+    import numpy as np
+
+    media = probe(str(coded))
+    tl = timeline(str(coded), media.fps, [(1.0, 4.68), (6.0, 9.68), (12.0, 15.68)])  # 11.04 s
+    out = do_render(tl, media, tmp_path / "ln.mp4", MusicConfig(path=str(ticks), only=True, gain_db=-6.0, fade_out=0.1))
+    assert_av_lengths(out, media.fps)
+    y = sig.audio(out)
+    hop = 48  # 1 ms
+    env = np.array([sig.band_rms(y, k * hop / sig.SR, 0.004, sig.TICK_HZ - 300, sig.TICK_HZ + 300) for k in range(len(y) // hop - 4)])
+    on = env > 0.25 * env.max()
+    onsets = [k * hop / sig.SR for k in range(len(on)) if on[k] and (k == 0 or not on[k - 1])]
+    want = [k * 0.5 for k in range(int(tl.duration / 0.5) + 1) if k * 0.5 < tl.duration - 0.06]
+    assert len(onsets) == len(want), (onsets, want)
+    assert max(abs(a - b) for a, b in zip(onsets, want)) < 0.006, list(zip(onsets, want))

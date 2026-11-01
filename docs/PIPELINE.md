@@ -131,10 +131,12 @@ Each clip reads the source through its own ffmpeg input:
 - **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).
   - Their lengths are rounded over the running total, as the OTIO/FCPXML/EDL exporters' layout rounds them: the render shows the
     exported frames, and every clip starts within half a frame of `Timeline.record_start`.
-  - A single fractional transition can therefore render one frame longer or shorter than its seconds; the whole cut is
-    `round(duration × fps)` frames.
-- **Audio length:** the audio is padded or cut to the video's length at the end of the chain, since mixing, ducking and `loudnorm` can
-  end it early or pad it.
+  - A single fractional transition can therefore render one frame longer or shorter than its seconds. The whole cut is its duration in
+    frames, rounded half up.
+- **Audio length:** at the end of the chain the audio's timestamps are renumbered from its samples, then it is padded or cut to the
+  video's length.
+  - Mixing and ducking can end it early.
+  - `loudnorm` leaves a 20–100 ms timestamp jump about 2.9 s before the end, which a player would play as audio running late.
 - **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
   - the audio of a reordered dissolve went missing;
   - a reordered cut under music lost its audio;

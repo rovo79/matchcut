@@ -89,7 +89,9 @@ def build_filter_graph(
         if audio:
             parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
 
-    frames = lambda seconds: int(math.floor(seconds * fps + 0.5)) if fps > 0 else 0  # noqa: E731  (whole frames, as the trims select them)
+    # whole frames, rounded as interchange.common.to_frames rounds them (halves away from zero, with a millionth of a frame of slack, so a
+    # float sum such as 0.3 + 0.3 + 0.3 = 0.8999... s still rounds 22.5 frames up, as the exporters' layout does)
+    frames = lambda seconds: int(math.floor(seconds * fps + 0.5 + 1e-6)) if fps > 0 else 0  # noqa: E731
     cur_v, cur_a = "[v0]", "[a0]"
     cur_frames = frames(tl.clips[0].duration)
     # transition frames by error diffusion over the running total, as interchange.common.layout lays them out: rounding each one on its
@@ -135,8 +137,9 @@ def build_filter_graph(
     if has_music:
         parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips))
     if audio or has_music:
-        # the audio lasts exactly as long as the video: mixing, ducking and loudnorm can end it early or pad it to the next 100 ms
-        parts.append(f"[apre]apad=whole_dur={cur_dur:.6f},atrim=duration={cur_dur:.6f}[aout]")
+        # the audio lasts exactly as long as the video.  Its timestamps are first renumbered from its samples: loudnorm leaves a 20-100 ms
+        # jump about 2.9 s before the end, and each junction can overlap by a sample, so trimming by timestamp would cut real audio
+        parts.append(f"[apre]asetpts=N/SR/TB,apad=whole_dur={cur_dur:.6f},atrim=duration={cur_dur:.6f}[aout]")
     return ";".join(parts)
 
 
