@@ -143,14 +143,17 @@ def test_filter_graph_with_music_ducks_mixes_and_normalises():
 def test_filter_graph_music_only_and_no_duck():
     media = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=True)
     only = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", only=True))
-    assert not any(f"[{i}:a]" in only for i in range(3)) and "[music]anull[amixed]" in only
+    assert not any(f"[{i}:a]" in only for i in range(3)) and "[music]anull[amixed]" in only  # an indexed source: its audio is not read
+    unindexed = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", only=True), indexed=False)
+    assert all(f"[{i}:a]atrim" in unindexed for i in range(3))  # MPEG-TS: each clip's audio is read, then silenced under the music
+    assert "[asrc]volume=0[asilent]" in unindexed and "sidechaincompress" not in unindexed
     no_duck = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", duck=False, loudnorm=False))
     assert "sidechaincompress" not in no_duck
     assert "[asrc][music]amix=inputs=2:duration=longest:normalize=0[amixed]" in no_duck
     assert "[amixed]anull[apre]" in no_duck and no_duck.endswith("[aout]")
     silent = MediaInfo(path="x.mp4", duration=10, width=320, height=180, fps=25, has_audio=False)
     graph = build_filter_graph(_three_clip_timeline(), silent, PipelineConfig().render, music=MusicConfig(path="s.mp3"))
-    assert not any(f"[{i}:a]" in graph for i in range(3)) and "[music]anull[amixed]" in graph and "[aout]" in graph
+    assert not any(f"[{i}:a]" in graph for i in range(3)) and "[music]anull[amixed]" in graph and "[aout]" in graph  # no source audio at all
 
 
 def test_render_with_music_track(demo_video, click_track, tmp_path):

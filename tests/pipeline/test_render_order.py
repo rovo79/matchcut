@@ -339,8 +339,10 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
 
     def fake_run(cmd, capture=True):
         seen["cmd"] = cmd
-        seen["graph"] = Path(cmd[cmd.index("-filter_complex_script") + 1]).read_text()
+        option = next(o for o in render_mod.GRAPH_FILE_OPTIONS if o in cmd)
+        seen["graph"] = Path(cmd[cmd.index(option) + 1]).read_text()
     monkeypatch.setattr(render_mod, "run", fake_run)
+    monkeypatch.setattr(render_mod, "seek_margin", lambda path: render_mod.SEEK_MARGIN_SECONDS)  # (run is faked: no ffprobe here)
     monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 2000)
     media = probe(str(coded))
     tl = timeline(str(coded), media.fps, [(k * 0.5, k * 0.5 + 0.4) for k in range(20)])
@@ -380,6 +382,7 @@ def test_the_graph_file_is_removed_when_ffmpeg_fails(monkeypatch, coded, tmp_pat
     def failing_run(cmd, capture=True):
         raise render_mod.MediaError("ffmpeg failed")
     monkeypatch.setattr(render_mod, "run", failing_run)
+    monkeypatch.setattr(render_mod, "seek_margin", lambda path: render_mod.SEEK_MARGIN_SECONDS)
     monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)
     media = probe(str(coded))
     with pytest.raises(render_mod.MediaError):
@@ -404,3 +407,260 @@ def test_music_under_loudnorm_keeps_its_timing_to_the_end(coded, ticks, tmp_path
     want = [k * 0.5 for k in range(int(tl.duration / 0.5) + 1) if k * 0.5 < tl.duration - 0.06]
     assert len(onsets) == len(want), (onsets, want)
     assert max(abs(a - b) for a, b in zip(onsets, want)) < 0.006, list(zip(onsets, want))
+
+
+def _fake_ffmpeg(tmp_path: Path, name: str, accepts: tuple) -> str:
+    """A stand-in for another ffmpeg version: it accepts only the graph-file options in ``accepts`` (as that version would), and runs the
+    installed ffmpeg with the option it understands.  ffmpeg 9 removed -filter_complex_script and reads the graph with -/filter_complex."""
+    import shutil as _sh
+    real = _sh.which("ffmpeg")
+    script = tmp_path / name
+    script.write_text(f"""#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    -filter_complex_script) case " {' '.join(accepts)} " in *" -filter_complex_script "*) ;; *) echo "Unrecognized option 'filter_complex_script'." >&2; exit 8;; esac;;
+    -/filter_complex) case " {' '.join(accepts)} " in *" -/filter_complex "*) ;; *) echo "Unrecognized option '/filter_complex'." >&2; exit 8;; esac;;
+  esac
+done
+if [ "$1" = "-version" ]; then echo "ffmpeg version 9.0-stand-in"; exit 0; fi
+args=""
+for a in "$@"; do
+  if [ "$a" = "-/filter_complex" ]; then a="-filter_complex_script"; fi
+  args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"
+done
+eval exec "{real}" $args
+""")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_the_graph_file_option_is_the_one_this_ffmpeg_supports(monkeypatch, coded, tmp_path):
+    """Asked of each ffmpeg: the installed one (6.1 here: -filter_complex_script); a stand-in for ffmpeg 9 (only -/filter_complex) renders a
+    long graph frame-exact through -/filter_complex; an ffmpeg that accepts neither is a one-line error, with no graph file left."""
+    import shutil as _sh
+
+    from matchcut.pipeline.render import graph_file_option
+
+    assert graph_file_option(_sh.which("ffmpeg")) in render_mod.GRAPH_FILE_OPTIONS
+    media = probe(str(coded))
+    tl = timeline(str(coded), media.fps, [(9.0, 11.0), (5.0, 7.0), (1.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)  # force the file path
+    nine = _fake_ffmpeg(tmp_path, "ffmpeg9", ("-/filter_complex",))
+    assert graph_file_option(nine) == "-/filter_complex"
+    seen = []
+    real_run = render_mod.run
+    monkeypatch.setattr(render_mod, "_require", lambda name: nine if name == "ffmpeg" else _sh.which(name))
+    monkeypatch.setattr(render_mod, "run", lambda cmd, capture=True: (seen.append(cmd), real_run(cmd, capture=capture))[1])
+    out = do_render(tl, media, tmp_path / "nine.mp4")
+    assert "-/filter_complex" in seen[-1] and "-filter_complex_script" not in seen[-1]
+    assert_video_exact(tl, out, media.fps)
+    assert_av_lengths(out, media.fps)
+    neither = _fake_ffmpeg(tmp_path, "ffmpeg_old", ())
+    monkeypatch.setattr(render_mod, "_require", lambda name: neither if name == "ffmpeg" else _sh.which(name))
+    with pytest.raises(render_mod.MediaError, match="accepts neither"):
+        render(tl, media, RCFG, tmp_path / "neither.mp4")
+    assert not list(tmp_path.glob(".graph-*"))
+
+
+@pytest.fixture(scope="module")
+def audio_tail(tmp_path_factory) -> Path:
+    """10 s of video whose audio runs on to 12 s: the container is 12 s long, the picture 10 s."""
+    import subprocess as sp
+
+    out = tmp_path_factory.mktemp("tail") / "tail.mp4"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=10", "-f", "lavfi", "-i", "sine=f=440:r=48000:d=12",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
+    return out
+
+
+@pytest.fixture(scope="module")
+def audio_tail_mkv(audio_tail) -> Path:
+    """The same file in Matroska: its video stream records no duration (only a DURATION tag)."""
+    import subprocess as sp
+
+    out = audio_tail.with_suffix(".mkv")
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio_tail), "-c", "copy", str(out)], check=True)
+    return out
+
+
+@pytest.mark.parametrize("container", ["mp4", "mkv"])
+@pytest.mark.parametrize("ranges, transition, message", [
+    # past the end of the file: the input that made ffmpeg wait forever (main hangs here)
+    ([(1.0, 3.0), (12.5, 13.5)], Transition("dissolve", 0.4), "starts at 12.500 s, at or after the end of the video"),
+    # inside the file's audio tail but after the picture
+    ([(1.0, 3.0), (10.5, 11.5)], Transition("dissolve", 0.4), "starts at 10.500 s, at or after the end of the video"),
+    ([(1.0, 3.0), (10.5, 11.5)], Transition(), "starts at 10.500 s, at or after the end of the video"),
+    ([(-0.5, 1.0), (3.0, 4.0)], Transition(), "before the start"),
+    ([(1.0, 1.02), (3.0, 4.0)], Transition(), "shorter than one frame"),
+])
+def test_a_range_the_video_cannot_play_is_refused_before_ffmpeg_starts(audio_tail, audio_tail_mkv, tmp_path, container, ranges, transition, message):
+    """Run for real (ffmpeg is not patched out): a regression shows as a timeout here, not as a pass."""
+    src = audio_tail if container == "mp4" else audio_tail_mkv
+    media = probe(str(src))
+    assert media.duration > 11.5  # the container (with the audio) runs past the video's 10 s
+    tl = timeline(str(src), media.fps, ranges, [Transition(), transition])
+    with pytest.raises(render_mod.RangeError, match=message) as err:
+        with deadline(30):
+            render(tl, media, RCFG, tmp_path / "bad.mp4")
+    if "end of the video" in message:
+        import re
+
+        assert re.search(r"runs 0\.0\d\d-10\.0\d\d s", str(err.value)) and "with its audio, runs to 12." in str(err.value), str(err.value)
+    assert not (tmp_path / "bad.mp4").exists()
+
+
+def test_an_out_point_past_the_picture_is_rendered_to_the_last_frame_with_a_warning(audio_tail, tmp_path, caplog):
+    """Older workspaces ended their last shot at the container's end: such a clip renders to the video's last frame (warned), it is not
+    refused; the stage itself is not changed."""
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (8.0, 11.5)])
+    before = tl.to_dict()
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "over.mp4")
+    assert any("past the end of the picture: rendered to 10.000 s" in r.getMessage() for r in caplog.records)
+    assert tl.to_dict() == before
+    st = sig.streams(out)
+    assert int(st["video"]["nb_read_frames"]) == 100 and abs(float(st["audio"]["duration"]) - 4.0) < 0.002
+
+
+def test_a_clip_ending_exactly_at_the_last_frame_at_60_fps_is_not_trimmed(tmp_path, caplog):
+    """1111 frames at 60 fps end at 18.51666...; the stored 4-decimal point 18.5167 is not past the picture."""
+    import subprocess as sp
+
+    src = tmp_path / "f60.mp4"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=60", "-f", "lavfi", "-i", "sine=f=440:r=48000",
+            "-frames:v", "1111", "-t", "18.6", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    media = probe(str(src))
+    tl = timeline(str(src), media.fps, [(1.0, 2.0), (17.0, round(1111 / 60, 4))])
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "f60_out.mp4")
+    assert not any("past the end of the picture" in r.getMessage() for r in caplog.records)
+    assert int(sig.streams(out)["video"]["nb_read_frames"]) == 60 + 91
+
+
+def test_the_pipeline_ends_its_last_shot_at_the_picture_and_renders(demo_video, tmp_path):
+    """Footage whose audio runs 0.1 s past its picture (as phone footage often does): the last shot ends with the picture, and the run
+    renders (it was refused: the last clip ended at the container's end)."""
+    import subprocess as sp
+
+    from matchcut.pipeline.config import PipelineConfig
+    from matchcut.pipeline.pipeline import Pipeline
+    from matchcut.pipeline.shots import load_shots
+
+    src = tmp_path / "tail_demo.mp4"
+    v = probe(str(demo_video)).duration
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(demo_video), "-f", "lavfi", "-i", f"sine=f=440:r=48000:d={v + 0.12:.2f}",
+            "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", str(src)], check=True)
+    extent = __import__("matchcut.pipeline.media", fromlist=["video_extent"]).video_extent(str(src))
+    assert extent.container_end - extent.end > 0.08
+    cfg = PipelineConfig(source=str(src), workspace=str(tmp_path / "ws"), target_duration=30.0)
+    cfg.llm.backend = "mock"
+    cfg.render.proxy = True
+    final = Pipeline(cfg).run()
+    shots = load_shots(tmp_path / "ws" / "shots.json")
+    assert abs(shots[-1].end - extent.end) < 1e-6
+    assert all(c.source_out <= extent.end + 1e-4 for c in final.clips)
+    assert (tmp_path / "ws" / "final_proxy.mp4").exists()
+
+
+def test_a_clip_ending_within_a_frame_of_the_video_end_still_renders(audio_tail, tmp_path):
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (8.0, 10.02)])  # half a frame past the picture: as a shot ending at the file's end can
+    out = do_render(tl, media, tmp_path / "edge.mp4")
+    assert "audio" in sig.streams(out)
+
+
+@pytest.fixture(scope="module")
+def late_video(tmp_path_factory) -> dict:
+    """Video that starts 2 s after the file's audio, as MPEG-TS and remuxed to Matroska (one keyframe: GOP longer than the clip)."""
+    import subprocess as sp
+
+    d = tmp_path_factory.mktemp("late")
+    ts, mkv = d / "late.ts", d / "late.mkv"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-itsoffset", "2", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=8", "-f", "lavfi", "-i",
+            "sine=f=440:r=48000:d=10", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(ts)], check=True)
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(ts), "-c", "copy", str(mkv)], check=True)
+    return {"ts": ts, "mkv": mkv}
+
+
+@pytest.mark.parametrize("ext", ["ts", "mkv"])
+def test_a_clip_before_the_first_frame_is_refused_and_one_overlapping_it_is_trimmed(late_video, tmp_path, caplog, ext):
+    """A dissolve into a clip with no picture before the video starts hung ffmpeg as the past-the-end case did: refused.  A clip that
+    starts before the picture and runs into it renders from the first frame, with a warning."""
+    from matchcut.pipeline.media import video_extent
+
+    src = late_video[ext]
+    media = probe(str(src))
+    extent = video_extent(str(src))
+    assert 1.9 < extent.start < 2.2
+    before = timeline(str(src), media.fps, [(4.0, 6.0), (0.2, 1.5)], [Transition(), Transition("dissolve", 0.4)])
+    with pytest.raises(render_mod.RangeError, match="before the first frame of the video"):
+        with deadline(30):
+            render(before, media, RCFG, tmp_path / "before.mp4")
+    overlap = timeline(str(src), media.fps, [(4.0, 6.0), (1.0, 4.0)])
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(overlap, media, tmp_path / "overlap.mp4")
+    assert any("before the first frame of the picture: rendered from" in r.getMessage() for r in caplog.records)
+    st = sig.streams(out)
+    assert abs(float(st["audio"]["duration"]) - float(st["video"]["duration"])) <= sig.av_tolerance(media.fps)
+
+
+def test_a_29_97_fps_mkv_clip_ending_at_its_last_frame_keeps_it(tmp_path, caplog):
+    """Matroska writes its DURATION tag to the millisecond, a few hundredths of a frame short at 29.97 fps: the last frame stays."""
+    import subprocess as sp
+
+    mp4, mkv = tmp_path / "v.mp4", tmp_path / "v.mkv"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001", "-frames:v", "302", "-c:v", "libx264",
+            "-preset", "veryfast", "-pix_fmt", "yuv420p", str(mp4)], check=True)
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(mkv)], check=True)
+    for src in (mp4, mkv):
+        media = probe(str(src))
+        tl = timeline(str(src), media.fps, [(1.0, 2.0), (round(200 * 1001 / 30000, 4), round(302 * 1001 / 30000, 4))])
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+            out = do_render(tl, media, tmp_path / f"{src.suffix[1:]}_out.mp4")
+        assert not any("past the end of the picture" in r.getMessage() for r in caplog.records), src.suffix
+        assert int(sig.streams(out)["video"]["nb_read_frames"]) == 30 + 102, src.suffix
+
+
+def test_a_trim_that_leaves_a_clip_shorter_than_its_dissolve_is_refused(audio_tail, tmp_path):
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (9.9, 11.0)], [Transition(), Transition("dissolve", 0.4)])
+    with pytest.raises(render_mod.RangeError, match="too few for its 10-frame transition"):
+        render(tl, media, RCFG, tmp_path / "short.mp4")
+
+
+@pytest.mark.parametrize("x264, audio_mode", [
+    ("keyint=300", "source"), ("keyint=300", "music only"), ("keyint=300", "source and music"),
+    ("intra-refresh=1:keyint=50", "source"), ("intra-refresh=1:keyint=50", "music only"),
+])
+def test_an_mpeg_ts_source_seeks_by_its_keyframe_gap(ticks, tmp_path, caplog, x264, audio_mode):
+    """MPEG-TS (AVCHD .mts) has no index: a seek lands on a timestamp, not a keyframe, and an input seeked 0.25 s early decoded nothing
+    (47 of 140 frames).  Its inputs are seeked by twice the file's longest keyframe gap (an intra-refresh stream's recovery points are
+    flagged as keyframes but complete a picture a refresh later).  Reverse order and a dissolve, frame-exact, the right sound; a clip from
+    0.0 keeps its first frame with no warning; and music only (where the source audio is not read, and ffmpeg timed the TS differently)."""
+    import subprocess as sp
+
+    mp4 = tmp_path / "coded.mp4"
+    stripe = 320 // sig.BITS
+    lum = f"if(lt(X,{stripe * sig.BITS}),255*mod(floor(N/pow(2,floor(X/{stripe}))),2),128)"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c=black:s=320x180:r=25:d=12,format=gray,geq=lum='{lum}'",
+            "-f", "lavfi", "-i", "aevalsrc=exprs='0.5*sin(2*PI*(200+40*floor(t))*t)':s=48000:d=12", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "-pix_fmt", "yuv420p", "-x264-params", x264, "-c:a", "aac", "-b:a", "192k", str(mp4)], check=True)
+    ts = tmp_path / "coded.ts"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(ts)], check=True)
+    assert not render_mod.seekable(str(ts)) and render_mod.seekable(str(mp4))
+    assert render_mod.seek_margin(str(ts)) > render_mod.SEEK_MARGIN_SECONDS and render_mod.seek_margin(str(mp4)) == render_mod.SEEK_MARGIN_SECONDS
+    media = probe(str(ts))
+    tl = timeline(str(ts), media.fps, [(8.0, 10.0), (5.0, 7.0), (0.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    music = None if audio_mode == "source" else MusicConfig(path=str(ticks), only=audio_mode == "music only", gain_db=-6.0)
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(tl, media, tmp_path / "ts_out.mp4", music)
+    assert not any("first frame" in r.getMessage() for r in caplog.records)
+    assert_video_exact(tl, out, media.fps)
+    assert_av_lengths(out, media.fps)
+    y = sig.audio(out)
+    assert_source_tones(tl, y, present=audio_mode != "music only")
+    if music is not None:
+        assert_ticks(tl, y)
