@@ -145,8 +145,8 @@ def test_filter_graph_music_only_and_no_duck():
     only = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", only=True))
     assert not any(f"[{i}:a]" in only for i in range(3)) and "[music]anull[amixed]" in only  # an indexed source: its audio is not read
     unindexed = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", only=True), indexed=False)
-    assert all(f"[{i}:a]atrim" in unindexed and "anullsink" in unindexed for i in range(3))  # MPEG-TS: each clip's audio read, then dropped
-    assert unindexed.count("anullsink") == 3
+    assert all(f"[{i}:a]atrim" in unindexed for i in range(3))  # MPEG-TS: each clip's audio is read, then silenced under the music
+    assert "[asrc]volume=0[asilent]" in unindexed and "sidechaincompress" not in unindexed
     no_duck = build_filter_graph(_three_clip_timeline(), media, PipelineConfig().render, music=MusicConfig(path="s.mp3", duck=False, loudnorm=False))
     assert "sidechaincompress" not in no_duck
     assert "[asrc][music]amix=inputs=2:duration=longest:normalize=0[amixed]" in no_duck

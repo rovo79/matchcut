@@ -150,7 +150,10 @@ def build_filter_graph(
     scale = f",scale={width}:-2:flags=bicubic" if width else ""
     parts: List[str] = []
     has_music = bool(music is not None and music.path)
-    audio = media.has_audio and not (has_music and music.only)
+    # a seeked MPEG-TS/PS input whose audio is left unread is timed differently by ffmpeg (its video trims land on the wrong frames), so
+    # with music only an unindexed source's audio is still assembled, then silenced under the music (indexed containers skip it)
+    silenced = bool(has_music and music.only and media.has_audio and not indexed)
+    audio = media.has_audio and (not (has_music and music.only) or silenced)
     eps = TRIM_EPSILON_SECONDS
     for ci in clip_inputs(tl, fps, margin):
         i = ci.index
@@ -160,10 +163,6 @@ def build_filter_graph(
         )
         if audio:
             parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
-        elif media.has_audio and not indexed:
-            # the source's audio is not used (music only), but a seeked MPEG-TS/PS input whose audio is left unread is timed differently by
-            # ffmpeg, and its video trims land on the wrong frames: read the clip's audio and drop it (indexed containers do not need this)
-            parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},anullsink")
 
     # whole frames, rounded as interchange.common.to_frames rounds them (halves away from zero, with a millionth of a frame of slack, so a
     # float sum such as 0.3 + 0.3 + 0.3 = 0.8999... s still rounds 22.5 frames up, as the exporters' layout does)
@@ -211,7 +210,7 @@ def build_filter_graph(
         label = "[asrc]" if has_music else "[apre]"
         parts.append(f"{cur_a}{','.join(afilters) if afilters else 'anull'}{label}")
     if has_music:
-        parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips))
+        parts += _music_chain(music, cur_dur, audio, music_duration, music_input=len(tl.clips), silenced=silenced)
     if audio or has_music:
         # the audio lasts exactly as long as the video.  Its timestamps are first renumbered from its samples: loudnorm leaves a 20-100 ms
         # jump about 2.9 s before the end, and each junction can overlap by a sample, so trimming by timestamp would cut real audio
@@ -336,7 +335,8 @@ def _ensure_open_files(n_inputs: int) -> None:
                          f"({soft}) cannot be raised to {need}: {exc}") from exc
 
 
-def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1) -> List[str]:
+def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_duration: Optional[float] = None, music_input: int = 1,
+                 silenced: bool = False) -> List[str]:
     """Trim, fade, gain, duck (optional), mix and normalise the music (input ``music_input``) under [asrc]."""
     parts: List[str] = []
     start = max(0.0, music.start)
@@ -346,7 +346,10 @@ def _music_chain(music: MusicConfig, total: float, source_audio: bool, music_dur
         f"[{music_input}:a]atrim=start={start:.3f}:end={start + available:.3f},asetpts=PTS-STARTPTS,"
         f"afade=t=out:st={max(0.0, available - fade):.3f}:d={fade:.3f},volume={music.gain_db:.1f}dB[music]"
     )
-    if source_audio:
+    if silenced:  # music only, over an unindexed source whose audio had to be read: mixed in at zero volume, no ducking
+        parts.append("[asrc]volume=0[asilent]")
+        parts.append("[asilent][music]amix=inputs=2:duration=longest:normalize=0[amixed]")
+    elif source_audio:
         if music.duck:
             parts.append("[asrc]asplit[asrc0][asrc1]")
             parts.append(
