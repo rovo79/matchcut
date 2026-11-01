@@ -137,6 +137,7 @@ def build_filter_graph(
     music: Optional[MusicConfig] = None,
     music_duration: Optional[float] = None,
     margin: Optional[float] = SEEK_MARGIN_SECONDS,
+    indexed: bool = True,
 ) -> str:
     """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``.
 
@@ -159,10 +160,10 @@ def build_filter_graph(
         )
         if audio:
             parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},asetpts=PTS-STARTPTS,asettb=AVTB[a{i}]")
-        elif media.has_audio:
-            # the source's audio is not used (music only): consume it anyway; ffmpeg times a seeked MPEG-TS/PS input differently when its
-            # audio is left unread, and the video trims then land on the wrong frames
-            parts.append(f"[{i}:a]anullsink")
+        elif media.has_audio and not indexed:
+            # the source's audio is not used (music only), but a seeked MPEG-TS/PS input whose audio is left unread is timed differently by
+            # ffmpeg, and its video trims land on the wrong frames: read the clip's audio and drop it (indexed containers do not need this)
+            parts.append(f"[{i}:a]atrim=start={ci.start:.6f}:end={ci.end:.6f},anullsink")
 
     # whole frames, rounded as interchange.common.to_frames rounds them (halves away from zero, with a millionth of a frame of slack, so a
     # float sum such as 0.3 + 0.3 + 0.3 = 0.8999... s still rounds 22.5 frames up, as the exporters' layout does)
@@ -377,7 +378,7 @@ def render(
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
     margin = seek_margin(media.path)  # decided once: the graph's trims and the inputs' seeks must agree
-    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration, margin=margin)
+    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration, margin=margin, indexed=seekable(media.path))
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n"]
     threads = ["-threads", "1"] if len(tl.clips) > SINGLE_THREAD_DECODE_ABOVE else []
