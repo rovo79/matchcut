@@ -566,3 +566,81 @@ def test_a_clip_ending_within_a_frame_of_the_video_end_still_renders(audio_tail,
     tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (8.0, 10.02)])  # half a frame past the picture: as a shot ending at the file's end can
     out = do_render(tl, media, tmp_path / "edge.mp4")
     assert "audio" in sig.streams(out)
+
+
+@pytest.fixture(scope="module")
+def late_video(tmp_path_factory) -> dict:
+    """Video that starts 2 s after the file's audio, as MPEG-TS and remuxed to Matroska (one keyframe: GOP longer than the clip)."""
+    import subprocess as sp
+
+    d = tmp_path_factory.mktemp("late")
+    ts, mkv = d / "late.ts", d / "late.mkv"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-itsoffset", "2", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=8", "-f", "lavfi", "-i",
+            "sine=f=440:r=48000:d=10", "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", str(ts)], check=True)
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(ts), "-c", "copy", str(mkv)], check=True)
+    return {"ts": ts, "mkv": mkv}
+
+
+@pytest.mark.parametrize("ext", ["ts", "mkv"])
+def test_a_clip_before_the_first_frame_is_refused_and_one_overlapping_it_is_trimmed(late_video, tmp_path, caplog, ext):
+    """A dissolve into a clip with no picture before the video starts hung ffmpeg as the past-the-end case did: refused.  A clip that
+    starts before the picture and runs into it renders from the first frame, with a warning."""
+    from matchcut.pipeline.media import video_extent
+
+    src = late_video[ext]
+    media = probe(str(src))
+    extent = video_extent(str(src))
+    assert 1.9 < extent.start < 2.2
+    before = timeline(str(src), media.fps, [(4.0, 6.0), (0.2, 1.5)], [Transition(), Transition("dissolve", 0.4)])
+    with pytest.raises(render_mod.RangeError, match="before the first frame of the video"):
+        with deadline(30):
+            render(before, media, RCFG, tmp_path / "before.mp4")
+    overlap = timeline(str(src), media.fps, [(4.0, 6.0), (1.0, 4.0)])
+    with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+        out = do_render(overlap, media, tmp_path / "overlap.mp4")
+    assert any("before the first frame of the picture: rendered from" in r.getMessage() for r in caplog.records)
+    st = sig.streams(out)
+    assert abs(float(st["audio"]["duration"]) - float(st["video"]["duration"])) <= sig.av_tolerance(media.fps)
+
+
+def test_a_29_97_fps_mkv_clip_ending_at_its_last_frame_keeps_it(tmp_path, caplog):
+    """Matroska writes its DURATION tag to the millisecond, a few hundredths of a frame short at 29.97 fps: the last frame stays."""
+    import subprocess as sp
+
+    mp4, mkv = tmp_path / "v.mp4", tmp_path / "v.mkv"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=30000/1001", "-frames:v", "302", "-c:v", "libx264",
+            "-preset", "veryfast", "-pix_fmt", "yuv420p", str(mp4)], check=True)
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(mkv)], check=True)
+    for src in (mp4, mkv):
+        media = probe(str(src))
+        tl = timeline(str(src), media.fps, [(1.0, 2.0), (round(200 * 1001 / 30000, 4), round(302 * 1001 / 30000, 4))])
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="matchcut.pipeline"):
+            out = do_render(tl, media, tmp_path / f"{src.suffix[1:]}_out.mp4")
+        assert not any("past the end of the picture" in r.getMessage() for r in caplog.records), src.suffix
+        assert int(sig.streams(out)["video"]["nb_read_frames"]) == 30 + 102, src.suffix
+
+
+def test_a_trim_that_leaves_a_clip_shorter_than_its_dissolve_is_refused(audio_tail, tmp_path):
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (9.9, 11.0)], [Transition(), Transition("dissolve", 0.4)])
+    with pytest.raises(render_mod.RangeError, match="too few for its 10-frame transition"):
+        render(tl, media, RCFG, tmp_path / "short.mp4")
+
+
+def test_an_mpeg_ts_source_with_long_gops_is_read_from_its_start(tmp_path):
+    """MPEG-TS (AVCHD .mts) has no index: an input seek can land past the only keyframe and decode nothing.  Its clips read from the start
+    of the file: reverse order and a dissolve, frame-exact, every tone right."""
+    import subprocess as sp
+
+    mp4 = sig.make_coded_footage(tmp_path / "long_gop.mp4", seconds=12, gop=300)
+    ts = tmp_path / "long_gop.ts"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-i", str(mp4), "-c", "copy", str(ts)], check=True)
+    assert not render_mod.seekable(str(ts)) and render_mod.seekable(str(mp4))
+    media = probe(str(ts))
+    tl = timeline(str(ts), media.fps, [(8.0, 10.0), (5.0, 7.0), (1.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    out = do_render(tl, media, tmp_path / "ts_out.mp4")
+    assert_video_exact(tl, out, media.fps)
+    assert_av_lengths(out, media.fps)
+    assert_source_tones(tl, sig.audio(out))

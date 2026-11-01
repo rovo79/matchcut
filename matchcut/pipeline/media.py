@@ -111,6 +111,7 @@ class VideoExtent:
     end: float
     container_end: Optional[float]
     exact: bool
+    slack: float = 0.0  # seconds the recorded end may be off by (a Matroska DURATION tag is written to the millisecond)
 
 
 def _tag_seconds(text: object) -> Optional[float]:
@@ -151,7 +152,7 @@ def video_extent(path: str) -> Optional[VideoExtent]:
         return VideoExtent(start, start + length, container, True)
     tag = _tag_seconds((v.get("tags") or {}).get("DURATION"))
     if tag is not None:  # Matroska/WebM: the stream's end time, counted like the file's timestamps
-        return VideoExtent(start, tag - origin, container, True)
+        return VideoExtent(start, tag - origin, container, True, 0.0011)
     if container is not None:
         return VideoExtent(start, container, container, False)
     return None

@@ -126,6 +126,9 @@ Each clip reads the source through its own ffmpeg input:
 
 - **Where it reads:** the input is seeked to the last frame at least 0.25 s before the clip's in-point (or to 0), and reads to 0.5 s past
   its out-point.
+  - Seeking is used only in containers with an index (MP4/MOV, Matroska/WebM, AVI, MXF, ASF, FLV).
+  - In MPEG-TS (AVCHD `.mts`/`.m2ts`), MPEG program streams and raw streams, a seek can land past the only keyframe in reach and decode
+    nothing. Their clips read from the start of the file instead, which is slower for long files.
 - **Trims:** they are exact, made on the decoded frames and samples, relative to that seek. Video trims start 0.5 ms early, so a point
   stored to 4 decimals still selects its own frame at 29.97 and 30 fps.
 - **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).
@@ -163,14 +166,19 @@ Each clip reads the source through its own ffmpeg input:
   - **Refused, with a one-line error,** is a clip that:
     - starts before the file;
     - is shorter than a frame;
-    - starts at or after the end of the video (half a frame before it). A dissolve into a clip past the end of the file used to make
-      ffmpeg wait forever.
-  - **Rendered with a warning** is an out-point that runs past the last frame of the picture, when the clip starts inside it. It is
-    rendered to the last frame, and the stage itself is not changed. Older workspaces ended their last shot at the container's end.
-  - **Where the end comes from:**
-    - MP4/MOV: the video stream's duration or frame count, measured from the start of the file. The container's end is not used: a
-      file's audio can run on past its picture.
-    - Matroska/WebM, which record no stream duration: the stream's `DURATION` tag.
+    - lies entirely before the picture's first frame, or starts at or after its end (half a frame before it). A dissolve into a clip
+      with no picture made ffmpeg wait forever.
+    - would be left shorter than its own transition by the trim below.
+  - **Rendered with a warning** is an in-point before the first frame, or an out-point past the last, when the clip overlaps the picture.
+    It is rendered from the first frame or to the last. Older workspaces' shots spanned the container, whose audio can start before or run
+    on after the picture.
+    - The stage, its exports and its report keep the original points, so the render can be shorter than they say.
+    - The warning in the log is the only place this is reported.
+  - **Where the picture's extent comes from:**
+    - MP4/MOV/MPEG-TS: the video stream's start and duration (or frame count), measured from the start of the file. The container's end
+      is not used.
+    - Matroska/WebM, which record no stream duration: the stream's `DURATION` tag, taken as the stream's end time, with a millisecond
+      of slack. Files written by `mkvmerge` may store it differently; that is unverified.
     - A file with neither: the container's end, used only to refuse clips that start past it.
 - **Shot detection:** when the container runs more than a frame past the picture, the last shot ends where the picture ends, so new runs
   do not produce such clips. A tail within a frame leaves shots as they were.

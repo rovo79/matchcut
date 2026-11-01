@@ -24,13 +24,13 @@ def tone_hz(second: int) -> float:
     return 200.0 + 40.0 * second
 
 
-def make_coded_footage(out: Path, seconds: int = 20, rate: str = "25", width: int = 320, height: int = 180, ts_offset: float = 0.0) -> Path:
+def make_coded_footage(out: Path, seconds: int = 20, rate: str = "25", width: int = 320, height: int = 180, ts_offset: float = 0.0, gop: int = 50) -> Path:
     stripe = width // BITS
     lum = f"if(lt(X,{stripe * BITS}),255*mod(floor(N/pow(2,floor(X/{stripe}))),2),128)"
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-y",
            "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={rate}:d={seconds},format=gray,geq=lum='{lum}'",
            "-f", "lavfi", "-i", f"aevalsrc=exprs='0.5*sin(2*PI*(200+40*floor(t))*t)':s={SR}:d={seconds}",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-g", "50", "-c:a", "aac", "-b:a", "192k"]
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-g", str(gop), "-c:a", "aac", "-b:a", "192k"]
     if ts_offset:
         cmd += ["-output_ts_offset", f"{ts_offset}"]
     subprocess.run(cmd + [str(out)], check=True)

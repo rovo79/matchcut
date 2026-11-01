@@ -47,13 +47,36 @@ class ClipInput:
     end: float
 
 
-def clip_inputs(tl: Timeline, fps: float) -> List[ClipInput]:
-    """One input per clip.  ``seek`` is on the frame grid, ``SEEK_MARGIN_SECONDS`` before the in-point (or 0)."""
+# containers with an index ffmpeg seeks by (to the keyframe before the seek point); in others (MPEG-TS such as AVCHD .mts, MPEG program
+# streams, raw streams) an input seek can land past the only keyframe in reach and decode nothing, so their clips read from the start
+INDEXED_FORMATS = ("mov", "mp4", "m4a", "3gp", "3g2", "mj2", "matroska", "webm", "avi", "mxf", "asf", "flv")
+
+
+@functools.lru_cache(maxsize=64)
+def _format_names(path: str, mtime_ns: int) -> tuple:
+    proc = run([_require("ffprobe"), "-v", "error", "-show_entries", "format=format_name", "-of", "csv=p=0", path])
+    return tuple(x.strip() for x in proc.stdout.decode("utf-8", "replace").strip().strip('"').split(","))
+
+
+def seekable(path: str) -> bool:
+    """Whether ffmpeg can seek ``path`` by an index (see ``INDEXED_FORMATS``); unknown or unreadable files are read from the start."""
+    try:
+        names = _format_names(str(path), os.stat(path).st_mtime_ns)
+    except (MediaError, OSError):
+        return False
+    return any(n in INDEXED_FORMATS for n in names)
+
+
+def clip_inputs(tl: Timeline, fps: float, seek: bool = True) -> List[ClipInput]:
+    """One input per clip.  ``seek`` on: on the frame grid, ``SEEK_MARGIN_SECONDS`` before the in-point (or 0); off: from the start of the file."""
     out: List[ClipInput] = []
     for i, c in enumerate(tl.clips):
-        seek = max(0.0, math.floor((c.source_in - SEEK_MARGIN_SECONDS) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - SEEK_MARGIN_SECONDS)
-        seek = round(seek, 6)
-        out.append(ClipInput(i, seek, round(c.source_out - seek + READ_MARGIN_SECONDS, 6), round(c.source_in - seek, 6), round(c.source_out - seek, 6)))
+        if not seek:
+            out.append(ClipInput(i, 0.0, round(c.source_out + READ_MARGIN_SECONDS, 6), round(c.source_in, 6), round(c.source_out, 6)))
+            continue
+        seek_at = max(0.0, math.floor((c.source_in - SEEK_MARGIN_SECONDS) * fps + 1e-6) / fps) if fps > 0 else max(0.0, c.source_in - SEEK_MARGIN_SECONDS)
+        seek_at = round(seek_at, 6)
+        out.append(ClipInput(i, seek_at, round(c.source_out - seek_at + READ_MARGIN_SECONDS, 6), round(c.source_in - seek_at, 6), round(c.source_out - seek_at, 6)))
     return out
 
 
@@ -68,6 +91,7 @@ def build_filter_graph(
     cfg: RenderConfig,
     music: Optional[MusicConfig] = None,
     music_duration: Optional[float] = None,
+    seek: bool = True,
 ) -> str:
     """ffmpeg -filter_complex graph assembling the timeline: clip i from input i (see ``clip_inputs``), the music from input ``len(clips)``.
 
@@ -82,7 +106,7 @@ def build_filter_graph(
     has_music = bool(music is not None and music.path)
     audio = media.has_audio and not (has_music and music.only)
     eps = TRIM_EPSILON_SECONDS
-    for ci in clip_inputs(tl, fps):
+    for ci in clip_inputs(tl, fps, seek):
         i = ci.index
         parts.append(
             f"[{i}:v]trim=start={max(0.0, ci.start - eps):.6f}:end={ci.end - eps:.6f},setpts=PTS-STARTPTS,"
@@ -158,41 +182,54 @@ class RangeError(MediaError):
 def fit_ranges(tl: Timeline, media: MediaInfo) -> Timeline:
     """The timeline the renderer will play, checked against the video stream before ffmpeg starts.
 
-    Refused, with one line (``RangeError``): a clip that starts before the file, is shorter than a frame, or starts at or after the end of
-    the video stream (half a frame before it, or the container's end when the stream records no length).  A dissolve into a clip past
-    the end of the file made ffmpeg wait forever.
+    Refused, with one line (``RangeError``): a clip that starts before the file, is shorter than a frame, lies entirely before the first
+    frame of the picture or starts at or after its end (half a frame before it; the container's end when the stream records no length),
+    or that trimming to the picture (below) would leave shorter than its own transitions.  A dissolve into a clip with no picture made ffmpeg wait forever.
 
-    Kept, with a warning: an out-point that runs past the end of the picture, when the clip starts inside it.  Shots used to end at the
-    container's end, and the audio can run past the picture, so older workspaces have such clips; the copy ends them at the video's
-    last frame (the stage itself is not changed).  The end is the video stream's own, in frames, never the container's."""
+    Kept, with a warning: an in-point before the first frame, or an out-point past the last, when the clip overlaps the picture.  Shots
+    used to span the container (whose audio can start before, or run on after, the picture), so older workspaces have such clips; the copy
+    starts or ends them at the picture (the stage itself is not changed).  The picture's extent is the video stream's own, in frames."""
     fps = media.fps if media.fps > 0 else 25.0
     extent = video_extent(media.path)
     out = tl.copy()
     name = Path(media.path).name
-    for c in out.clips:
+    frames = lambda t: t * fps  # noqa: E731
+    for k, c in enumerate(out.clips):
         if c.source_in < -1e-6:
             raise RangeError(f"clip {c.id} starts at {c.source_in:.3f} s, before the start of {name}")
-        if (c.source_out - c.source_in) * fps < 1 - 1e-3:
+        if frames(c.source_out - c.source_in) < 1 - 1e-3:
             raise RangeError(f"clip {c.id} is shorter than one frame ({c.source_in:.3f}-{c.source_out:.3f} s)")
         if extent is None:
             continue
-        end_f = extent.end * fps
+        slack = 0.01 + extent.slack * fps  # frames: 4-decimal points, and a millisecond-precision end
+        start_f, end_f = frames(extent.start), frames(extent.end)
         where = (f"the video of {name} runs {extent.start:.3f}-{extent.end:.3f} s" if extent.exact else
-                 f"{name} records no length for its video; the file ends at {extent.end:.3f} s")
+                 f"{name} records no length for its video; it starts at {extent.start:.3f} s and the file ends at {extent.end:.3f} s")
         if extent.exact and extent.container_end is not None and extent.container_end > extent.end + 0.5 / fps:
             where += f" (the file, with its audio, runs to {extent.container_end:.3f} s)"
-        if c.source_in * fps >= end_f - 0.5:
+        if frames(c.source_in) >= end_f - 0.5:
             raise RangeError(f"clip {c.id} starts at {c.source_in:.3f} s, at or after the end of the video: {where}")
-        if extent.exact and c.source_out * fps > end_f + 0.01:  # past the last frame (stored points are 4 decimals: 1e-4 s slack)
-            last = math.floor(end_f + 1e-3) / fps
-            if (last - c.source_in) * fps < 1 - 1e-3:
-                raise RangeError(f"clip {c.id} has less than a frame of picture before the end of the video: {where}")
+        if frames(c.source_out) <= start_f + 0.5:
+            raise RangeError(f"clip {c.id} ends at {c.source_out:.3f} s, before the first frame of the video: {where}")
+        trimmed = False
+        if frames(c.source_in) < start_f - slack:
+            trimmed = True
+            first = math.ceil(start_f - 1e-3) / fps
+            log.warning("clip %s starts at %.3f s, before the first frame of the picture: rendered from %.3f s (%s)", c.id, c.source_in, first, where)
+            c.source_in = round(first, 6)
+        if extent.exact and frames(c.source_out) > end_f + slack:
+            trimmed = True
+            last = math.floor(end_f + slack) / fps
             log.warning("clip %s ends at %.3f s, past the end of the picture: rendered to %.3f s (%s)", c.id, c.source_out, last, where)
             c.source_out = round(last, 6)
+        if frames(c.source_out - c.source_in) < 1 - 1e-3:
+            raise RangeError(f"clip {c.id} has less than a frame of picture: {where}")
+        trs = [t.duration for t in (c.transition_in if k else None, out.clips[k + 1].transition_in if k + 1 < len(out.clips) else None)
+               if t is not None and not t.is_cut]
+        if trimmed and trs and frames(c.source_out - c.source_in) < frames(max(trs)) + 1 - 1e-3:
+            raise RangeError(f"clip {c.id} has {frames(c.source_out - c.source_in):.0f} frames of picture, too few for its "
+                             f"{frames(max(trs)):.0f}-frame transition: {where}")
     return out
-
-
-GRAPH_FILE_OPTIONS = ("-/filter_complex", "-filter_complex_script")  # ffmpeg 7.1+ (the only one in ffmpeg 9), then older versions
 
 
 _UNSUPPORTED = ("Unrecognized option", "Option not found", "unrecognized option")
@@ -288,11 +325,12 @@ def render(
     _ensure_open_files(len(tl.clips))
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
-    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration)
+    can_seek = seekable(media.path)  # decided once: the graph's trims and the inputs' seeks must agree
+    graph = build_filter_graph(tl, media, cfg, music=music, music_duration=music_duration, seek=can_seek)
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [ffmpeg, "-v", "error", "-nostdin", "-y" if overwrite else "-n"]
     threads = ["-threads", "1"] if len(tl.clips) > SINGLE_THREAD_DECODE_ABOVE else []
-    for ci in clip_inputs(tl, media.fps):
+    for ci in clip_inputs(tl, media.fps, can_seek):
         cmd += [*threads, "-ss", f"{ci.seek:.6f}", "-t", f"{ci.length:.6f}", "-i", media.path]
     if has_music:
         cmd += ["-i", str(music.path)]
