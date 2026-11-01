@@ -241,9 +241,9 @@ def test_otio_edited_like_an_editor_gives_exactly_the_expected_human_decisions(w
     # what the editor did not touch keeps matchcut's own values (no snapping noise in the junction history)
     for k in (0, 4):
         assert (human.clips[k].source_in, human.clips[k].source_out) == (final.clips[k].source_in, final.clips[k].source_out)
-    assert human.clips[2].transition_in.is_cut and final.clips[3].transition_in.duration == 0.75
-    # matchcut's 0.75 s (18.75 frames) went out as the 18 frames error diffusion gave it behind the first dissolve; the editor did not touch it,
-    # so the human stage keeps matchcut's own value and the junction shows no human line
+    assert human.clips[2].transition_in.is_cut and final.clips[3].transition_in.duration == 0.72
+    # the pipeline asked for 0.75 s (18.75 frames); the final cut stores the 18 whole frames error diffusion gives it behind the first
+    # dissolve (as the exporters lay it out). The editor did not touch it, so the human stage keeps matchcut's value: no human line
     assert human.clips[3].transition_in == final.clips[3].transition_in
     assert human.clips[1].source_in == pytest.approx(final.clips[1].source_in + 0.2, abs=1e-3)
     assert human.fade_in == final.fade_in and human.fade_out == final.fade_out

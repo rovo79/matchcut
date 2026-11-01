@@ -32,26 +32,17 @@ from . import InterchangeError
 
 SHA256 = re.compile(r"[0-9a-f]{64}")  # a stage fingerprint: the sha256 of a stage file, as the exports write it
 
-# the rates a probe that only reports a float (or an approximate rational) is snapped to
-COMMON_RATES: Tuple[Fraction, ...] = (
-    Fraction(24000, 1001), Fraction(24), Fraction(25), Fraction(30000, 1001), Fraction(30), Fraction(48000, 1001), Fraction(48),
-    Fraction(50), Fraction(60000, 1001), Fraction(60), Fraction(120000, 1001), Fraction(120),
-)
-_SNAP_TOLERANCE = 0.002  # relative, for a float rate: 23.976 and 29.97 are 0.0001 off their rationals
+from matchcut.pipeline.frames import COMMON_RATES, SNAP_TOLERANCE as _SNAP_TOLERANCE, nearest_common as _nearest_common, to_frames  # noqa: E402,F401
+from matchcut.pipeline.frames import snap_rate as _snap_rate  # noqa: E402
+
 _EXACT_TOLERANCE = 0.0005  # relative, for a probed rational such as 2997/100: closer than this to a common rate is that rate
-
-
-def _nearest_common(rate: float) -> Tuple[Fraction, float]:
-    best = min(COMMON_RATES, key=lambda r: abs(float(r) - rate))
-    return best, abs(float(best) - rate) / rate
 
 
 def snap_rate(rate: float) -> Fraction:
     """The common rate nearest to a float rate (24000/1001 for 23.976); an unusual rate becomes a small rational."""
     if rate <= 0:
         raise InterchangeError(f"invalid frame rate {rate}")
-    best, err = _nearest_common(rate)
-    return best if err <= _SNAP_TOLERANCE else Fraction(rate).limit_denominator(10000)
+    return _snap_rate(rate)
 
 
 def exact_rate(rate: Fraction) -> Fraction:
@@ -60,16 +51,6 @@ def exact_rate(rate: Fraction) -> Fraction:
         return rate
     best, err = _nearest_common(float(rate))
     return best if err <= _EXACT_TOLERANCE else rate
-
-
-def to_frames(t: float, rate: Fraction) -> int:
-    """Seconds -> whole frames at ``rate``, ties rounded away from zero.
-
-    A millionth of a frame of slack makes exact halves robust against the binary float ``t`` (1/48 s at 24 fps is 1 frame).
-    """
-    x = Fraction(float(t)) * Fraction(rate)
-    n = math.floor(abs(x) + Fraction(1, 2) + Fraction(1, 1000000))
-    return -n if x < 0 else n
 
 
 def rt(frames: int, rate: Fraction) -> str:

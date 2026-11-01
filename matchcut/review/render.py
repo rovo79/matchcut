@@ -41,6 +41,10 @@ def _has_drawtext(ffmpeg: str) -> bool:
 
 
 def _ffmpeg_error(e: Exception) -> ReviewError:
+    from ..pipeline.render import RangeError
+
+    if isinstance(e, RangeError):  # refused before ffmpeg started: say so as it is
+        return ReviewError(str(e))
     text = str(e)
     if "not found on PATH" in text:
         return ReviewError("ffmpeg not found on PATH")

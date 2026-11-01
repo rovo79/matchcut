@@ -36,7 +36,7 @@ from .context import Context
 from .events import Abort, CheckpointAnswer, CheckpointHandler, Continue, EventHandler, Redo, RunAborted
 from .features import Analysis, analyse_footage
 from .llm import make_backend
-from .media import MediaInfo, audio_energy, probe
+from .media import MediaInfo, audio_energy, probe, video_extent
 from .passes import PASSES, PassResult, run_passes
 from .render import render, snap_to_frames
 from .report import build_report
@@ -233,7 +233,13 @@ class Pipeline:
                 )
                 analysis = Analysis(series=series, cells=cells, audio_energy=energy, audio_hop_seconds=self.cfg.analysis.audio_hop_seconds)
                 analysis.save(analysis_path)
-                shots = detect_shots(series, self.cfg.shots, duration=media.duration)
+                # when the audio runs on more than a frame past the picture (phone footage often does), the last shot ends where the
+                # picture ends, not at the container's end; a tail within a frame (an AAC frame's padding) leaves the shots as they were
+                extent = video_extent(media.path)
+                last = media.duration
+                if extent is not None and extent.exact and media.fps > 0 and (media.duration - extent.end) * media.fps > 1.0:
+                    last = extent.end
+                shots = detect_shots(series, self.cfg.shots, duration=last)
                 save_shots(shots, shots_path)
                 log.info("ingest: %d shots detected", len(shots))
             frames = FrameCache(media.path, self.ws / "frames", self.cfg.sampling)
@@ -326,7 +332,12 @@ class Pipeline:
         if unknown:
             self._current_stage = f"pass:{unknown[0]}"
         final = run_passes(tl, ctx, names, save_dir=passes_dir, on_event=self._emit, after_pass=after_pass, cancel=self.cancel)
-        final = snap_to_frames(final, ctx.shot_bounds)
+        snapped = snap_to_frames(final, ctx.shot_bounds)
+        final = snapped.snap_transitions()  # whole frames, as exported and rendered
+        for d in snapped.transition_rounding_problems(final):  # rounding never changes the cut silently
+            log.warning("final: %s", d.detail)
+            final.history.append(d)
+            self._emit(events.Decision(pass_name=d.pass_name, action=d.action, clip_ids=list(d.clip_ids), detail=d.detail, score=d.score, data=dict(d.data)))
         final.name = "final cut"
         final.stage = "final"
         final.save(self.ws / "final.json")
