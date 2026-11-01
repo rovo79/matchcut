@@ -49,6 +49,19 @@ def streams(path: Path) -> Dict[str, dict]:
     return {s["codec_type"]: s for s in json.loads(out)["streams"]}
 
 
+def audio_timestamp_gap(path: Path) -> float:
+    """The largest stretch of time, in seconds, that the audio's packets claim beyond the samples they hold.  An AAC packet holds 1024
+    samples; one whose timestamps span more (loudnorm leaves one about 2.9 s before the end) makes a player play everything after it
+    late against the picture.  Decoding the samples straight through would not show it.  The last packet may be shorter."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate:packet=pts_time,duration_time",
+                          "-of", "json", str(path)], capture_output=True, text=True, check=True).stdout
+    doc = json.loads(out)
+    rate = float(doc["streams"][0]["sample_rate"])
+    packets = [p for p in doc.get("packets", []) if "pts_time" in p and "duration_time" in p]
+    gaps = [float(b["pts_time"]) - float(a["pts_time"]) - 1024 / rate for a, b in zip(packets, packets[1:])]
+    return max(gaps + [0.0])
+
+
 def frame_numbers(path: Path, width: int = 320, height: int = 180) -> List[int]:
     raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
     n = len(raw) // (width * height)
@@ -99,9 +112,17 @@ def expected_frames(tl, fps: float) -> Dict[int, int]:
     """{output frame: source frame} for every frame one clip shows alone, outside the cut's fades, counted in whole frames as the renderer
     lays the cut out (each clip its frames, each transition its frames), so 4-decimal seconds never add or lose a frame."""
     def frames(seconds: float) -> int:
-        return int(np.floor(seconds * fps + 0.5))
+        return int(np.floor(seconds * fps + 0.5 + 1e-6))  # as interchange.common.to_frames and the renderer round
     n = [frames(c.duration) for c in tl.clips]
-    tr = [0] + [0 if c.transition_in.is_cut else frames(c.transition_in.duration) for c in tl.clips[1:]]
+    tr = [0]  # transition frames by error diffusion over the running total, as the exporters' layout and the renderer place them
+    cum, done = 0.0, 0
+    for c in tl.clips[1:]:
+        f = 0
+        if not c.transition_in.is_cut:
+            cum += c.transition_in.duration
+            f = max(frames(cum) - done, 0)
+            done += f
+        tr.append(f)
     total = sum(n) - sum(tr)
     fade_in, fade_out = frames(tl.fade_in), frames(tl.fade_out)
     out: Dict[int, int] = {}
@@ -129,5 +150,6 @@ def tone_window(tl, i: int, w: float = 0.2) -> Optional[Tuple[float, int]]:
 
 
 def av_tolerance(fps: float) -> float:
-    """How far audio and video lengths may differ: two AAC frames of priming/padding plus one video frame."""
-    return 2 * 1024 / SR + 1 / fps
+    """How far audio and video lengths may differ: the renderer cuts the audio to the video's length, so only the container's rounding
+    is left (measured: under 1 ms); two milliseconds."""
+    return 0.002

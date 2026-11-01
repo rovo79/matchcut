@@ -75,6 +75,8 @@ def assert_av_lengths(path, fps):
     assert "audio" in st, "the render has no audio stream"
     a, v = float(st["audio"]["duration"]), float(st["video"]["duration"])
     assert abs(a - v) <= sig.av_tolerance(fps), (a, v)
+    gap = sig.audio_timestamp_gap(path)
+    assert gap < 0.001, f"the audio timestamps jump by {gap * 1000:.1f} ms: a player would play what follows late"
 
 
 def assert_source_tones(tl, y, present=True):
@@ -193,12 +195,15 @@ def test_ntsc_rate_transitions_are_frame_exact(ntsc, tmp_path):
 
 @pytest.mark.parametrize("transitions", [False, True], ids=["cuts", "transitions"])
 def test_30_fps_is_frame_exact(tmp_path, transitions):
-    """At 30 fps the old renderer showed hard cuts a frame late too (its in-points and fps filter were rounded to 4 decimals)."""
+    """At 30 fps the old renderer showed cuts a frame late too: its in-points and fps filter were rounded to 4 decimals.  Points on frames
+    2 mod 3 (41/30 s is stored 1.3667, after the frame's time) are the ones that rounding moved."""
     coded = sig.make_coded_footage(tmp_path / "f30.mp4", seconds=12, rate="30")
     media = probe(str(coded))
     f = lambda n: round(n / 30, 4)  # noqa: E731
+    assert f(41) * 30 > 41 and f(101) * 30 > 101
     trs = [Transition(), Transition("dissolve", f(12)), Transition("dip_to_black", f(9))] if transitions else None
-    for name, ranges in (("source order", [(f(40), f(100)), (f(160), f(220)), (f(250), f(310))]), ("reverse order", [(f(250), f(310)), (f(160), f(220)), (f(40), f(100))])):
+    fwd = [(f(41), f(101)), (f(161), f(221)), (f(251), f(311))]
+    for name, ranges in (("source order", fwd), ("reverse order", fwd[::-1])):
         tl = timeline(str(coded), media.fps, ranges, trs)
         out = do_render(tl, media, tmp_path / f"f30_{name}.mp4")
         assert_video_exact(tl, out, media.fps)
@@ -342,3 +347,60 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
     render(tl, media, RCFG, tmp_path / "long.mp4")
     assert "-filter_complex" not in seen["cmd"] and seen["graph"].endswith("[aout]")
     assert not list(tmp_path.glob(".graph-*"))
+
+
+@pytest.mark.parametrize("rate, dissolve", [("30", 0.75), ("30000/1001", 0.75), ("25", 0.3)])
+def test_many_fractional_dissolves_do_not_drift(tmp_path, rate, dissolve):
+    """Eight 0.75 s dissolves (22.5 / 22.48 frames each): the renderer rounds the running total, as the exporters' layout does, so every clip
+    starts within half a frame of Timeline.record_start and the cut is round(duration) frames long (rounding each on its own drifted by
+    up to 8 frames after 15 dissolves)."""
+    coded = sig.make_coded_footage(tmp_path / "frac.mp4", seconds=50, rate=rate)  # every clip inside the file (1170 frames at 25 fps)
+    media = probe(str(coded))
+    fps = media.fps
+    f = lambda n: round(n / fps, 4)  # noqa: E731
+    tl = timeline(str(coded), fps, [(f(k * 130), f(k * 130 + 90)) for k in range(9)], [Transition()] + [Transition("dissolve", dissolve)] * 8)  # 0.3 s at 25 fps: 7.5-frame ties
+    from fractions import Fraction
+
+    from matchcut.interchange.common import layout, record_frames
+
+    rows = layout(tl, Fraction(rate))
+    assert all(abs(r.rec - tl.record_start(i) * fps) <= 0.5 + 1e-6 for i, r in enumerate(rows))  # the exporters stay on record_start
+    out = do_render(tl, media, tmp_path / "frac_out.mp4")
+    got = sig.frame_numbers(out)
+    assert len(got) == record_frames(rows) == round(tl.duration * fps)
+    for i, r in enumerate(rows):  # each clip alone (between its transitions) shows the frames the exported layout puts there
+        lo, hi = r.rec + r.tr, (rows[i + 1].rec if i + 1 < len(rows) else record_frames(rows))
+        wrong = [(k, got[k], r.in_f + (k - r.rec)) for k in range(lo, hi) if got[k] != r.in_f + (k - r.rec)]
+        assert not wrong, (i, wrong[:3])
+    assert_video_exact(tl, out, fps)
+    assert_av_lengths(out, fps)
+
+
+def test_the_graph_file_is_removed_when_ffmpeg_fails(monkeypatch, coded, tmp_path):
+    def failing_run(cmd, capture=True):
+        raise render_mod.MediaError("ffmpeg failed")
+    monkeypatch.setattr(render_mod, "run", failing_run)
+    monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)
+    media = probe(str(coded))
+    with pytest.raises(render_mod.MediaError):
+        render(timeline(str(coded), media.fps, [(1.0, 2.0), (3.0, 4.0)]), media, RCFG, tmp_path / "fail.mp4")
+    assert not list(tmp_path.glob(".graph-*"))
+
+
+def test_music_under_loudnorm_keeps_its_timing_to_the_end(coded, ticks, tmp_path):
+    """loudnorm leaves a 20-100 ms timestamp jump about 2.9 s before the end; trimming to the video's length by timestamp then cut real
+    audio and played the last seconds late.  Every tick (every 0.5 s of the cut, music.start 0) is where it should be, to the end."""
+    import numpy as np
+
+    media = probe(str(coded))
+    tl = timeline(str(coded), media.fps, [(1.0, 4.68), (6.0, 9.68), (12.0, 15.68)])  # 11.04 s
+    out = do_render(tl, media, tmp_path / "ln.mp4", MusicConfig(path=str(ticks), only=True, gain_db=-6.0, fade_out=0.1))
+    assert_av_lengths(out, media.fps)
+    y = sig.audio(out)
+    hop = 48  # 1 ms
+    env = np.array([sig.band_rms(y, k * hop / sig.SR, 0.004, sig.TICK_HZ - 300, sig.TICK_HZ + 300) for k in range(len(y) // hop - 4)])
+    on = env > 0.25 * env.max()
+    onsets = [k * hop / sig.SR for k in range(len(on)) if on[k] and (k == 0 or not on[k - 1])]
+    want = [k * 0.5 for k in range(int(tl.duration / 0.5) + 1) if k * 0.5 < tl.duration - 0.06]
+    assert len(onsets) == len(want), (onsets, want)
+    assert max(abs(a - b) for a, b in zip(onsets, want)) < 0.006, list(zip(onsets, want))
