@@ -6,8 +6,6 @@ serves the same table unchanged (``name``, ``description`` and ``schema`` are wh
 Schema the table uses, so no dependency is needed) and runs the handler.  A schema failure raises ``ArgumentError`` (the CLI's usage
 error, exit code 2); a refusal raises ``Refused`` (a ``session.SessionError`` / ``ProposalRefused`` or an operation's ``Refused``; exit code
 1).  Handlers return plain JSON objects.
-
-``publish`` (the ``edit`` stage, M3a task 4) is not in the table yet: ``PUBLISH_HOOK`` marks where it goes.
 """
 from __future__ import annotations
 
@@ -18,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from . import publish as P
 from . import session as S
 from . import view as V
 from .ops import ARGS, MAX_FRAMES, MAX_SHOT, OPS
@@ -211,8 +210,9 @@ def _pin(ws: Path, a: Dict[str, Any]) -> Dict[str, Any]:
 
 
 TOOLS: List[Tool] = [
-    Tool("start", "Start an edit session on a stage (default: the latest fresh stage); r000 is that stage on whole frames. A stale session "
-                  "is moved aside; a fresh one only with restart.",
+    Tool("start", "Start an edit session on a stage (default: the latest fresh stage but edit, which is never a base); r000 is that stage on "
+                  "whole frames. Only a session on the latest canonical stage (final) can publish. A stale session is moved aside; a fresh "
+                  "one only with restart.",
          _obj({"stage": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,40}$", "description": "a stage name (roughcut, final, human ...)"},
                "restart": {"type": "boolean"}}),
          _start),
@@ -261,7 +261,11 @@ TOOLS: List[Tool] = [
                "hold": {"type": "boolean"}, "kind": KIND, "frames": _int("the transition's length in whole frames", 0, MAX_FRAMES)},
               ["hold"]),
          _pin),
-    # PUBLISH_HOOK (M3a task 4): Tool("publish", ..., _obj({"replace": {"type": "boolean"}}), lambda ws, a: publish.publish(ws, ...))
+    Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage: WS/edit.json, its record edit_publish.json and a "
+                    "copy in edits/published/. Needs a fresh session on the latest canonical stage. The same session's next publish "
+                    "replaces edit.json; another session's is refused unless replace (it is moved to edits/replaced/ first).",
+         _obj({"revision": REVISION, "replace": {"type": "boolean"}}),
+         lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)))),
 ]
 
 BY_NAME: Dict[str, Tool] = {t.name: t for t in TOOLS}

@@ -709,3 +709,56 @@ def test_the_identity_of_the_selection_ignores_a_stage_file_rewritten_since_the_
             assert ident.pair == (j.out_shot, j.in_shot)
 
     run_async(body())
+
+
+def test_a_published_edit_stage_is_listed_after_final_and_a_stale_one_is_left_out_with_why(mock_workspace, tmp_path):
+    """M3a: an agent's published edit session is the stage after final; once stale it is left out (never deleted) and the header says why."""
+    from matchcut.edit import publish, session
+    from matchcut.pipeline.junctions import stale_edit
+
+    ws = own_copy(mock_workspace, tmp_path)
+    session.start(ws)
+    longest = max(Timeline.load(ws / "final.json").clips, key=lambda c: c.duration).id
+    for ops in ([{"op": "trim", "clip": longest, "edge": "out", "frames": -1}], [{"op": "trim", "clip": longest, "edge": "in", "frames": 1}],
+                [{"op": "slip", "clip": longest, "frames": -1}], [{"op": "slip", "clip": longest, "frames": 1}]):
+        try:
+            p = session.propose(ws, ops)
+            break
+        except session.Refused:
+            continue
+    session.apply(ws, p["proposal"])
+    publish.publish(ws)
+    assert [s for s, _ in load_stage_timelines(ws)][-2:] == ["final", "edit"]
+
+    async def listed():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-2:] == ["final", "edit"] and view.current_stage() == "edit"
+            assert "stage edit" in str(app.query_one("#edit-header").content)
+
+    run_async(listed())
+    (ws / "edit_publish.json").write_text("{}")
+    message = stale_edit(ws)
+    assert message and message.startswith("edit.json is stale: ") and (ws / "edit.json").exists()
+
+    async def left_out():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert "edit" not in view.stages and view.current_stage() == "final"
+            assert message in str(app.query_one("#edit-header").content)
+
+    run_async(left_out())
+
+
+def test_the_tui_watches_the_edit_stage_files_even_while_it_is_not_listed(mock_workspace):
+    from matchcut.tui.state import RunState
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    cfg.workspace = str(mock_workspace)
+    files = RunState(cfg).timeline_files()
+    assert mock_workspace / "edit.json" in files and mock_workspace / "edit_publish.json" in files

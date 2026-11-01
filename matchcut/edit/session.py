@@ -11,14 +11,17 @@ Layout:
   the head revision id, the head timeline, the operations and guards, the reserved clip ids and the context's fingerprint
   (``proposal_id``), so proposing the same thing again gives the same id and one id never names two results.  A proposal file is never
   overwritten with other content;
-- ``renders/`` and ``published/`` (made by ``view`` and ``publish`` when they need them);
+- ``renders/`` (made by ``view``), and the edit stage's archive ``published/`` (an immutable copy of every published revision) and
+  ``replaced/`` (an edit stage another session's publish moved aside), made by ``publish``.  The archive stays in ``WS/edits/`` when a
+  session is moved aside (``KEPT``): ``edit_publish.json`` names files in it;
 - ``.lock``: every command that writes holds an exclusive ``fcntl.flock`` on it; the read-only ones a shared one.
 
 Everything is written atomically (a temporary file, then ``os.replace``) as deterministic JSON (sorted keys).  Timestamps live only in
 ``created``/``updated`` fields, which no hash covers, so the same commands on the same workspace give byte-identical revision timelines and
 the same proposal and revision ids.
 
-A session is stale when its base stage file has changed (or that stage is no longer listed, e.g. a ``human.json`` gone stale): every
+A session's base is a canonical stage or ``human``, never ``edit`` (what a session publishes).  A session is stale when its base stage
+file has changed (or that stage is no longer listed, e.g. a ``human.json`` gone stale): every
 command that changes it refuses, the read-only ones say ``stale: true``, and ``start`` moves it aside to ``WS/edits.stale-<sha12>/``.
 The same holds when the source footage's frame rate is no longer the session's.  ``start`` with ``restart`` moves a fresh session to
 ``WS/edits.replaced-<sha12>/``.  Nothing in the store is ever deleted, and a revision that no longer matches its hashes
@@ -48,7 +51,7 @@ from matchcut.pipeline.editorial import PinStore
 from matchcut.pipeline.junctions import stage_timeline_paths
 from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.shots import load_shots
-from matchcut.pipeline.timeline import Decision, Timeline, Transition, clip_origin
+from matchcut.pipeline.timeline import AGENT_PASS, EDIT_STAGE, Decision, Timeline, Transition, clip_origin
 
 from . import rules
 from .model import EditContext, Refused, context_from, frame_rows
@@ -57,8 +60,8 @@ from .ops import apply_ops, held_pins, pin_label
 SESSION_SCHEMA = "matchcut.edit_session/1"
 REVISION_SCHEMA = "matchcut.edit_revision/1"
 PROPOSAL_SCHEMA = "matchcut.edit_proposal/1"
-EDIT_STAGE = "edit"  # the stage a revision's timeline carries (published as WS/edit.json)
-AGENT = "agent"  # the pass name of the decisions a proposal appends to the history
+AGENT = AGENT_PASS  # the pass name of the decisions a proposal appends to the history; a revision's timeline carries stage EDIT_STAGE
+KEPT = (".lock", "published", "replaced")  # what stays in WS/edits/ when a session is moved aside: the lock and the edit stage's archive
 
 _REVISION_ID = re.compile(r"r[0-9]{3,}")
 _PROPOSAL_ID = re.compile(r"[0-9a-f]{12}")
@@ -156,10 +159,15 @@ def _now() -> str:
 
 def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to a temporary file next to ``path``, flush it to disk, then ``os.replace`` it into place."""
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """``_atomic_write`` for bytes."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            fh.write(text)
+        with open(tmp, "wb") as fh:
+            fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
@@ -256,11 +264,16 @@ def workspace_context(ws: Path) -> EditContext:
 
 
 def _stage_paths(ws: Path) -> Dict[str, Path]:
-    """Every stage that can be a session's base, present now, in stage order (``stage_timeline_paths``: a stale stage is left out)."""
-    return {stage: path for stage, path in stage_timeline_paths(ws) if path.exists()}
+    """Every stage that can be a session's base, present now, in stage order (``stage_timeline_paths``: a stale stage is left out): a
+    canonical stage or ``human``, never ``edit``.  The edit stage is what a session publishes, and publishing replaces ``edit.json``: a
+    session started on it would be stale the moment it published."""
+    return {stage: path for stage, path in stage_timeline_paths(ws) if path.exists() and stage != EDIT_STAGE}
 
 
 def _base_stage(ws: Path, stage: Optional[str]) -> Tuple[str, Path]:
+    if stage == EDIT_STAGE:
+        raise SessionError("the edit stage cannot be a session's base: it is what a session publishes (publishing replaces edit.json); "
+                           "start on a canonical stage (final) or on human")
     paths = _stage_paths(ws)
     if not paths:
         raise SessionError(f"no stage timeline in {ws}: run the pipeline first")
@@ -540,14 +553,15 @@ def _fresh(ws: Path, ctx: Optional[EditContext]) -> Session:
 
 
 def _move_aside(ws: Path, d: Path, tag: str, kind: str = "stale") -> Path:
-    """Move everything in ``WS/edits/`` but the lock into a new ``WS/edits.<kind>-<tag>[-n]/`` (never over an existing one)."""
+    """Move everything in ``WS/edits/`` into a new ``WS/edits.<kind>-<tag>[-n]/`` (never over an existing one), but the lock and the edit
+    stage's archive (``published/``, ``replaced/``: ``edit_publish.json`` names files there, whichever session published them)."""
     base = Path(ws) / f"edits.{kind}-{tag}"
     target, n = base, 2
     while target.exists():
         target, n = base.with_name(f"{base.name}-{n}"), n + 1
     target.mkdir()
     for entry in sorted(d.iterdir()):
-        if entry.name != ".lock":
+        if entry.name not in KEPT:
             os.rename(entry, target / entry.name)
     _fsync_dir(d)
     _fsync_dir(Path(ws))
@@ -575,7 +589,7 @@ def _read_base(path: Path, ctx: EditContext) -> Tuple[str, Timeline, List[str]]:
 
 # ----------------------------------------------------------------------------------------------- commands
 def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
-    """Start a session on ``stage`` (default: the latest fresh stage) and return its summary.
+    """Start a session on ``stage`` (default: the latest fresh stage but ``edit``, which is never a base) and return its summary.
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -603,7 +617,7 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
                     raise SessionError(f"a session is open on {old['base_stage']} (head {old['head']}): pass restart to move it aside "
                                        "and start again")
                 moved = _move_aside(ws, d, old["base_sha256"][:12], "stale" if why is not None else "replaced")
-        elif any(e.name != ".lock" for e in d.iterdir()):
+        elif any(e.name not in KEPT for e in d.iterdir()):
             moved = _move_aside(ws, d, "incomplete")  # what a start that never finished left behind
         sha, r000, notes = _read_base(path, ctx)  # read again under the lock: the hash recorded is of the bytes r000 was made from
         (d / "revisions").mkdir(exist_ok=True)

@@ -19,11 +19,17 @@ from .config import PipelineConfig
 from .features import Analysis
 from .matching import MatchScore, MatchScorer
 from .editorial import Pin, pin_change, pin_site, pin_states
-from .timeline import HUMAN_STAGE, Clip, Decision, Timeline, clip_origin
+from .timeline import AGENT_PASS, EDIT_STAGE, HUMAN_STAGE, Clip, Decision, Timeline, clip_origin
 
 # decisions about a beat or the whole cut, never about one junction, whatever clip ids they list
 WHOLE_SCOPE_ACTIONS: Tuple[str, ...] = ("fit", "assessment", "reorder", "fades", "notes")
 STALE_HINT = "(re-export, or re-import the editor's file: matchcut diffs it against the stage it was exported from)"
+EDIT_STALE_HINT = "(start an edit session on the current stage and publish again: matchcut never rewrites or deletes edit.json)"
+EDIT_FILE = "edit.json"  # the edit stage: an agent's published edit session (matchcut.edit writes it; the engine only reads it)
+EDIT_RECORD = "edit_publish.json"  # its provenance record
+EDIT_PUBLISH_SCHEMA = "matchcut.edit_publish/1"
+# the stages a decision of which pass names single clips of a junction the stage itself joined (an editor's or an agent's own trim)
+_OWN_STAGE_PASSES: Tuple[str, ...] = (HUMAN_STAGE, AGENT_PASS)
 SCORE_ROWS: Tuple[str, ...] = ("structure", "composition", "luminance", "color", "frame", "motion", "combined")
 
 
@@ -41,38 +47,108 @@ def _sha256(path: Optional[Path]) -> Optional[str]:
         return None
 
 
+def latest_canonical(ws: Path) -> Optional[Tuple[str, Path]]:
+    """(stage, path) of the latest canonical stage present (``final`` once the pipeline has finished), or None."""
+    present = [(s, p) for s, p in _canonical_paths(Path(ws)) if p.exists()]
+    return present[-1] if present else None
+
+
+def _record(path: Path) -> Dict:
+    doc = json.loads(Path(path).read_text())
+    if not isinstance(doc, dict):
+        raise ValueError("not an object")
+    return doc
+
+
+def stale_edit(ws: Path) -> Optional[str]:
+    """The one-line reason ``edit.json`` (the edit stage: an agent's published edit session) no longer fits the workspace, or None.
+
+    ``matchcut.edit`` records, in ``edit_publish.json``, the sha256 of ``edit.json`` itself, of the stage the session started from and of
+    the latest canonical stage, whose history the edit stage continues.  The edit stage is stale when the record is missing, unreadable or
+    describes another ``edit.json``, when either stage file has changed since (or is gone), or when another stage is the latest canonical
+    one now.  No edit.json: None.  The engine only reads these files.
+    """
+    ws = Path(ws)
+    path = ws / EDIT_FILE
+    if not path.exists():
+        return None
+    try:
+        record = _record(ws / EDIT_RECORD)
+        if record.get("schema") != EDIT_PUBLISH_SCHEMA:
+            raise ValueError("schema")
+        edit_sha = record["edit_sha256"]
+        latest_name = str(record["latest_stage"])
+        checks = [(str(record["base_stage"]), record["base_sha256"]), (latest_name, record["latest_stage_sha256"])]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return f"edit.json is stale: {EDIT_RECORD} is missing or unreadable {EDIT_STALE_HINT}"
+    if _sha256(path) != edit_sha:
+        return f"edit.json is stale: it is not the file {EDIT_RECORD} describes (changed since it was published) {EDIT_STALE_HINT}"
+    paths = dict(_canonical_paths(ws))
+    for stage, want in checks:
+        p = paths.get(stage)
+        if p is None or _sha256(p) != want:
+            return f"edit.json is stale: {p.name if p is not None else stage + '.json'} changed since it was published {EDIT_STALE_HINT}"
+    latest = latest_canonical(ws)
+    if latest is None or latest[0] != latest_name:
+        return f"edit.json is stale: {latest_name} is no longer the latest canonical stage {EDIT_STALE_HINT}"
+    return None
+
+
+def edit_listed(ws: Path) -> bool:
+    """True when the edit stage is in the stage order now: ``edit.json`` exists and is fresh (``stale_edit``)."""
+    return (Path(ws) / EDIT_FILE).exists() and stale_edit(ws) is None
+
+
 def stale_human(ws: Path) -> Optional[str]:
     """The one-line reason ``human.json`` (the stage an editor's re-export was imported as) no longer fits the workspace, or None.
 
-    ``matchcut.interchange`` records, in ``human_import.json``, the sha256 of the canonical stage it compared with and of the latest
-    canonical stage whose history it continues; the human stage is stale when either file has changed since (or is gone).  A
-    ``human.json`` without a readable record is stale too.  No human.json: None.  The engine only reads these files.
+    ``matchcut.interchange`` records, in ``human_import.json``, the sha256 of the stage it compared with (a canonical stage, or ``edit``),
+    of the latest canonical stage, and (``history_stage``) of the stage whose history the human history continues when that is ``edit``;
+    the human stage is stale when any of these files has changed since (or is gone).  A ``human.json`` without a readable record is stale
+    too.  Because the human stage is listed right after the stage whose history it continues, it is also stale when it was compared with
+    or continues an edit stage that is stale itself, and when an edit stage was published after the import (the human history does not
+    continue it).  No human.json: None.  The engine only reads these files.
     """
     ws = Path(ws)
     if not (ws / "human.json").exists():
         return None
     try:
-        record = json.loads((ws / "human_import.json").read_text())
+        record = _record(ws / "human_import.json")
         checks = [(str(record["stage"]), record["stage_sha256"])]
         if "latest_stage" in record:
             checks.append((str(record["latest_stage"]), record["latest_stage_sha256"]))
+        if "history_stage" in record:
+            checks.append((str(record["history_stage"]), record["history_stage_sha256"]))
+        history = str(record.get("history_stage") or record.get("latest_stage") or "")
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return f"human.json is stale: human_import.json is missing or unreadable {STALE_HINT}"
     paths = dict(_canonical_paths(ws))
+    paths[EDIT_STAGE] = ws / EDIT_FILE
     for stage, want in checks:
         path = paths.get(stage)
         if path is None or _sha256(path) != want:
             return f"human.json is stale: {path.name if path is not None else stage + '.json'} changed since the import {STALE_HINT}"
+    listed = edit_listed(ws)
+    if EDIT_STAGE in [s for s, _ in checks] and not listed:
+        return f"human.json is stale: it was imported against the edit stage, and {stale_edit(ws) or 'edit.json is gone'} {STALE_HINT}"
+    if listed and history != EDIT_STAGE:
+        return f"human.json is stale: edit.json was published after the import, and the human history does not continue it {STALE_HINT}"
     return None
 
 
 def stage_timeline_paths(ws: Path) -> List[Tuple[str, Path]]:
-    """(stage, path) for every place a stage timeline can live, in stage order, present or not.
+    """(stage, path) for every place a stage timeline can live, in stage order, present or not (``edit``: only when present).
 
-    ``human`` is last: the cut an editor's re-export came back as (``matchcut.interchange`` writes ``human.json``; the engine never does).
-    A stale ``human.json`` (``stale_human``) is left out, so it is never the latest stage; it is not deleted.
+    The canonical stages (``roughcut``, the passes, ``final``), then ``edit`` when ``edit.json`` is there and fresh (an agent's published
+    edit session: ``matchcut.edit`` writes it), then ``human`` (the cut an editor's re-export came back as: ``matchcut.interchange`` writes
+    ``human.json``); the engine never writes either.  A stale ``edit.json`` (``stale_edit``) or ``human.json`` (``stale_human``) is left
+    out, so it is never the latest stage; it is not deleted.  (``EDIT_FILE`` and ``EDIT_RECORD`` are what a watcher of the edit stage
+    fingerprints.)
     """
+    ws = Path(ws)
     entries = _canonical_paths(ws)
+    if edit_listed(ws):
+        entries.append((EDIT_STAGE, ws / EDIT_FILE))
     if stale_human(ws) is None:
         entries.append((HUMAN_STAGE, ws / "human.json"))
     return entries
@@ -335,7 +411,7 @@ def _adjacency_detail(considered: Sequence[Tuple[str, Timeline]], k: int, a_ref:
     if pa is not None and pb is not None and pa < pb:
         named |= {c.id for c in prev.clips[pa + 1 : pb]}
     new = timeline.history[len(prev.history):]
-    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved", "removed", "added") and named & set(d.clip_ids)), None)
+    d = next((d for d in new if d.action in ("drop", "insert", "pin_moved", "removed", "added", "moved") and named & set(d.clip_ids)), None)
     if d is None:
         # the editor's reorder names every clip, so it only says why when nothing more specific does
         if any(r.pass_name == HUMAN_STAGE and r.action == "reorder" for r in new):
@@ -371,7 +447,8 @@ def _attribute(
     stage's ids. In the first stage there is no previous one and its own ids apply.
     ``prev_pair_only``: the previous ids are those of clips that were not adjacent there, so only a decision naming
     both of them (a pin's move) counts; one naming a single clip (a pass's trim) says nothing about this junction.  The
-    human stage's own trim of one of the two clips does count: it is what the editor did to this very cut.
+    human stage's own trim of one of the two clips does count: it is what the editor did to this very cut; so does the edit stage's (an
+    ``agent`` decision of the session whose move, removal or insertion joined the two clips).
     """
     found: List[Tuple[Decision, bool]] = []
     for d in new:
@@ -387,8 +464,8 @@ def _attribute(
             if all(i in ids for i in pair):
                 found.append((d, False))
                 break
-            # (the editor's own trim of a clip is the editor's word about this junction even when a removal is what joined the clips)
-            if len(ids) == 1 and ids[0] in pair and not (prev_pair_only and pair is prev_ids and d.pass_name != HUMAN_STAGE):
+            # (the editor's or the agent's own trim of a clip is its word about this junction even when a removal is what joined the clips)
+            if len(ids) == 1 and ids[0] in pair and not (prev_pair_only and pair is prev_ids and d.pass_name not in _OWN_STAGE_PASSES):
                 found.append((d, True))
                 break
     return found
@@ -407,15 +484,16 @@ def build_junctions(stages: Sequence[Tuple[str, Timeline]], scorer: Optional[Mat
     end = names.index(upto) if upto in names else len(stages) - 1
     considered = list(stages[: end + 1])
     ref = considered[-1][1]
-    # The human stage (an editor's re-export) can hold clips that are not instances of any canonical clip (added, replaced, copied).  Lineage
-    # (same shot, overlapping source range) would give such a clip the history and the pass verdicts of the clip it overlaps, so a junction of
-    # the human stage follows the earlier stages only when both its clips are instances the canonical stages have (``clip_origin``).
-    known = {clip_origin(c) for _, t in considered[:-1] for c in t.clips} if considered[-1][0] == HUMAN_STAGE else None
+    # The human stage (an editor's re-export) and the edit stage (an agent's session) can hold clips that are not instances of any earlier
+    # clip (added, inserted, replaced, copied).  Lineage (same shot, overlapping source range) would give such a clip the history and the
+    # pass verdicts of the clip it overlaps, so a junction of either stage follows the earlier stages only when both its clips are instances
+    # the earlier stages have (``clip_origin``).  Pins the cut no longer holds are the human stage's alone: the edit stage cannot release one.
+    known = {clip_origin(c) for _, t in considered[:-1] for c in t.clips} if considered[-1][0] in (HUMAN_STAGE, EDIT_STAGE) else None
     # instances a pipeline merge absorbed: in neither the human cut nor the latest canonical stage (an instance the editor deleted is in the latter)
     present = {clip_origin(c) for c in ref.clips} | ({clip_origin(c) for c in considered[-2][1].clips} if known is not None and len(considered) > 1 else set())
     lost: Dict[int, Tuple[str, Tuple[int, int]]] = {}  # human stage: junction index -> (why a stored pin that sits there no longer holds, its key)
     undone: Set[int] = set()  # human stage: junctions where a pin the history holds is no longer held by the editor's cut
-    if known is not None:
+    if considered[-1][0] == HUMAN_STAGE:
         # The pins shown are the stored ones (``pins``: the answer ``pin_states`` gives the footer and the header); a caller with no store reads the
         # pins the history applied.  The history's pins also decide that a junction is no longer "pinned" whatever the store says now.
         pinned_last: Dict[Tuple[int, int], Decision] = {}

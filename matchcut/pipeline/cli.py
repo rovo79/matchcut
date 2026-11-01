@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from .config import DEFAULT_PASSES, PipelineConfig
 from .editorial import PinStore, pin_states
-from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_human
+from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_edit, stale_human
 from .pipeline import Pipeline
 from .timeline import HUMAN_STAGE, Timeline
 
@@ -87,7 +87,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     sp.add_argument("--index", type=int, default=None, help="1-based junction number to explain")
     sp = sub.add_parser("export", help="write stages as OpenTimelineIO, FCPXML and EDL files for an editor, with a fidelity report")
     sp.add_argument("workspace")
-    sp.add_argument("--stage", action="append", default=None, dest="stages", metavar="S", help="stage to export, repeatable (default: roughcut and final)")
+    sp.add_argument("--stage", action="append", default=None, dest="stages", metavar="S", help="stage to export, repeatable (default: roughcut and final; edit, an agent's published edit, when named)")
     sp.add_argument("--format", action="append", default=None, dest="formats", help="otio, fcpxml or edl, repeatable (default: all)")
     sp.add_argument("--out", default=None, help="output directory (default: WORKSPACE/exports)")
     sp.add_argument("--resolve-script", action="store_true", help="also write open_in_resolve.py, a script for DaVinci Resolve Studio that imports the final OTIO and marks the junctions (never run by matchcut)")
@@ -95,7 +95,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     sp.add_argument("workspace")
     sp.add_argument("file", help="the .otio, .fcpxml (or .fcpxmld bundle) or .edl file the editor saved")
     sp.add_argument("--format", default=None, help="otio, fcpxml or edl (default: from the extension)")
-    sp.add_argument("--stage", default=None, help="the stage the file was exported from (default: what the file says, else final)")
+    sp.add_argument("--stage", default=None, help="the stage the file was exported from (default: what the file says, else final); edit for an agent's published edit")
+    sp.add_argument("--base", default=None, metavar="SNAPSHOT", help="the exact version of --stage the file was exported from: a snapshot in "
+                    "exports/.stages (path or name) or a stage file; needed when the workspace has an edit stage and the file carries no "
+                    "fingerprint, or one that names another stage")
     return parser.parse_args(argv)
 
 
@@ -134,7 +137,7 @@ def _interchange(args: argparse.Namespace) -> int:
             for n in res.notes:
                 print(f"note: {n}")
         else:
-            imp = workspace.import_timeline(ws, cfg, Path(args.file), args.format, args.stage)
+            imp = workspace.import_timeline(ws, cfg, Path(args.file), args.format, args.stage, args.base)
             print(f"imported {Path(args.file).name} ({imp.fmt}) against {imp.stage}: {len(imp.decisions)} human decision"
                   f"{'s' if len(imp.decisions) != 1 else ''} -> {imp.stage_path}")
             for d in imp.decisions:
@@ -172,14 +175,14 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
         print(f"no timelines in {ws}: run the pipeline first", file=sys.stderr)
         return 1
     junctions = build_junctions(stages, scorer_for_workspace(ws, cfg), pins=PinStore(ws).load())
-    stale = stale_human(ws)  # a stale human.json is left out of the stages above; say so
+    stale = "\n".join(f"note: {r}" for r in (stale_edit(ws), stale_human(ws)) if r)  # a stale edit.json / human.json is left out of the stages above; say so
     footer = _pin_footer(ws, stages)
     if index is None:
         print(f"{len(junctions)} junctions in {stages[-1][0]} ({len(stages)} stages)")
         for j in junctions:
             print(junction_line(j))
         if stale:
-            print(f"note: {stale}")
+            print(stale)
         for line in footer:
             print(line)
         return 0
@@ -188,7 +191,7 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
         return 1
     print(junction_detail(junctions[index - 1]))
     if stale:
-        print(f"note: {stale}")
+        print(stale)
     for line in footer:
         print(line)
     return 0

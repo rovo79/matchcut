@@ -12,12 +12,12 @@ from matchcut.edit.model import Refused
 from matchcut.edit.ops import ARGS, whole
 
 COMMANDS = {"start", "inspect", "log", "propose", "apply", "undo", "redo", "checkout", "compare", "preview", "render", "frames",
-            "pin_transition"}
+            "pin_transition", "publish"}
 
 
 def test_the_table_covers_every_command_once():
     assert [t.name for t in T.TOOLS] == list(T.BY_NAME) and set(T.BY_NAME) == COMMANDS
-    assert "publish" not in T.BY_NAME  # M3a task 4 (PUBLISH_HOOK)
+    assert T.BY_NAME["publish"].schema["properties"].keys() == {"revision", "replace"}  # M3a task 4
     for t in T.TOOLS:
         assert t.description and len(t.description) < 400 and callable(t.handler)
         assert t.schema["type"] == "object" and t.schema["additionalProperties"] is False
@@ -85,8 +85,7 @@ def test_call_checks_the_schema_before_the_handler(make_ws):
     assert T.call(w, "inspect", {"revision": "r000"})["session"]["revision"] == "r000"
     with pytest.raises(Refused, match="no revision r005"):
         T.call(w, "checkout", {"revision": "r005"})
-    with pytest.raises(KeyError):
-        T.call(w, "publish")
+    assert T.call(w, "publish")["revision"] == "r001"
 
 
 def test_whole_reports_a_huge_count_without_overflowing():
@@ -108,11 +107,14 @@ def test_the_engine_and_the_review_never_import_the_edit_package():
     import sys
     from pathlib import Path
     repo = Path(__file__).resolve().parents[2]
-    code = ("import sys, matchcut.pipeline.pipeline, matchcut.pipeline.render, matchcut.review.items, matchcut.review.render; "
+    code = ("import sys, matchcut.pipeline.pipeline, matchcut.pipeline.render, matchcut.pipeline.junctions, matchcut.pipeline.cli, "
+            "matchcut.review.items, matchcut.review.render, matchcut.interchange.workspace, matchcut.tui.state, matchcut.tui.views.edit; "
             "print(sorted(m for m in sys.modules if m.startswith('matchcut.edit')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, cwd=str(repo), check=True).stdout.strip()
     assert out == "[]"
-    for path in list((repo / "matchcut" / "pipeline").rglob("*.py")) + list((repo / "matchcut" / "review").rglob("*.py")):
+    # (the edit stage's constants live in the engine, matchcut.edit imports them: EDIT_STAGE, AGENT_PASS, EDIT_FILE, EDIT_PUBLISH_SCHEMA)
+    engine = [repo / "matchcut" / d for d in ("pipeline", "review", "interchange", "tui")]
+    for path in [p for d in engine for p in d.rglob("*.py")]:
         text = path.read_text()
         assert "matchcut.edit import" not in text and "import matchcut.edit" not in text and "from ..edit" not in text, path
 

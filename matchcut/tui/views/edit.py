@@ -12,7 +12,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states
-from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_human
+from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_edit, stale_human
 from matchcut.pipeline.sampling import FrameCache
 from matchcut.pipeline.timeline import HUMAN_STAGE, clip_origin
 from matchcut.review import controller, items
@@ -145,7 +145,8 @@ class EditView(Vertical):
             summary += f" · {len(unplaced)} pin(s) not placed"
         for line in self._changed_pins(state, pins):
             summary += f" · {line}"
-        stale = stale_human(state.workspace)  # an imported editor cut that no longer fits is left out of the stages: say why
+        # an agent's published edit or an imported editor cut that no longer fits is left out of the stages: say why
+        stale = "\n".join(r for r in (stale_edit(state.workspace), stale_human(state.workspace)) if r)
         header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
         self._show_junction()

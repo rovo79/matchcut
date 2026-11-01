@@ -12,6 +12,8 @@ from .frames import snap_rate, to_frames
 
 TRANSITION_KINDS = ("cut", "dissolve", "dip_to_black")
 HUMAN_STAGE = "human"  # the stage an editor's re-export is imported as (matchcut.interchange writes it; the engine only reads it)
+EDIT_STAGE = "edit"  # the stage an agent's published edit session is (matchcut.edit writes it; the engine only reads it)
+AGENT_PASS = "agent"  # the pass name of the decisions an edit session appends, one per change
 
 
 @dataclass

@@ -13,6 +13,13 @@ The human stage continues the history of the LATEST canonical stage, which is th
 stage's new decisions as ``history[len(previous stage's history):]``, so editor pins and the attribution of every earlier decision stay
 valid, and the pin badge of an untouched junction does not change.  For the usual import (against ``final``) that is exactly the history of
 the stage that was imported against.
+
+The **edit stage** (``edit.json``, an agent's published edit session: ``matchcut.edit``) is exported when named (``stages=("edit",)``;
+never by default, like ``human``, which is never exported): ``edit.otio``, the ``edit`` project of ``matchcut.fcpxml`` and ``edit.edl``,
+each with the stage fingerprint (the sha256 of ``edit.json``) and a snapshot ``exports/.stages/edit-<sha12>.json``.  A fresh edit stage is
+listed between the canonical stages and ``human``, so the human stage then continues the edit stage's history (``history_stage`` in
+``human_import.json``).  Once a workspace has an edit stage, an import's base is never assumed (``import_timeline``): the file's
+fingerprint names the exact version, else ``--stage`` and ``--base`` must.
 """
 from __future__ import annotations
 
@@ -30,9 +37,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
 from matchcut.pipeline.editorial import Pin, pin_change
 from matchcut.pipeline.media import MediaError, probe as probe_media
-from matchcut.pipeline.junctions import Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_human, stage_timeline_paths
+from matchcut.pipeline.junctions import (EDIT_FILE, Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_edit,
+                                       stale_human, stage_timeline_paths)
 from matchcut.pipeline.shots import load_shots
-from matchcut.pipeline.timeline import Clip, Decision, Timeline, Transition, clip_origin
+from matchcut.pipeline.timeline import EDIT_STAGE, Clip, Decision, Timeline, Transition, clip_origin
 
 from . import InterchangeError, fidelity, resolve
 from .common import LaidClip, SourceInfo, clip_key, export_timeline, is_drop_rate, junction_ids, layout, plain, source_info, truncate
@@ -43,6 +51,7 @@ from .otio import export_otio, import_otio, placement_errors as otio_placement, 
 from .provenance import write_provenance
 
 HUMAN = "human"
+EDIT = EDIT_STAGE  # an agent's published edit session (matchcut.edit writes edit.json): exported when named, never by default
 DEFAULT_STAGES: Tuple[str, ...] = ("roughcut", "final")
 RESOLVE_SCRIPT = "open_in_resolve.py"
 SNAPSHOT_DIR = ".stages"  # <exports>/.stages/<stage>-<first 12 hex of the stage file's sha256>.json: the stage as it was exported
@@ -70,8 +79,23 @@ class ImportResult:
 
 # -- reading the workspace -------------------------------------------------------------------------
 def _canonical(ws: Path) -> List[Tuple[str, Timeline]]:
-    """The canonical stage timelines (every stage but ``human``), in stage order."""
-    return [(s, t) for s, t in load_stage_timelines(ws) if s != HUMAN]
+    """The canonical stage timelines (every stage but ``edit`` and ``human``), in stage order."""
+    return [(s, t) for s, t in load_stage_timelines(ws) if s not in (HUMAN, EDIT)]
+
+
+def _edit(ws: Path) -> Optional[Timeline]:
+    """The edit stage's timeline while it is listed (``edit.json`` present and fresh) and readable, else None."""
+    return next((t for s, t in load_stage_timelines(ws) if s == EDIT), None)
+
+
+def _no_edit(ws: Path, what: str) -> str:
+    """Why the edit stage cannot be ``what`` (exported, imported against): stale, unreadable or never published."""
+    why = stale_edit(ws)
+    if why:
+        return f"cannot {what} the edit stage: {why}"
+    if (Path(ws) / EDIT_FILE).exists():
+        return f"cannot {what} the edit stage: {EDIT_FILE} is unreadable"
+    return f"cannot {what} the edit stage: no {EDIT_FILE} in {ws} (publish an edit session first: python -m matchcut.edit WS publish)"
 
 
 def _bounds(ws: Path) -> Optional[Dict[int, Tuple[float, float]]]:
@@ -348,7 +372,12 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
     if resolve_script and "otio" not in formats:
         raise InterchangeError("--resolve-script needs the otio format: Resolve imports the OTIO file")
     stage_files = dict(stage_timeline_paths(ws))
-    canonical = _canonical(ws)
+    # the edit stage (while listed) comes after the canonical stages: its junctions follow them, and its earlier records are kept while
+    # edit.json is unchanged, as a canonical stage's are
+    edit = _edit(ws)
+    if EDIT in stages and edit is None:
+        raise InterchangeError(_no_edit(ws, "export"))
+    canonical = _canonical(ws) + ([(EDIT, edit)] if edit is not None else [])
     by_stage = dict(canonical)
     for s in stages:
         if s == HUMAN:
@@ -481,9 +510,9 @@ def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFA
         if script_stale:
             parts.append(f"{RESOLVE_SCRIPT} was made for the old {target}.otio")
         notes.append("the stage file changed since these were exported (export the stage again to refresh them); " + "; ".join(parts))
-    stale = stale_human(ws)
-    if stale:
-        notes.append(stale)
+    for stale in (stale_edit(ws), stale_human(ws)):
+        if stale:
+            notes.append(stale)
     for r in results:
         if r.errors:
             raise InterchangeError(f"export of {r.fmt}/{r.stage} does not match the canonical timeline: {r.errors[0]}")
@@ -758,11 +787,74 @@ def _name_stage(name: str, names: Sequence[str]) -> str:
     return ""
 
 
-def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str] = None, stage: Optional[str] = None) -> ImportResult:
+def _stage_file(ws: Path, stage: str) -> Path:
+    return Path(ws) / EDIT_FILE if stage == EDIT else dict(stage_timeline_paths(ws)).get(stage, Path(ws) / f"{stage}.json")
+
+
+def _snapshot_folders(ws: Path, imported: Path) -> List[Path]:
+    return list(dict.fromkeys([Path(ws) / "exports" / SNAPSHOT_DIR, imported.resolve().parent / SNAPSHOT_DIR]))
+
+
+def _edit_in_play(ws: Path, imported: Path) -> bool:
+    """True when the edit stage could be the base of an editor's file: an ``edit.json`` (fresh or not) or an exported snapshot of one.
+    A file's base is then never assumed: it must be named by the file's fingerprint, or by ``--stage`` and ``--base``."""
+    if (Path(ws) / EDIT_FILE).exists():
+        return True
+    return any(any(f.glob(f"{EDIT}-*.json")) for f in _snapshot_folders(ws, imported) if f.is_dir())
+
+
+def _fingerprint_stages(ws: Path, imported: Path, sha: str, stages: Sequence[str]) -> List[str]:
+    """The stages of ``stages`` that have a file whose sha256 is ``sha``: the stage file now, or a good snapshot of it."""
+    out: List[str] = []
+    for st in stages:
+        if _sha256(_stage_file(ws, st)) == sha or any(_sha256(f / _snapshot_name(st, sha)) == sha for f in _snapshot_folders(ws, imported)):
+            out.append(st)
+    return out
+
+
+def _load_base(ws: Path, base: str, stage: str) -> Tuple[Path, Timeline, str]:
+    """The base an import is diffed against, named by ``--base``: a path, or a snapshot's name in ``exports/.stages`` (with or without
+    ``.json``).  (its path, its timeline, the sha256 of its bytes); a one-line ``InterchangeError`` when it cannot be read or is a timeline
+    of another stage than ``stage``."""
+    candidates = [Path(base)]
+    if not Path(base).is_absolute():
+        folder = Path(ws) / "exports" / SNAPSHOT_DIR
+        candidates += [folder / base, folder / f"{base}.json"]
+    found = next((c for c in candidates if c.is_file()), None)
+    if found is None:
+        raise InterchangeError(f"--base {base}: no such file (looked for {' and '.join(_shown(ws, c) for c in candidates)})")
+    try:
+        data = found.read_bytes()
+        tl = Timeline.from_dict(json.loads(data.decode("utf-8")))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise InterchangeError(f"--base {_shown(ws, found)} is not a stage timeline: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from exc
+    if tl.stage and tl.stage != stage:
+        raise InterchangeError(f"--base {_shown(ws, found)} is a {tl.stage} stage timeline, not {stage}: name the base the file was exported from")
+    return found, tl, hashlib.sha256(data).hexdigest()
+
+
+def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str] = None, stage: Optional[str] = None,
+                    base: Optional[str] = None) -> ImportResult:
     """Read an editor's file, write ``human.json`` and ``human_import.json`` (never a canonical file) and return the human decisions.
 
-    The canonical stage compared with is ``stage`` when given, else the one the file says it was exported from (OTIO timeline metadata
-    or name, FCPXML project, EDL title), else ``final``.
+    The stage compared with is ``stage`` when given, else the one the file says it was exported from (OTIO timeline metadata or name,
+    FCPXML project, EDL title), else ``final``.  It may be ``edit`` (an agent's published edit session, ``edit.json``).
+
+    Once the workspace has an edit stage (an ``edit.json``, or an exported snapshot of one), the base is never assumed:
+
+    - a file with a fingerprint is compared with exactly the version it was exported from (the stage file when it still has that sha256,
+      else its snapshot in ``exports/.stages``), even after ``edit.json`` was published again; a fingerprint that matches no file of the
+      stage the file names is refused, and so is one that matches a file of another stage only (the file names ``edit`` but a ``final``
+      snapshot matches, or the reverse): the base is ambiguous;
+    - a file without a fingerprint (an EDL whose title was changed) is refused;
+
+    unless ``stage`` and ``base`` (a stage timeline file: a snapshot's path or name, or a stage file) name the base explicitly.  Without an
+    edit stage, ``base`` is optional and everything else is as before.
+
+    The human history continues the history of the stage the human stage is listed after: the edit stage while it is fresh, else the
+    latest canonical stage.  ``human_import.json`` records the stage compared with, the latest canonical stage and (``history_stage``) the
+    edit stage whose history it continues, each with its file's sha256: ``junctions.stale_human`` leaves the human stage out once any of
+    them changes.
     """
     ws, path = Path(ws), Path(path)
     fmt = _format_of(path, fmt)
@@ -777,11 +869,14 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     if not canonical:
         raise InterchangeError(f"no timelines in {ws}: run the pipeline first")
     names = [s for s, _ in canonical]
+    claimable = names + [EDIT]  # the stages a file can say it was exported from
     if stage is not None:
         if stage == HUMAN:
             raise InterchangeError("the human stage is an import result: name one of the stages it is compared with")
-        if stage not in names:
+        if stage not in claimable:
             raise InterchangeError(f"no stage {stage} in {ws}")
+    if base is not None and stage is None:
+        raise InterchangeError("--base names the version of a stage: give the stage too (--stage)")
     src, notes = _source(ws, cfg)
     bounds = _bounds(ws)
     if bounds is None:
@@ -796,13 +891,15 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         pick = stage  # when the file has no such project the reader says so
         if pick is None and known:
             pick = "final" if "final" in known else known[-1]
+        elif pick is None and EDIT in keys:
+            pick = EDIT
         if len(keys) == 1:
             pick = None  # the only project is read whatever it is called: --stage (or detection) only picks the stage it is compared with
             only_project = (keys[0], fcpxml_project_names(text)[0])
         if len(keys) > 1:
             notes.append(f"the file has projects for {', '.join(keys)}; read the {pick or keys[0]} one" + ("" if stage else " (--stage reads another)"))
         edited, inotes = import_fcpxml(text, pick, bounds, src)
-        claimed = (pick or keys[0]) if (pick or keys[0]) in names else ""
+        claimed = (pick or keys[0]) if (pick or keys[0]) in claimable else ""
         fingerprint = fcpxml_fingerprint(text, pick)
     elif fmt == "otio":
         try:
@@ -811,64 +908,116 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
             raise InterchangeError(f"invalid OTIO document: {exc}".splitlines()[0]) from exc
         edited, inotes = import_otio(doc, bounds, src)
         fingerprint = otio_fingerprint(doc)
-        claimed = edited.stage if edited.stage in names else _name_stage(edited.name, names)
-        if edited.stage and edited.stage not in names:
+        claimed = edited.stage if edited.stage in claimable else _name_stage(edited.name, claimable)
+        if edited.stage and edited.stage not in claimable:
             notes.append(f"the file says it was exported from stage {edited.stage}, which this workspace does not have")
     else:
         edited, inotes = import_edl(text, src.rate, src.path, bounds, src)
         fingerprint = edl_fingerprint(text)
-        claimed = edited.stage if edited.stage in names else _name_stage(edited.name, names)
-        if edited.stage and edited.stage not in names:
+        claimed = edited.stage if edited.stage in claimable else _name_stage(edited.name, claimable)
+        if edited.stage and edited.stage not in claimable:
             notes.append(f"the file says it was exported from stage {edited.stage}, which this workspace does not have")
     notes = inotes + notes
-    if stage is not None:
-        chosen = stage
-        if claimed and claimed != stage:
-            notes.append(f"the file says it was exported from stage {claimed}; compared with {stage} as asked")
-    elif claimed:
-        chosen = claimed
-    elif "final" in names:
-        chosen = "final"
-        notes.append("the file does not say which stage it was exported from; compared with the final stage")
-    else:
-        raise InterchangeError(f"no stage final in {ws}: name the stage the file was exported from (--stage)")
-    if only_project is not None and only_project[0] not in names and only_project[0] != chosen:
-        notes.append(f"the file's only project is named {only_project[1]}; compared with {chosen}")
-    canon = dict(canonical)[chosen]
-    latest_name, latest = canonical[-1]
-    stage_files = dict(stage_timeline_paths(ws))
-    stage_path, latest_path = stage_files[chosen], stage_files[latest_name]
-    stage_hash = _sha256(stage_path)
+    in_play = _edit_in_play(ws, path) or EDIT in (stage, claimed)
+    edit_now = _edit(ws)
+    current: Dict[str, Timeline] = dict(canonical) | ({EDIT: edit_now} if edit_now is not None else {})
     base_snapshot: Optional[Path] = None
-    if fingerprint and claimed == chosen:  # (a stage chosen against the file's word has no fingerprint to check)
-        if fingerprint != stage_hash:  # the pipeline ran again since the export: diff against the stage as it was exported
+    base_sha = ""
+    if base is not None:  # the base named explicitly: the file's own word is only noted
+        chosen = str(stage)
+        base_snapshot, canon, base_sha = _load_base(ws, base, chosen)
+        if claimed and claimed != chosen:
+            notes.append(f"the file says it was exported from stage {claimed}; compared with {chosen} as asked")
+        if fingerprint and fingerprint != base_sha:
+            notes.append(f"the file's fingerprint (sha {fingerprint[:12]}) is not that of --base {_shown(ws, base_snapshot)} (sha {base_sha[:12]}): "
+                         "compared with the base as asked")
+    elif not in_play:  # no edit stage anywhere: the base is the stage the file names (or final), as before M3a
+        if stage is not None:
+            chosen = stage
+            if claimed and claimed != stage:
+                notes.append(f"the file says it was exported from stage {claimed}; compared with {stage} as asked")
+        elif claimed:
+            chosen = claimed
+        elif "final" in names:
+            chosen = "final"
+            notes.append("the file does not say which stage it was exported from; compared with the final stage")
+        else:
+            raise InterchangeError(f"no stage final in {ws}: name the stage the file was exported from (--stage)")
+        canon = current[chosen]
+        if fingerprint and claimed == chosen:  # (a stage chosen against the file's word has no fingerprint to check)
+            if fingerprint != _sha256(_stage_file(ws, chosen)):  # the pipeline ran again since the export: diff against the stage as it was exported
+                base_snapshot, canon = _load_snapshot(ws, path, chosen, fingerprint)
+                base_sha = fingerprint
+                notes.append(f"{path.name} was exported from an earlier {chosen}: the editor's changes were diffed against that version; "
+                             f"junction histories compare the human stage with the current {chosen}")
+        elif not fingerprint:
+            notes.append(f"{path.name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions")
+    else:  # an edit stage is in play: the base is what the fingerprint names, exactly, or nothing
+        fix = "name the base with --stage and --base SNAPSHOT (a file in exports/.stages)"
+        if not fingerprint:
+            raise InterchangeError(f"{path.name} carries no stage fingerprint, and this workspace has an edit stage as well as {names[-1]}: "
+                                   f"the base is ambiguous; {fix}")
+        target = stage or claimed
+        matches = _fingerprint_stages(ws, path, fingerprint, claimable)
+        if not target:
+            if len(matches) != 1:
+                raise InterchangeError(f"{path.name} does not say which stage it was exported from and its fingerprint (sha {fingerprint[:12]}) "
+                                       + ("matches no stage file or snapshot" if not matches else f"matches stages {_list(matches)}") + f"; {fix}")
+            target = matches[0]
+            notes.append(f"the file does not say which stage it was exported from; its fingerprint is that of stage {target}")
+        if target not in matches:
+            if matches:
+                raise InterchangeError(f"{path.name} names stage {target}, but its fingerprint (sha {fingerprint[:12]}) is that of stage "
+                                       f"{_list(matches)}: the base is ambiguous; {fix}")
+            if target != EDIT:
+                _load_snapshot(ws, path, target, fingerprint)  # raises: missing (where it looked) or damaged
+            raise InterchangeError(f"{path.name} was exported from an edit stage (sha {fingerprint[:12]}) that matches no snapshot "
+                                   f"({_snapshot_name(EDIT, fingerprint)} is not in {' or '.join(_shown(ws, f) for f in _snapshot_folders(ws, path))}) "
+                                   "and is not edit.json now: matchcut does not guess the base; restore the snapshot, or " + fix)
+        if stage is not None and claimed and claimed != stage:
+            notes.append(f"the file says it was exported from stage {claimed}; compared with {stage} as asked")
+        chosen = target
+        if chosen in current and _sha256(_stage_file(ws, chosen)) == fingerprint:
+            canon = current[chosen]
+        else:
             base_snapshot, canon = _load_snapshot(ws, path, chosen, fingerprint)
-            notes.append(f"{path.name} was exported from an earlier {chosen}: the editor's changes were diffed against that version; "
+            base_sha = fingerprint
+            again = "edit.json was published again since" if chosen == EDIT else "the pipeline ran again since"
+            notes.append(f"{path.name} was exported from an earlier {chosen} ({again}): the editor's changes were diffed against that version; "
                          f"junction histories compare the human stage with the current {chosen}")
-    elif not fingerprint:
-        notes.append(f"{path.name} carries no stage fingerprint: if the pipeline ran after it was exported, the pipeline's changes show as human decisions")
+    if chosen == EDIT and edit_now is None:
+        raise InterchangeError(_no_edit(ws, "import against") + ": the human stage would be stale at once")
+    if only_project is not None and only_project[0] not in claimable and only_project[0] != chosen:
+        notes.append(f"the file's only project is named {only_project[1]}; compared with {chosen}")
+    latest_name, latest = canonical[-1]
+    # the stage the human stage is listed after, whose history the human history continues: the edit stage while it is fresh
+    prev_name, prev = (EDIT, edit_now) if edit_now is not None else (latest_name, latest)
+    stage_path, latest_path = _stage_file(ws, chosen), _stage_file(ws, latest_name)
+    stage_hash = _sha256(stage_path)
     snapped, _ = export_timeline(canon, bounds, src)
-    human, diff = _build(canon, snapped, edited, src.rate, latest, bounds)
+    human, diff = _build(canon, snapped, edited, src.rate, prev, bounds)
     notes.extend(diff.notes)
     if diff.by_range:
         notes.append(f"{diff.by_range} clip{'s' if diff.by_range != 1 else ''} matched by source range because the clip key was missing or unknown")
-    if chosen != latest_name:
-        notes.append(f"human stage is based on {chosen}, not {latest_name}: junction histories compare it with {latest_name}, "
+    if chosen != prev_name:
+        notes.append(f"human stage is based on {chosen}, not {prev_name}: junction histories compare it with {prev_name}, "
                      "so changes the later stages made show as differences")
-        notes.append(f"the human history continues the {latest_name} stage's history, so the decisions of every stage stay attributed")
+        notes.append(f"the human history continues the {prev_name} stage's history, so the decisions of every stage stay attributed")
     previous = stale_human(ws)
     if previous:
         notes.append(f"{previous}; this import replaces it")
     record = {
         "schema": IMPORT_SCHEMA, "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "source_file": str(path.resolve()),
         "format": fmt, "stage": chosen, "stage_file": stage_path.name, "stage_sha256": stage_hash,
-        # the stage whose history the human history copies: a change to either file makes the human stage stale (junctions.stale_human)
+        # the latest canonical stage: a change to it, or to the stage compared with, makes the human stage stale (junctions.stale_human)
         "latest_stage": latest_name, "latest_stage_file": latest_path.name, "latest_stage_sha256": _sha256(latest_path),
         "decisions": len(diff.decisions), "notes": notes,
     }
-    if base_snapshot is not None:  # the file was diffed against this earlier version of `stage`; stage_sha256 above is the CURRENT stage file
+    if prev_name == EDIT:  # the human history continues the edit stage's: a new publish makes the human stage stale too
+        record.update(history_stage=EDIT, history_stage_file=EDIT_FILE, history_stage_sha256=_sha256(ws / EDIT_FILE))
+    if base_snapshot is not None:  # the file was diffed against this version of `stage`; stage_sha256 above is the CURRENT stage file
         record["base_snapshot"] = str(base_snapshot)
-        record["base_snapshot_sha256"] = fingerprint
+        record["base_snapshot_sha256"] = base_sha
     human_path = ws / "human.json"
     _atomic_write(human_path, json.dumps(human.to_dict(), indent=2))
     _atomic_write(ws / "human_import.json", json.dumps(record, indent=2) + "\n")

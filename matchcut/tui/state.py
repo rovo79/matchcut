@@ -11,7 +11,7 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 from matchcut.pipeline import events
 from matchcut.pipeline.audio import MusicAnalysis
 from matchcut.pipeline.config import PipelineConfig
-from matchcut.pipeline.junctions import stage_timeline_paths
+from matchcut.pipeline.junctions import EDIT_FILE, EDIT_RECORD, stage_timeline_paths
 from matchcut.pipeline.media import MediaInfo
 from matchcut.pipeline.shots import Shot, load_shots
 from matchcut.pipeline.timeline import Decision, Timeline
@@ -218,8 +218,10 @@ class RunState:
         return stage_timeline_paths(self.workspace)
 
     def timeline_files(self) -> List[Path]:
-        """Every file a timeline stage can come from (present or not), for change fingerprints."""
-        return [path for _, path in self._timeline_entries()]
+        """Every file a timeline stage can come from (present or not), for change fingerprints: also the edit stage's file and record,
+        which ``stage_timeline_paths`` lists only while the edit stage is fresh (a publish must show up)."""
+        paths = [path for _, path in self._timeline_entries()]
+        return paths + [p for p in (self.workspace / EDIT_FILE, self.workspace / EDIT_RECORD) if p not in paths]
 
     def _timeline_path(self, stage: str) -> Optional[Path]:
         for name, path in self._timeline_entries():

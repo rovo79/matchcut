@@ -12,6 +12,11 @@ badge ask the editor to check it. Selection reads the rough cut's ranges as they
 them), one clip is moved next to the other, never splitting or reordering the
 beats and never moving a clip another pin holds; pins already in place are
 applied before any pin that needs a move.
+
+A pin may also protect its junction's transition (``hold_transition`` with the ``held_transition`` it holds, optional fields set and
+cleared by the edit CLI's ``pin_transition``; older pins read as unprotected).  **The pipeline engine ignores these fields**: applying
+pins, the passes and the renderer treat a protected pin exactly like any other, so a pipeline run may still change the transition at a
+protected junction.  Only an edit session (``matchcut.edit``) refuses a proposal that changes a protected transition.
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ class Pin:
     out_origin: str = ""  # clip_origin of the outgoing / incoming clip when the pin was taken; "" for pins that predate it
     in_origin: str = ""
     # The junction's transition is protected too (set by the edit CLI): ``held_transition`` is {"kind", "frames"}.  Only the edit
-    # package (``matchcut.edit``) honours it; the pipeline engine ignores it.  Pins without it are unprotected.
+    # package (``matchcut.edit``) honours it; the pipeline engine ignores it (see the module docstring).  Pins without it are unprotected.
     hold_transition: bool = False
     held_transition: Optional[dict] = None
 
