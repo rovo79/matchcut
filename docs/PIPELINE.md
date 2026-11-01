@@ -149,9 +149,23 @@ Each clip reads the source through its own ffmpeg input:
     source's index (about 10 MB for a one-hour MP4). Cuts of more than 8 clips decode each input with one thread to bound this. Measured
     peaks are still well below the shared input's.
   - **Decoding:** each clip decodes from the keyframe at or before its seek point, so up to one frame group plus 0.25 s before its in-point.
-  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file (`-filter_complex_script`, which ffmpeg 7.1 deprecates in favour of
-    `-/filter_complex`).
-- **Tested on:** ffmpeg 6.1 only. ffmpeg 7 adds threads per input.
+  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file.
+    - The option is the one the installed ffmpeg accepts, found by asking it once per binary.
+    - It is `-/filter_complex` on ffmpeg 7.1 and later, the only form in ffmpeg 9, which removed `-filter_complex_script`.
+    - Older versions use `-filter_complex_script`.
+    - An ffmpeg that accepts neither gets a one-line error.
+  - **Known slowdown:** cuts of many very short clips render slower than with the shared input. The reviewer measured a 1080p cut of
+    100 × 0.4 s clips at 28.6 s, against 9.0 s before, because each clip decodes its own lead-in from a keyframe.
+    - `MATCHCUT_PERF=1 pytest tests/pipeline/test_render_perf.py` measures that case and fails above its budget.
+    - Any shared-input optimisation must keep `tests/pipeline/test_render_order.py`'s frame and audio checks passing.
+- **Ranges checked first:** a clip the video cannot play is refused before ffmpeg starts, with a one-line error. That covers a clip that:
+  - starts at or after the end of the video stream (a dissolve into one used to make ffmpeg wait forever);
+  - ends more than a frame past the end of the video stream;
+  - starts before the file;
+  - is shorter than a frame.
+
+  The end is the video stream's, measured from the start of the file, not the container's: a file's audio can run on past its picture.
+- **Tested on:** ffmpeg 6.1, plus a stand-in for ffmpeg 9's graph-file option. ffmpeg 7 adds threads per input.
 
 ## Music
 

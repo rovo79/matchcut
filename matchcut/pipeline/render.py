@@ -8,9 +8,11 @@ and the trims stay exact: they are applied to the decoded frames, relative to th
 """
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from fractions import Fraction
@@ -18,7 +20,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from .config import MusicConfig, RenderConfig
-from .media import MediaError, MediaInfo, _require, run
+from .media import MediaError, MediaInfo, _require, run, video_extent
 from .timeline import Timeline
 
 log = logging.getLogger("matchcut.pipeline")
@@ -149,6 +151,53 @@ def _rate_text(fps: float) -> str:
     return f"{exact.numerator}/{exact.denominator}" if abs(float(exact) - fps) < 1e-6 * max(fps, 1.0) else f"{fps:.6f}"
 
 
+def check_ranges(tl: Timeline, media: MediaInfo) -> None:
+    """Refuse, before ffmpeg starts, a clip whose source range the video cannot play: one that starts at or after the end of the video
+    (a dissolve into such a clip made ffmpeg wait forever), ends more than a frame past it (the picture would come out short under
+    full-length audio), starts before the file, or is shorter than a frame.  The end is the video stream's, not the container's."""
+    fps = media.fps if media.fps > 0 else 25.0
+    frame = 1.0 / fps
+    extent = video_extent(media.path)
+    for c in tl.clips:
+        if c.source_in < -1e-6:
+            raise MediaError(f"clip {c.id} starts at {c.source_in:.3f} s, before the start of {Path(media.path).name}")
+        if c.source_out - c.source_in < frame - 1e-6:
+            raise MediaError(f"clip {c.id} is shorter than one frame ({c.source_in:.3f}-{c.source_out:.3f} s)")
+        if extent is None:
+            continue
+        v_start, v_end, container = extent
+        where = f"the video of {Path(media.path).name} runs {v_start:.3f}-{v_end:.3f} s"
+        if container is not None and container > v_end + frame / 2:
+            where += f" (the file, with its audio, runs to {container:.3f} s)"
+        if c.source_in >= v_end - frame / 2:
+            raise MediaError(f"clip {c.id} starts at {c.source_in:.3f} s, at or after the end of the video: {where}")
+        if c.source_out > v_end + frame + 1e-6:
+            raise MediaError(f"clip {c.id} ends at {c.source_out:.3f} s, more than a frame past the end of the video: {where}")
+
+
+GRAPH_FILE_OPTIONS = ("-/filter_complex", "-filter_complex_script")  # ffmpeg 7.1+ (the only one in ffmpeg 9), then older versions
+
+
+@functools.lru_cache(maxsize=8)
+def graph_file_option(ffmpeg: str) -> str:
+    """The option that makes *this* ffmpeg read its filter graph from a file, found by asking it: ``-/filter_complex`` (ffmpeg 7.1 and later;
+    ffmpeg 9 removed ``-filter_complex_script``) or ``-filter_complex_script`` (older versions).  Each candidate runs a tiny graph."""
+    fd, name = tempfile.mkstemp(prefix=".graph-probe-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("anullsrc=r=8000:cl=mono,atrim=duration=0.01[o]")
+        for option in GRAPH_FILE_OPTIONS:
+            proc = subprocess.run([ffmpeg, "-hide_banner", "-v", "error", "-nostdin", option, name, "-map", "[o]", "-f", "null", "-"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+            if proc.returncode == 0:
+                return option
+    finally:
+        Path(name).unlink(missing_ok=True)
+    version = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True).stdout.splitlines()[:1]
+    raise MediaError(f"{ffmpeg} ({version[0] if version else 'unknown version'}) accepts neither {' nor '.join(GRAPH_FILE_OPTIONS)}: "
+                     "it cannot read this cut's filter graph from a file")
+
+
 def _ensure_open_files(n_inputs: int) -> None:
     """The renderer opens the source once per clip: raise the soft open-file limit toward the hard one if the cut needs more, or say why
     it cannot (a 256-file default, as on macOS, stops a cut of about 220 clips)."""
@@ -207,6 +256,7 @@ def render(
 ) -> Path:
     if not tl.clips:
         raise ValueError("cannot render an empty timeline")
+    check_ranges(tl, media)
     _ensure_open_files(len(tl.clips))
     ffmpeg = _require("ffmpeg")
     has_music = bool(music is not None and music.path)
@@ -220,11 +270,12 @@ def render(
         cmd += ["-i", str(music.path)]
     graph_file = None
     if len(graph) > INLINE_GRAPH_LIMIT:
+        option = graph_file_option(ffmpeg)  # asked before the file exists, so a refusal leaves nothing behind
         fd, name = tempfile.mkstemp(prefix=".graph-", suffix=".txt", dir=output.parent)
         with os.fdopen(fd, "w") as fh:
             fh.write(graph)
         graph_file = Path(name)
-        cmd += ["-filter_complex_script", str(graph_file), "-map", "[vout]"]
+        cmd += [option, str(graph_file), "-map", "[vout]"]
     else:
         cmd += ["-filter_complex", graph, "-map", "[vout]"]
     if media.has_audio or has_music:

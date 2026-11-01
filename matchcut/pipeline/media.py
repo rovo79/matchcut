@@ -100,6 +100,35 @@ def probe(path: str) -> MediaInfo:
     )
 
 
+def video_extent(path: str) -> Optional[tuple]:
+    """(start, end) of the first video stream in seconds from the start of the file (the time matchcut's timelines count in), and the
+    container's duration; None when ffprobe cannot tell where the video ends.  The video can end well before the container when the
+    audio runs on past the picture, so the container's duration is not the video's."""
+    ffprobe = _require("ffprobe")
+    proc = run([ffprobe, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=start_time,duration,nb_frames,avg_frame_rate:format=start_time,duration",
+                "-of", "json", str(path)])
+    data = json.loads(proc.stdout.decode("utf-8"))
+    streams, fmt = data.get("streams") or [], data.get("format") or {}
+    if not streams:
+        return None
+    v = streams[0]
+
+    def num(x: object) -> Optional[float]:
+        try:
+            return float(x)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    origin = num(fmt.get("start_time")) or 0.0
+    start = (num(v.get("start_time")) if num(v.get("start_time")) is not None else origin) - origin
+    length = num(v.get("duration"))
+    if length is None:
+        frames, rate = num(v.get("nb_frames")), _parse_rate(v.get("avg_frame_rate") or "0")
+        length = frames / rate if frames and rate > 0 else None
+    if length is None:
+        return None
+    return start, start + length, num(fmt.get("duration"))
+
+
 def iter_frames(
     path: str,
     fps: float,

@@ -339,7 +339,8 @@ def test_a_long_filter_graph_goes_to_ffmpeg_in_a_file(monkeypatch, coded, tmp_pa
 
     def fake_run(cmd, capture=True):
         seen["cmd"] = cmd
-        seen["graph"] = Path(cmd[cmd.index("-filter_complex_script") + 1]).read_text()
+        option = next(o for o in render_mod.GRAPH_FILE_OPTIONS if o in cmd)
+        seen["graph"] = Path(cmd[cmd.index(option) + 1]).read_text()
     monkeypatch.setattr(render_mod, "run", fake_run)
     monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 2000)
     media = probe(str(coded))
@@ -404,3 +405,93 @@ def test_music_under_loudnorm_keeps_its_timing_to_the_end(coded, ticks, tmp_path
     want = [k * 0.5 for k in range(int(tl.duration / 0.5) + 1) if k * 0.5 < tl.duration - 0.06]
     assert len(onsets) == len(want), (onsets, want)
     assert max(abs(a - b) for a, b in zip(onsets, want)) < 0.006, list(zip(onsets, want))
+
+
+def _fake_ffmpeg(tmp_path: Path, name: str, accepts: tuple) -> str:
+    """A stand-in for another ffmpeg version: it accepts only the graph-file options in ``accepts`` (as that version would), and runs the
+    installed ffmpeg with the option it understands.  ffmpeg 9 removed -filter_complex_script and reads the graph with -/filter_complex."""
+    import shutil as _sh
+    real = _sh.which("ffmpeg")
+    script = tmp_path / name
+    script.write_text(f"""#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    -filter_complex_script) case " {' '.join(accepts)} " in *" -filter_complex_script "*) ;; *) echo "Unrecognized option 'filter_complex_script'." >&2; exit 8;; esac;;
+    -/filter_complex) case " {' '.join(accepts)} " in *" -/filter_complex "*) ;; *) echo "Unrecognized option '/filter_complex'." >&2; exit 8;; esac;;
+  esac
+done
+if [ "$1" = "-version" ]; then echo "ffmpeg version 9.0-stand-in"; exit 0; fi
+args=""
+for a in "$@"; do
+  if [ "$a" = "-/filter_complex" ]; then a="-filter_complex_script"; fi
+  args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"
+done
+eval exec "{real}" $args
+""")
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_the_graph_file_option_is_the_one_this_ffmpeg_supports(monkeypatch, coded, tmp_path):
+    """Asked of each ffmpeg: the installed one (6.1 here: -filter_complex_script); a stand-in for ffmpeg 9 (only -/filter_complex) renders a
+    long graph frame-exact through -/filter_complex; an ffmpeg that accepts neither is a one-line error, with no graph file left."""
+    import shutil as _sh
+
+    from matchcut.pipeline.render import graph_file_option
+
+    assert graph_file_option(_sh.which("ffmpeg")) in render_mod.GRAPH_FILE_OPTIONS
+    media = probe(str(coded))
+    tl = timeline(str(coded), media.fps, [(9.0, 11.0), (5.0, 7.0), (1.0, 3.0)], [Transition(), Transition("dissolve", 0.4), Transition()])
+    monkeypatch.setattr(render_mod, "INLINE_GRAPH_LIMIT", 100)  # force the file path
+    nine = _fake_ffmpeg(tmp_path, "ffmpeg9", ("-/filter_complex",))
+    assert graph_file_option(nine) == "-/filter_complex"
+    seen = []
+    real_run = render_mod.run
+    monkeypatch.setattr(render_mod, "_require", lambda name: nine if name == "ffmpeg" else _sh.which(name))
+    monkeypatch.setattr(render_mod, "run", lambda cmd, capture=True: (seen.append(cmd), real_run(cmd, capture=capture))[1])
+    out = do_render(tl, media, tmp_path / "nine.mp4")
+    assert "-/filter_complex" in seen[-1] and "-filter_complex_script" not in seen[-1]
+    assert_video_exact(tl, out, media.fps)
+    assert_av_lengths(out, media.fps)
+    neither = _fake_ffmpeg(tmp_path, "ffmpeg_old", ())
+    monkeypatch.setattr(render_mod, "_require", lambda name: neither if name == "ffmpeg" else _sh.which(name))
+    with pytest.raises(render_mod.MediaError, match="accepts neither"):
+        render(tl, media, RCFG, tmp_path / "neither.mp4")
+    assert not list(tmp_path.glob(".graph-*"))
+
+
+@pytest.fixture(scope="module")
+def audio_tail(tmp_path_factory) -> Path:
+    """10 s of video whose audio runs on to 12 s: the container is 12 s long, the picture 10 s."""
+    import subprocess as sp
+
+    out = tmp_path_factory.mktemp("tail") / "tail.mp4"
+    sp.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=320x180:r=25:d=10", "-f", "lavfi", "-i", "sine=f=440:r=48000:d=12",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True)
+    return out
+
+
+@pytest.mark.parametrize("ranges, transition, message", [
+    ([(1.0, 3.0), (10.5, 11.5)], Transition("dissolve", 0.4), "starts at 10.500 s, at or after the end of the video"),  # the hang on main
+    ([(1.0, 3.0), (10.5, 11.5)], Transition(), "starts at 10.500 s, at or after the end of the video"),
+    ([(1.0, 3.0), (8.0, 11.5)], Transition(), "ends at 11.500 s, more than a frame past the end of the video"),
+    ([(-0.5, 1.0), (3.0, 4.0)], Transition(), "before the start"),
+    ([(1.0, 1.02), (3.0, 4.0)], Transition(), "shorter than one frame"),
+])
+def test_a_range_the_video_cannot_play_is_refused_before_ffmpeg_starts(monkeypatch, audio_tail, tmp_path, ranges, transition, message):
+    media = probe(str(audio_tail))
+    assert media.duration > 11.5  # the container (with the audio) runs past the video's 10 s
+    monkeypatch.setattr(render_mod, "run", lambda *a, **k: pytest.fail("ffmpeg must not start"))
+    tl = timeline(str(audio_tail), media.fps, ranges, [Transition(), transition])
+    with pytest.raises(render_mod.MediaError, match=message) as err:
+        with deadline(20):
+            render(tl, media, RCFG, tmp_path / "bad.mp4")
+    if "end of the video" in message:
+        assert "runs 0.000-10.000 s" in str(err.value) and "with its audio, runs to 12." in str(err.value)
+
+
+def test_a_clip_ending_within_a_frame_of_the_video_end_still_renders(audio_tail, tmp_path):
+    media = probe(str(audio_tail))
+    tl = timeline(str(audio_tail), media.fps, [(1.0, 3.0), (8.0, 10.02)])  # half a frame past the picture: as a shot ending at the file's end can
+    out = do_render(tl, media, tmp_path / "edge.mp4")
+    assert "audio" in sig.streams(out)
