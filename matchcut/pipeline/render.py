@@ -232,6 +232,7 @@ def fit_ranges(tl: Timeline, media: MediaInfo) -> Timeline:
     return out
 
 
+GRAPH_FILE_OPTIONS = ("-/filter_complex", "-filter_complex_script")  # ffmpeg 7.1+ (the only one in ffmpeg 9), then older versions
 _UNSUPPORTED = ("Unrecognized option", "Option not found", "unrecognized option")
 
 
