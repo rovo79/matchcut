@@ -718,6 +718,39 @@ def propose(ws: Path, ops: Any, guards: Optional[Dict[str, Any]] = None, ctx: Op
     return _summary(doc)
 
 
+def _revalidated(s: Session, d: Path, pid: str) -> Dict[str, Any]:
+    """The stored proposal ``pid``, checked as ``apply`` checks it (under the lock, on a fresh session): made at the current head, with the
+    session's current reserved clip ids and the workspace's current context, and its operations, run again on the head, give exactly the
+    stored result.  Returns the re-evaluated proposal document; raises ``SessionError`` otherwise."""
+    stored = _read_json(d / "proposals" / f"{pid}.json", f"proposal {pid}")
+    if stored.get("head") != s.head:
+        raise SessionError(f"head moved: proposal {pid} was made at {stored.get('head')}, the head is now {s.head}: propose again")
+    if stored.get("reserved_ids") != s.reserved_ids():
+        raise SessionError(f"proposal {pid} was made before the session issued other clip ids (a revision was applied, then undone): "
+                           "propose again")
+    if stored.get("context_sha256") != context_sha256(s.context()):
+        raise SessionError(f"proposal {pid} was made before the workspace changed (its config, shots, pins, music or source rate): "
+                           "propose again")
+    try:
+        doc = _evaluate(s, stored.get("ops"), stored.get("guards"))
+    except Refused as exc:
+        raise SessionError(f"proposal {pid} was changed after it was stored: its operations are refused now ({exc}); propose again") \
+            from None
+    if doc["id"] != pid or json.loads(canonical_json(doc)) != stored:
+        raise SessionError(f"proposal {pid} was changed after it was stored: it does not match what its operations give; propose again")
+    return doc
+
+
+def check_proposal(ws: Path, proposal: str, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
+    """The stored proposal ``proposal``, re-validated exactly as ``apply`` would (``SessionError`` when the session is stale, the head
+    moved, the context changed or the stored result no longer follows from its operations); nothing is written.  ``view.preview`` renders
+    the returned document's timeline."""
+    pid = check_proposal_id(proposal)
+    with _locked(ws, shared=True) as d:
+        s = _fresh(ws, ctx)
+        return _revalidated(s, d, pid)
+
+
 def apply(ws: Path, proposal: str, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
     """Apply the stored proposal ``proposal``: it must have been made at the current head, with the session's current reserved clip ids
     and the workspace's current context; its operations are run again on the head and the result must be exactly the stored one (a
@@ -725,22 +758,7 @@ def apply(ws: Path, proposal: str, ctx: Optional[EditContext] = None) -> Dict[st
     pid = check_proposal_id(proposal)
     with _locked(ws) as d:
         s = _fresh(ws, ctx)
-        stored = _read_json(d / "proposals" / f"{pid}.json", f"proposal {pid}")
-        if stored.get("head") != s.head:
-            raise SessionError(f"head moved: proposal {pid} was made at {stored.get('head')}, the head is now {s.head}: propose again")
-        if stored.get("reserved_ids") != s.reserved_ids():
-            raise SessionError(f"proposal {pid} was made before the session issued other clip ids (a revision was applied, then undone): "
-                               "propose again")
-        if stored.get("context_sha256") != context_sha256(s.context()):
-            raise SessionError(f"proposal {pid} was made before the workspace changed (its config, shots, pins, music or source rate): "
-                               "propose again")
-        try:
-            doc = _evaluate(s, stored.get("ops"), stored.get("guards"))
-        except Refused as exc:
-            raise SessionError(f"proposal {pid} was changed after it was stored: its operations are refused now ({exc}); propose again") \
-                from None
-        if doc["id"] != pid or json.loads(canonical_json(doc)) != stored:
-            raise SessionError(f"proposal {pid} was changed after it was stored: it does not match what its operations give; propose again")
+        doc = _revalidated(s, d, pid)
         n = max([s.state["next"]] + [_revision_number(r) + 1 for r in s.revision_ids()])  # never over a revision a crash left behind
         rid = revision_name(n)
         tl = Timeline.from_dict(doc["timeline"])

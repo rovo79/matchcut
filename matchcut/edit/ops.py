@@ -65,6 +65,14 @@ MAX_SHOT = 10 ** 6  # a shot index beyond this either way is refused (no workspa
 
 
 # ----------------------------------------------------------------------------------------------- arguments and addressing
+def _shown(v: Any) -> str:
+    """A number for an out-of-range message: in full when short, else in powers of ten (a huge int cannot be formatted as a float, and
+    Python refuses to write an int of more than 4300 digits)."""
+    if isinstance(v, int) and abs(v) >= 10 ** 15:
+        return f"~{'-' if v < 0 else ''}1e{int(math.log10(abs(v)))}"
+    return str(int(v)) if abs(v) < 1e15 else f"{v:g}"
+
+
 def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED, limit: int = MAX_FRAMES, unit: str = "frames") -> int:
     """A whole-number argument: an int, or a float with no fraction, of at most ``limit`` (``unit``) either way.  A bool, a fractional or
     non-numeric value is refused, never truncated; a missing one is refused unless there is a ``default``."""
@@ -78,7 +86,7 @@ def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED, limit: int = M
     if isinstance(v, float) and not (math.isfinite(v) and v.is_integer()):
         raise Refused(f"{key} must be a whole number, not {v!r}")
     if abs(v) > limit:
-        shown = str(int(v)) if abs(v) < 1e15 else f"{v:g}"
+        shown = _shown(v)
         raise Refused(f"{key} is out of range: at most {limit} {unit} either way, not {shown[:12]}{'...' if len(shown) > 12 else ''}")
     return int(v)
 
