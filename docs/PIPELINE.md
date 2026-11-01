@@ -122,6 +122,76 @@ ffmpeg filter graph (trim → concat / xfade / acrossfade → fades); `--proxy`
 renders a quick 640 px preview. `report.md` has the narrative, the cut list
 and every decision each pass made.
 
+Each clip reads the source through its own ffmpeg input:
+
+- **Where it reads:** the input is seeked to the last frame at least 0.25 s before the clip's in-point (or to 0), and reads to 0.5 s past
+  its out-point.
+  - **Containers with an index** (MP4/MOV, Matroska/WebM, AVI, MXF, ASF, FLV) seek to the keyframe before the seek point.
+  - **Containers without one** (MPEG-TS such as AVCHD `.mts`/`.m2ts`, MPEG program streams, Ogg, DV, raw streams): a seek lands on a
+    timestamp, not a keyframe, so with only 0.25 s of margin a long-GOP TS rendered 47 of its 140 frames.
+    - Their inputs are seeked earlier by twice the file's longest keyframe gap, read once from the packets' keyframe flags without decoding.
+      Twice, because an intra-refresh stream flags recovery points that complete a picture only a refresh period later.
+    - With music only, the source audio is still assembled in these containers, then mixed in at zero volume: a seeked MPEG-TS/PS input
+      that leaves its audio unread is timed differently by ffmpeg, and the video trims land on the wrong frames. Such a render costs what a
+      render mixing source and music costs: about 2.5 GB, against 0.6 GB without music, for 30 clips of 720p. Indexed containers skip it.
+    - A 2-minute 720p TS with 30 shuffled clips renders frame-exact in about the time of the same streams in MP4 (14.2 s against 14.8 s).
+    - A file with no flagged keyframes is read from the start for every clip, with a warning. That is slow on long files: about 17 times
+      slower for a 5-minute 1080p file with 30 clips.
+- **Trims:** they are exact, made on the decoded frames and samples, relative to that seek. Video trims start 0.5 ms early, so a point
+  stored to 4 decimals still selects its own frame at 29.97 and 30 fps.
+- **Transitions:** they are placed by whole frames against the exact frame rate (`30000/1001`, not `29.9700`).
+  - Their lengths are rounded over the running total, as the OTIO/FCPXML/EDL exporters' layout rounds them: the render shows the
+    exported frames, and every clip starts within half a frame of `Timeline.record_start`.
+  - A single fractional transition can therefore render one frame longer or shorter than its seconds. The whole cut is its duration in
+    frames, rounded half up.
+- **Audio length:** at the end of the chain the audio's timestamps are renumbered from its samples, then it is padded or cut to the
+  video's length.
+  - Mixing and ducking can end it early.
+  - `loudnorm` leaves a 20–100 ms timestamp jump about 2.9 s before the end, which a player would play as audio running late.
+- **Why:** with one shared input, clips out of source order (or a repeated range) broke the render:
+  - the audio of a reordered dissolve went missing;
+  - a reordered cut under music lost its audio;
+  - a repeated range never finished;
+  - the video held seconds of raw frames in memory.
+- **Costs:**
+  - **Open files:** one per clip. The renderer raises the soft limit toward the hard one, and says what to set when the hard limit is too
+    low.
+  - **Memory:** each input opens its own decoder. Memory grows by about 15–30 MB per clip at 720p–1080p, and each input also reads the
+    source's index (about 10 MB for a one-hour MP4). Cuts of more than 8 clips decode each input with one thread to bound this. Measured
+    peaks are still well below the shared input's.
+  - **Decoding:** each clip decodes from the keyframe at or before its seek point, so up to one frame group plus 0.25 s before its in-point.
+  - **Long cuts:** a filter graph over 100 kB goes to ffmpeg in a file.
+    - The option is the one the installed ffmpeg accepts, found by asking it once per binary.
+    - It is `-/filter_complex` on newer versions: the generic `-/option` file syntax arrived around ffmpeg 7.0/7.1, and it is the only
+      form in ffmpeg 9, which removed `-filter_complex_script`.
+    - Older versions use `-filter_complex_script`.
+    - An ffmpeg that accepts neither gets a one-line error.
+  - **Known slowdown:** cuts of many very short clips render slower than with the shared input. The reviewer measured a 1080p cut of
+    100 × 0.4 s clips at 28.6 s, against 9.0 s before, because each clip decodes its own lead-in from a keyframe.
+    - `MATCHCUT_PERF=1 pytest tests/pipeline/test_render_perf.py` measures that case and fails above its budget.
+    - Any shared-input optimisation must keep `tests/pipeline/test_render_order.py`'s frame and audio checks passing.
+- **Ranges checked first:** before ffmpeg starts, each clip is checked against the video stream, in frames.
+  - **Refused, with a one-line error,** is a clip that:
+    - starts before the file;
+    - is shorter than a frame;
+    - lies entirely before the picture's first frame, or starts at or after its end (half a frame before it). A dissolve into a clip
+      with no picture made ffmpeg wait forever.
+    - would be left shorter than its own transition by the trim below.
+  - **Rendered with a warning** is an in-point before the first frame, or an out-point past the last, when the clip overlaps the picture.
+    It is rendered from the first frame or to the last. Older workspaces' shots spanned the container, whose audio can start before or run
+    on after the picture.
+    - The stage, its exports and its report keep the original points, so the render can be shorter than they say.
+    - The warning in the log is the only place this is reported.
+  - **Where the picture's extent comes from:**
+    - MP4/MOV/MPEG-TS: the video stream's start and duration (or frame count), measured from the start of the file. The container's end
+      is not used.
+    - Matroska/WebM, which record no stream duration: the stream's `DURATION` tag, taken as the stream's end time, with a millisecond
+      of slack. Files written by `mkvmerge` may store it differently; that is unverified.
+    - A file with neither: the container's end, used only to refuse clips that start past it.
+- **Shot detection:** when the container runs more than a frame past the picture, the last shot ends where the picture ends, so new runs
+  do not produce such clips. A tail within a frame leaves shots as they were.
+- **Tested on:** ffmpeg 6.1, plus a stand-in for ffmpeg 9's graph-file option. ffmpeg 7 adds threads per input.
+
 ## Music
 
 `--music track.mp3` (config section `music`) adds a prerecorded track:
@@ -143,7 +213,7 @@ and every decision each pass made.
 
 A dissolve starts on the beat: the cut point the pass aligns is where the
 incoming clip begins fading in (the render starts a dissolve `duration`
-seconds before the junction). Tempo is assumed constant across the track.
+seconds before the junction, rounded to whole frames over the running total as above). Tempo is assumed constant across the track.
 
 ## Events and checkpoints
 

@@ -100,6 +100,64 @@ def probe(path: str) -> MediaInfo:
     )
 
 
+@dataclass(frozen=True)
+class VideoExtent:
+    """Where the first video stream lies, in seconds from the start of the file (the time matchcut's timelines count in).
+
+    ``exact`` says ``end`` is the video stream's own end (its duration, frame count, or Matroska DURATION tag); when no stream length is
+    recorded, ``end`` is the container's end, an upper bound (the audio can run on past the picture).  ``container_end`` is the file's end."""
+
+    start: float
+    end: float
+    container_end: Optional[float]
+    exact: bool
+    slack: float = 0.0  # seconds the recorded end may be off by (a Matroska DURATION tag is written to the millisecond)
+
+
+def _tag_seconds(text: object) -> Optional[float]:
+    """A Matroska DURATION tag (``00:00:10.021000000``) in seconds."""
+    try:
+        h, m, sec = str(text).split(":")
+        return int(h) * 3600 + int(m) * 60 + float(sec)
+    except (ValueError, TypeError):
+        return None
+
+
+def video_extent(path: str) -> Optional[VideoExtent]:
+    """The first video stream's extent (``VideoExtent``), or None when ffprobe finds no video stream or no length at all."""
+    ffprobe = _require("ffprobe")
+    proc = run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=start_time,duration,nb_frames,avg_frame_rate:stream_tags=DURATION:format=start_time,duration",
+                "-of", "json", str(path)])
+    data = json.loads(proc.stdout.decode("utf-8"))
+    streams, fmt = data.get("streams") or [], data.get("format") or {}
+    if not streams:
+        return None
+    v = streams[0]
+
+    def num(x: object) -> Optional[float]:
+        try:
+            return float(x)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    origin = num(fmt.get("start_time")) or 0.0
+    stream_start = num(v.get("start_time"))
+    start = (stream_start if stream_start is not None else origin) - origin
+    container = num(fmt.get("duration"))
+    length = num(v.get("duration"))
+    if length is None:
+        frames, rate = num(v.get("nb_frames")), _parse_rate(v.get("avg_frame_rate") or "0")
+        length = frames / rate if frames and rate > 0 else None
+    if length is not None:
+        return VideoExtent(start, start + length, container, True)
+    tag = _tag_seconds((v.get("tags") or {}).get("DURATION"))
+    if tag is not None:  # Matroska/WebM: the stream's end time, counted like the file's timestamps
+        return VideoExtent(start, tag - origin, container, True, 0.0011)
+    if container is not None:
+        return VideoExtent(start, container, container, False)
+    return None
+
+
 def iter_frames(
     path: str,
     fps: float,
