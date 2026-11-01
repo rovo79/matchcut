@@ -47,6 +47,7 @@ from . import rules
 from . import session as S
 from .model import EditContext, Refused, Row, frame_rows, running_frames
 from .ops import MAX_FRAMES, beat_frame, find_junction, held_pins, pin_label
+from .ops import held_transition as held_of
 from .session import SessionError
 
 RENDER_VERSION = 2  # part of every render key: a change to how a file is made changes its name
@@ -273,8 +274,8 @@ def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> Li
             entry.update(held=True, state="held", reason="", junction=ids[site], n=site + 1,
                          clips=[tl.clips[site].id, tl.clips[site + 1].id], transition=now, transition_mismatch=mismatch)
             if mismatch:
-                entry["reason"] = (f"the pin holds a {_text(pin.held_transition)}, the junction has a {_text(now)}: the rules keep the "
-                                   f"junction's transition as it is (set the protection again with pin_transition to hold it)")
+                cur = (now["kind"], now["frames"])
+                entry["reason"] = rules.mismatch_repair(pin, site + 1, cur, held_of(pin, cur))
         else:
             d = pin_outcome(tl, pin, HUMAN_STAGE)
             if d is None:  # (a pipeline run would apply it, and make this session and a published edit stage stale)
@@ -345,8 +346,9 @@ def _music_beats(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]
 
 def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
     """The cut of revision ``rev`` (default: the head), in frames at the source's exact rate: the session (head, staleness), its clips,
-    junctions (with their protections), shots and their use, story beats, music beats (beat offsets per junction, with music), and every
-    editor pin (held or not, the transition it protects and whether the junction's transition still matches it)."""
+    junctions (with their protections), shots and their use, story beats, music beats (beat offsets per junction, with music), every
+    editor pin (held or not, the transition it protects and whether the junction's transition still matches it) and the
+    ``transition_mismatches`` (``rules.transition_mismatches``, each with how to resolve it)."""
     ws = Path(ws)
     with _reading(ws, rev) as (s, rid, tl):
         why = s.stale()
@@ -367,8 +369,12 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         j["transition_mismatch"] = False
         if p is not None:
             prot.append(f"editor pin {p['pin']}: its clips stay adjacent with both cut points")
-            if p["hold_transition"]:
+            if p["hold_transition"] and p["transition_mismatch"]:
+                prot.append(f"editor pin {p['pin']}: its transition stays as it is ({_text(j['transition'])}) or becomes the "
+                            f"{_text(p['held_transition'])} the pin holds")
+            elif p["hold_transition"]:
                 prot.append(f"editor pin {p['pin']}: its transition stays as it is ({_text(j['transition'])})")
+            if p["hold_transition"]:
                 j["held_transition"] = p["held_transition"]
                 j["transition_mismatch"] = p["transition_mismatch"]
             protections.append({"n": i + 1, "junction": j["id"], "kind": "pin", "pin": p["pin"], "transition": bool(p["hold_transition"]),
@@ -401,6 +407,7 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         "music": _music_beats(tl, rows, ctx, ids),
         "pins": pins,
         "protections": protections,
+        "transition_mismatches": rules.transition_mismatches(tl, ctx),
     }
 
 
@@ -703,9 +710,8 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 if now is not None and held != now:
                     raise SessionError(
                         f"pin {pin_label(target)} is held at junction {junction_ids(head)[site]} of the head revision {s.head}, where the "
-                        f"transition is a {_text(now)}: the rules keep a protected junction's transition as it is, so a {_text(held)} "
-                        f"could never be reached there.  Omit kind and frames to protect the {_text(now)}, or change the transition first "
-                        "(propose and apply set_transition), then protect it")
+                        f"transition is a {_text(now)}: kind and frames are for a pin the head does not hold.  Omit kind and frames to "
+                        f"protect the {_text(now)}, or change the transition first (propose and apply set_transition), then protect it")
             new = dataclasses.replace(target, hold_transition=True, held_transition=held)
         else:
             new = dataclasses.replace(target, hold_transition=False, held_transition=None)

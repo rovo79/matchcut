@@ -169,6 +169,41 @@ def pin_label(pin: Pin) -> str:
     return f"s{pin.out_shot}->s{pin.in_shot}"
 
 
+Tr = Tuple[str, int]  # a junction's transition: (kind, frames), ("cut", 0) for a cut
+
+
+def as_transition(kind: Any, frames: Any) -> Tr:
+    """(kind, whole frames), with a transition of no frames read as ("cut", 0)."""
+    n = int(frames or 0)
+    return ("cut", 0) if not n else (str(kind), n)
+
+
+def held_transition(pin: Pin, current: Tr) -> Tr:
+    """The transition a protecting pin holds: its stored ``held_transition``, else (none stored) ``current``, the junction's transition in
+    the timeline the pin is checked against."""
+    h = pin.held_transition
+    return as_transition(h.get("kind"), h.get("frames")) if isinstance(h, dict) else as_transition(*current)
+
+
+def protected_transition_change(pin: Pin, was: Tr, now: Tr) -> Optional[str]:
+    """Whether the change of a junction's transition from ``was`` to ``now`` is refused at an editor pin that holds that junction; one line
+    when it is, None when it is allowed.  The one rule ``ops`` (``set_transition``), ``rules.pin_problems`` (every proposal) and ``publish``
+    (``was`` is then r000's) share.
+
+    Only a new or worse violation counts (decision 2): an unprotected pin allows any change; a protected one (``hold_transition``) allows
+    the transition to stay as it was, or to become exactly the transition the pin holds (a repair, when the two differ, e.g. a protection
+    set with an explicit transition, or a session restarted on a stage the pipeline built ignoring the protection).  Any other change is
+    refused."""
+    was, now = as_transition(*was), as_transition(*now)
+    if not pin.hold_transition or now == was:
+        return None
+    held = held_transition(pin, was)
+    if now == held:
+        return None
+    line = f"changes the transition the editor pin {pin_label(pin)} protects ({_label(*was)} -> {_label(*now)})"
+    return line if held == was else line[:-1] + f"; the pin holds a {_label(*held)}, the only other transition allowed there)"
+
+
 # ----------------------------------------------------------------------------------------------- helpers
 def _frames(ctx: EditContext, c: Clip) -> Tuple[int, int]:
     return ctx.f(c.source_in), ctx.f(c.source_out)
@@ -253,6 +288,10 @@ def _first_is_cut(tl: Timeline) -> Set[str]:
 
 def _label(kind: str, frames: int) -> str:
     return "cut" if not frames else f"{kind} {frames}f"
+
+
+def _repair_args(t: Tr) -> str:
+    return 'kind "cut"' if not t[1] else f'kind "{t[0]}", frames {t[1]}'
 
 
 def transition_limit(ctx: EditContext, a_frames: int, b_frames: int) -> Fraction:
@@ -360,8 +399,8 @@ def _move(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str],
 
 def _set_transition(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple[Set[str], str]:
     """Make a junction a cut, or a dissolve / dip to black of ``frames``.  A match cut stays a hard cut; a transition an editor pin protects
-    (``hold_transition``) stays; the length is at most ``max_fraction_of_clip`` of the shorter clip (one already over it may only get
-    shorter)."""
+    (``hold_transition``) stays, or becomes exactly the one the pin holds (``protected_transition_change``); the length is at most
+    ``max_fraction_of_clip`` of the shorter clip (one already over it may only get shorter)."""
     j = find_junction(tl, _ref(op, "junction"))
     kind = _ref(op, "kind")
     if kind not in TRANSITION_KINDS:
@@ -383,8 +422,11 @@ def _set_transition(tl: Timeline, op: Dict[str, Any], ctx: EditContext) -> Tuple
     if n and is_match_cut(a, b):
         raise Refused(f"junction {j + 1} ({a.id}|{b.id}) is a match cut: match cuts stay hard cuts")
     for pin, site in held_pins(tl, ctx):
-        if site == j and pin.hold_transition:
-            raise Refused(f"the transition at junction {j + 1} ({a.id}|{b.id}) is protected by the editor pin {pin_label(pin)}")
+        if site == j and protected_transition_change(pin, cur, new) is not None:
+            held = held_transition(pin, cur)
+            only = (f": it holds the {_label(*held)} there now" if held == cur else
+                    f": it holds a {_label(*held)}, so only set_transition to that ({_repair_args(held)}) is allowed there")
+            raise Refused(f"the transition at junction {j + 1} ({a.id}|{b.id}) is protected by the editor pin {pin_label(pin)}{only}")
     limit = transition_limit(ctx, rows[j].length, rows[j + 1].length)
     if n > limit and n > cur[1]:
         raise Refused(f"a {n}-frame {kind} at junction {j + 1} ({a.id}|{b.id}) is longer than {float(ctx.max_fraction):.0%} of the shorter clip "

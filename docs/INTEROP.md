@@ -374,8 +374,12 @@ In a workspace that has never had an edit stage (no `edit.json`, no `edit-*.json
 before: no `--base` is needed, and a title such as `Interview - edit` names no stage. Once any edit stage or edit snapshot exists, a
 fingerprint-less file needs `--stage` and `--base`. `--base NAME` (a snapshot's name, `<stage>-<12 hex>[.json]`) is looked up in
 `exports/.stages` first; the path recorded in `human_import.json` is absolute; a snapshot whose content does not hash to the 12 hex digits in
-its name is refused as damaged. `import` holds the workspace's stage lock (`WS/.stage.lock`) while it reads `edit.json` and writes the human
-stage, and a publish holds it while it writes the edit stage.
+its name is refused as damaged. Any other relative `--base` is looked for in the current directory, then in `exports/.stages`. When the
+workspace's only edit stage is stale, the refusal of a fingerprint-less file says so and gives a working example
+(`--stage final --base WS/final.json`, with the workspace's real path). `import` holds the workspace's stage lock (`WS/.stage.lock`)
+exclusively while it reads `edit.json` and writes the human stage, a publish holds it exclusively while it writes the edit stage, and an
+export holds it shared while it reads the stages; each waits at most 30 seconds (`STAGE_LOCK_TIMEOUT`), then refuses: `another import or
+publish (or an export) is running`. Export never takes an edit session's lock, so none of them can deadlock.
 
 **The human stage made from an edit import** records `stage: "edit"`, `stage_file: "edit.json"` and its sha256 now, the snapshot used
 (`base_snapshot`, `base_snapshot_sha256`), the latest canonical stage and its sha256, and `history_stage: "edit"` with the sha256 of

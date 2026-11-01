@@ -381,6 +381,25 @@ def test_an_edl_without_its_matchcut_comments_is_refused_once_there_is_an_edit_s
     assert res.stage == "edit" and res.decisions == []
 
 
+def test_a_file_without_a_fingerprint_beside_a_stale_edit_stage_is_refused_with_a_working_example(make_ws, tmp_path, monkeypatch):
+    """Only a stale edit.json: the refusal says the edit stage is stale (why the base is ambiguous), gives a --base that works, with the
+    workspace's real path, and says how a relative --base is resolved."""
+    x = published(make_ws)
+    export_workspace(x.ws, x.cfg, stages=("final",))
+    edl = (x.ws / "exports" / "final.edl").read_text()
+    stripped = tmp_path / "stripped.edl"
+    stripped.write_text("\n".join(ln for ln in edl.splitlines() if not ln.lstrip().startswith("* MATCHCUT")) + "\n")
+    (x.ws / "edit_publish.json").write_text("[]")  # the edit stage is stale now
+    msg = unchanged_on_refusal(x.ws, lambda: import_timeline(x.ws, x.cfg, stripped))
+    assert msg.startswith("stripped.edl carries no stage fingerprint, and this workspace has an edit stage that is stale (edit.json is "
+                          "stale: edit_publish.json is missing or unreadable) as well as final: the file may have been exported from either, "
+                          "so the base is ambiguous")
+    example = f"--stage final --base {x.ws / 'final.json'}"
+    assert example in msg and "current directory, then in exports/.stages" in msg
+    res = import_timeline(x.ws, x.cfg, stripped, stage="final", base=str(x.ws / "final.json"))  # the example works
+    assert res.stage == "final" and res.decisions == []
+
+
 @pytest.mark.parametrize("title", ["Interview - edit", "edit"])
 def test_without_an_edit_stage_a_title_naming_edit_imports_as_before(make_ws, tmp_path, title):
     """A workspace that never had an edit stage: an EDL titled "... - edit" with its comments dropped is read against final, with the note,

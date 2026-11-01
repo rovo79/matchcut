@@ -604,7 +604,9 @@ def _read_base(path: Path, ctx: EditContext) -> Tuple[str, Timeline, List[str]]:
 # ----------------------------------------------------------------------------------------------- commands
 def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
     """Start a session on ``stage`` (default: the latest canonical stage; ``edit`` is never a base) and return its summary, with
-    ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish).
+    ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish) and
+    ``transition_mismatches`` (``rules.transition_mismatches``: every protected pin r000 holds whose junction's transition is not the one
+    the pin holds, with how to resolve it).
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -648,7 +650,8 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
         _save_state(d, state)
     blocker = publish_blocker(ws, name)
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
-            "moved_aside": moved.name if moved is not None else None, "can_publish": blocker is None, "publish_blocker": blocker}
+            "moved_aside": moved.name if moved is not None else None, "can_publish": blocker is None, "publish_blocker": blocker,
+            "transition_mismatches": rules.transition_mismatches(r000, ctx)}
 
 
 def _change_decision(line: str, before: Timeline, after: Timeline) -> Decision:

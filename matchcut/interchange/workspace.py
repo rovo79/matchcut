@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -39,8 +40,8 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
 from matchcut.pipeline.editorial import Pin, pin_change
 from matchcut.pipeline.media import MediaError, probe as probe_media
-from matchcut.pipeline.junctions import (EDIT_FILE, Junction, build_junctions, load_stage_timelines, scorer_for_workspace, stale_edit,
-                                       stale_human, stage_timeline_paths)
+from matchcut.pipeline.junctions import (EDIT_FILE, Junction, _edit_reason, build_junctions, load_stage_timelines, scorer_for_workspace,
+                                       stale_edit, stale_human, stage_timeline_paths)
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import EDIT_STAGE, Clip, Decision, Timeline, Transition, clip_origin
 
@@ -357,6 +358,16 @@ def _resolve_script_text(out: Path, stage: str, tl: Timeline, junctions: Sequenc
 
 def export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFAULT_STAGES, formats: Sequence[str] = FORMATS,
                      out_dir: Optional[Path] = None, resolve_script: bool = False) -> ExportResult:
+    """``_export_workspace`` under the workspace's stage lock, shared (``stage_lock``): a publish or an import never changes ``edit.json``
+    or ``human.json`` halfway through an export, and exports do not wait for one another.  It never takes an edit session's lock."""
+    if not Path(ws).is_dir():
+        return _export_workspace(ws, cfg, stages, formats, out_dir, resolve_script)
+    with stage_lock(ws, shared=True):
+        return _export_workspace(ws, cfg, stages, formats, out_dir, resolve_script)
+
+
+def _export_workspace(ws: Path, cfg: PipelineConfig, stages: Sequence[str] = DEFAULT_STAGES, formats: Sequence[str] = FORMATS,
+                      out_dir: Optional[Path] = None, resolve_script: bool = False) -> ExportResult:
     """Write the interchange files of ``stages`` in ``formats`` (default ``<ws>/exports``), validate each by reading it back, write the
     reports, and fail with a one-line ``InterchangeError`` if any export does not match its canonical stage (after the reports exist).
 
@@ -790,14 +801,36 @@ def _name_stage(name: str, names: Sequence[str]) -> str:
     return ""
 
 
+STAGE_LOCK_TIMEOUT = 30.0  # seconds a stage_lock waits for another holder before it refuses (an import, a publish or an export running)
+STAGE_LOCK_POLL = 0.05  # seconds between two tries
+
+
 @contextlib.contextmanager
-def stage_lock(ws: Path) -> Iterator[None]:
-    """Hold an exclusive ``flock`` on ``WS/.stage.lock`` for the block.  ``import_timeline`` holds it while it reads ``edit.json`` and its
-    record and writes ``human.json``; ``matchcut.edit``'s publish holds it (inside the session lock, which import never takes) while it
-    writes the edit stage, so neither sees the other half done.  One lock, always taken last: no deadlock."""
-    fd = os.open(Path(ws) / STAGE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+def stage_lock(ws: Path, shared: bool = False, timeout: Optional[float] = None,
+               error: type = InterchangeError) -> Iterator[None]:
+    """Hold an ``flock`` on ``WS/.stage.lock`` for the block: exclusive, or ``shared`` for a reader.
+
+    ``import_timeline`` holds it exclusively while it reads ``edit.json`` and its record and writes ``human.json``; ``matchcut.edit``'s
+    publish holds it exclusively (inside the session lock, which neither import nor export takes) while it writes the edit stage;
+    ``export_workspace`` holds it shared while it reads the stages, so none of them sees another half done.  Each takes this one lock last
+    and holds no other stage lock: no deadlock.
+
+    The wait is bounded: the lock is polled (``LOCK_NB``) for up to ``timeout`` seconds (default ``STAGE_LOCK_TIMEOUT``), then ``error``
+    (``InterchangeError``; publish passes its own refusal) is raised, saying another import or publish is running."""
+    path = Path(ws) / STAGE_LOCK
+    wait = STAGE_LOCK_TIMEOUT if timeout is None else max(0.0, float(timeout))
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise error(f"another import or publish (or an export) is running in {ws}: {STAGE_LOCK} was still held after "
+                                f"{wait:g} s; try again once it has finished") from None
+                time.sleep(STAGE_LOCK_POLL)
         yield
     finally:
         os.close(fd)
@@ -996,6 +1029,16 @@ def _import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[st
     else:  # an edit stage is in play: the base is what the fingerprint names, exactly, or nothing
         fix = "name the base with --stage and --base SNAPSHOT (a file in exports/.stages)"
         if not fingerprint:
+            stale = _edit_reason(ws)
+            if stale:  # (the reason it is ambiguous: the editor may have exported the edit stage before it went stale, or the canonical one)
+                example = _stage_file(ws, names[-1])
+                raise InterchangeError(
+                    f"{path.name} carries no stage fingerprint, and this workspace has an edit stage that is stale ({stale}) as well as "
+                    f"{names[-1]}: the file may have been exported from either, so the base is ambiguous; name it with --stage and --base, "
+                    f"e.g. --stage {names[-1]} --base {example} for a file exported from {names[-1]} as it is now, or --stage edit --base "
+                    f"edit-<12 hex> for one exported from the edit stage (a snapshot in exports/{SNAPSHOT_DIR}).  A relative --base is looked "
+                    f"for in the current directory, then in exports/{SNAPSHOT_DIR} (a snapshot's name, such as edit-<12 hex>, in "
+                    f"exports/{SNAPSHOT_DIR} first)")
             raise InterchangeError(f"{path.name} carries no stage fingerprint, and this workspace has {has_edit} as well as {names[-1]}: "
                                    f"the base is ambiguous; {fix}")
         target = stage or claimed

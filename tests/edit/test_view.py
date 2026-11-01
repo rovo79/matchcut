@@ -154,10 +154,14 @@ def test_inspect_shows_a_held_transition_that_differs_from_the_junctions(make_ws
     d = V.inspect(w)
     p = next(x for x in d["pins"] if x["pin"] == "s0->s1")
     assert p["hold_transition"] and p["held_transition"] == {"kind": "dissolve", "frames": 6} and p["transition"] == {"kind": "cut", "frames": 0}
-    assert p["transition_mismatch"] and "holds a dissolve of 6 frames" in p["reason"]
+    assert p["transition_mismatch"] and "holds a dissolve 6f but junction 1 has a cut" in p["reason"]
+    assert '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}' in p["reason"] and "pin_transition" in p["reason"]
     j = d["junctions"][0]
     assert j["hold_transition"] and j["held_transition"] == {"kind": "dissolve", "frames": 6} and j["transition_mismatch"]
-    assert j["protection"][1] == "editor pin s0->s1: its transition stays as it is (cut)"
+    assert j["protection"][1] == "editor pin s0->s1: its transition stays as it is (cut) or becomes the dissolve of 6 frames the pin holds"
+    assert [(m["pin"], m["n"], m["held_transition"], m["transition"]) for m in d["transition_mismatches"]] == [
+        ("s0->s1", 1, {"kind": "dissolve", "frames": 6}, {"kind": "cut", "frames": 0})]
+    assert d["transition_mismatches"][0]["repair"] == p["reason"]
     assert d["protections"][0]["transition"] and d["protections"][0]["transition_mismatch"]
     assert not V.inspect(w, "r001")["junctions"][0]["transition_mismatch"]
     V.pin_transition(w, pin="s0->s1")  # the head's transition: no mismatch any more
@@ -230,13 +234,13 @@ def test_pin_transition_by_junction_and_explicit_transitions(make_ws):
 
 
 def test_pin_transition_refuses_a_transition_the_head_does_not_have_at_a_held_pin(make_ws):
-    """Review fix: the rules keep a protected junction's transition as it is, so holding another one there could never be satisfied."""
+    """At a pin the head holds, the protection is the head's transition: kind and frames are for a pin the head does not hold."""
     w = pinned(make_ws)
     S.start(w)
     before = (w / "editorial.json").read_bytes()
     for kind, frames in (("dissolve", 6), ("dip_to_black", 4)):
         with pytest.raises(S.SessionError, match=r"pin s0->s1 is held at junction s0-s1 of the head revision r000, where the transition is "
-                                                 r"a cut: .*could never be reached there.*Omit kind and frames"):
+                                                 r"a cut: kind and frames are for a pin the head does not hold.*Omit kind and frames"):
             V.pin_transition(w, pin="s0->s1", kind=kind, frames=frames)
     assert (w / "editorial.json").read_bytes() == before
     p = S.propose(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}])

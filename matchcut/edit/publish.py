@@ -9,9 +9,15 @@
   it is fresh (``junctions.stale_edit``);
 - ``WS/edit_publish.json`` (``matchcut.edit_publish/1``): the session id, the revision and its timeline sha256, the sha256 of
   ``edit.json``, the base stage and its sha256 when the session started, the latest canonical stage and its sha256, the time, the number
-  of agent decisions and the published copy's path; a copy of every record is kept in ``edits/published/records/``;
-- one line in ``WS/edits/published/log.jsonl`` (append-only): when the copy went live, from which session and revision, its sha256, and
-  whether an edit stage was replaced or a human stage superseded.
+  of agent decisions and the published copy's path; a copy of every record is kept in ``edits/published/records/``
+  (``<UTC second>-<nnn>-<rev>-<sha12>.json``, ``nnn`` counting within the second, so the names sort in the order they were written);
+- one line in ``WS/edits/published/log.jsonl`` (append-only): when the copy went live, from which session and revision, its sha256, the
+  revision published before (``previous``), one whose interrupted publish this completes (``recovered``), and whether an edit stage was
+  replaced or a human stage superseded.
+
+They are written in that order, except that the log line goes just before ``edit_publish.json``: a crash between the two leaves a log line
+(and a live ``edit.json``) without its record, which the session's next publish recovers and logs again; a record is never written without
+its log line.
 
 It never writes ``final.json``, a pass file, ``human.json`` or ``human_import.json``.
 
@@ -19,15 +25,17 @@ It never writes ``final.json``, a pass file, ``human.json`` or ``human_import.js
 frames, with no agent edit, so there is nothing to publish (even when the frame normalisation moved a point, that is not an edit).  The
 session must be based on the **latest canonical stage** (``session.publish_blocker``): the edit stage's history is that stage's history
 plus one ``agent`` decision per change, and a session's revisions carry their base's history.  The revision must still hold every editor
-pin the base holds under the pins stored **now** (clips, adjacency, cut points, and a protected transition): a pin added or changed since
-the revision was made is checked here, and a revision that does not hold it is refused (propose again, or release the pin).
+pin the base holds under the pins stored **now** (clips, adjacency, cut points, and a protected transition: r000's, or exactly the one the
+pin holds, as ``rules.pin_problems`` checks every proposal): a pin added or changed since the revision was made is checked here, and a
+revision that does not hold it is refused (propose again, or release the pin).
 
 **Never a silent overwrite.**  Publishing again from the same session replaces ``edit.json`` (the earlier copy stays in
 ``edits/published/``).  An ``edit.json`` published by another session, or one without a readable record that describes it (a record of
 another file, a hand edit), is refused unless ``replace``: then the old pair (``edit.json``, ``edit_publish.json`` when there is one) is first
 moved to ``WS/edits/replaced/<sha12 of the old edit.json>/`` (``-2``, ``-3`` ... when that exists).  A publish cut short after ``edit.json``
 was written (its record not yet) is recognised: ``edit.json`` is then byte for byte what this session publishes for one of its revisions,
-and the next publish from the session goes ahead.  A record left without its ``edit.json`` is archived in ``edits/replaced/`` before a new
+and the next publish from the session goes ahead (``recovered`` names that revision; ``previous`` the one the old record names, when it
+is readable and this session's).  A record left without its ``edit.json`` is archived in ``edits/replaced/`` before a new
 one is written.  Nothing is ever deleted.
 
 **The human stage.**  A fresh ``human.json`` (an editor's re-export) is the latest stage.  A publish that would leave it out of the stage
@@ -37,10 +45,10 @@ when ``edit.json`` changes) is refused unless ``supersede_human``; the result th
 """
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -52,7 +60,7 @@ from matchcut.pipeline.timeline import AGENT_PASS, EDIT_STAGE, Timeline
 from . import rules
 from . import session as S
 from .model import EditContext, frame_rows
-from .ops import held_pins, pin_label
+from .ops import pin_label
 from .session import SessionError
 
 PUBLISHED_DIR = "published"
@@ -140,23 +148,11 @@ def _interrupted_publish(s: S.Session, d: Path, data: bytes) -> Optional[str]:
 
 
 def _pin_problems(base: Timeline, tl: Timeline, ctx: EditContext) -> List[Tuple[str, str]]:
-    """What ``tl`` breaks of the pins stored now that ``base`` (r000) holds: their clips, adjacency and cut points (``rules.pin_problems``,
-    the rule every proposal is checked with), and a protected transition: the ``held_transition`` the pin stores (else the base's)."""
-    plain = dataclasses.replace(ctx, pins=tuple(dataclasses.replace(p, hold_transition=False, held_transition=None) for p in ctx.pins))
-    out = [(pin_label(p), line) for p, line in rules.pin_problems(base, tl, plain)]
-    rows_b, rows_t = frame_rows(base, ctx.rate), frame_rows(tl, ctx.rate)
-    sites = {id(p): site for p, site in held_pins(tl, ctx)}
-    for pin, site in held_pins(base, ctx):
-        k = sites.get(id(pin))
-        if not pin.hold_transition or k is None:
-            continue
-        want = pin.held_transition or {"kind": rows_b[site + 1].kind, "frames": rows_b[site + 1].tr}
-        now = {"kind": rows_t[k + 1].kind if rows_t[k + 1].tr else "cut", "frames": rows_t[k + 1].tr}
-        wanted = {"kind": want.get("kind") if want.get("frames") else "cut", "frames": int(want.get("frames") or 0)}
-        if now != wanted:
-            out.append((pin_label(pin), f"changes the transition the editor pin {pin_label(pin)} protects ({rules._label(wanted['kind'], wanted['frames'])} -> "
-                       f"{rules._label(now['kind'], now['frames'])})"))
-    return out
+    """What ``tl`` breaks of the pins stored now that ``base`` (r000) holds: their clips, adjacency and cut points, and a protected
+    transition, which must be r000's or exactly the one the pin holds (an untouched mismatch publishes; a repair too).  It is
+    ``rules.pin_problems``, the rule every proposal is checked with, applied from r000: one function, so publish never refuses what the
+    proposals could not avoid."""
+    return [(pin_label(p), line) for p, line in rules.pin_problems(base, tl, ctx)]
 
 
 def _pin_states(ws: Path, tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
@@ -212,11 +208,12 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             ctx: Optional[EditContext] = None) -> Dict[str, Any]:
     """Publish revision ``rev`` (default: the head) of the workspace's session as the ``edit`` stage; returns the record written, plus
     ``replaced`` (where an earlier edit stage was moved, or None), ``previous`` (the revision the session published before, or None),
+    ``recovered`` (the revision whose publish this one completes, when an earlier publish was cut short before its record, or None),
     ``human_left_out`` (why a human stage this publish superseded is left out, or None) and ``pins`` (every stored pin and where it stands
     in the published cut)."""
     ws = Path(ws)
     rid = None if rev is None else S.check_revision_id(rev)
-    with S._locked(ws) as d, stage_lock(ws):
+    with S._locked(ws) as d, stage_lock(ws, error=SessionError):
         s = S._fresh(ws, ctx)
         rid = rid or s.head
         if not (s.dir / "revisions" / f"{rid}.json").exists():
@@ -253,6 +250,7 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         edit_path, record_path = ws / EDIT_FILE, ws / EDIT_RECORD
         moved: Optional[Path] = None
         previous: Optional[str] = None
+        recovered: Optional[str] = None
         if edit_path.exists():
             current = edit_path.read_bytes()
             old_sha = _sha256(current)
@@ -260,7 +258,9 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             if old is not None and old.get("edit_sha256") == old_sha and old.get("session") == s.session_id:
                 previous = str(old.get("revision") or "") or None
             elif (old is None or old.get("edit_sha256") != old_sha) and (recovered := _interrupted_publish(s, d, current)) is not None:
-                previous = recovered  # this session's own publish, cut short before its record was written
+                # this session's own publish, cut short before its record was written: the revision published before is the one the old
+                # record names (when it is readable and this session's), never the interrupted one
+                previous = (str(old.get("revision") or "") or None) if old is not None and old.get("session") == s.session_id else None
             elif not replace:
                 if old is None:
                     why = f"{EDIT_FILE} has no readable {EDIT_RECORD} (an interrupted publish?)"
@@ -290,14 +290,18 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         text = json.dumps(record, indent=2) + "\n"
         stamp = record["published_at"].replace(":", "").replace("-", "").replace("+0000", "Z")
         records = d / PUBLISHED_DIR / RECORDS_DIR
-        name, n = f"{stamp}-{rid}-{sha[:12]}", 2
-        while (records / f"{name}.json").exists():
-            name, n = f"{stamp}-{rid}-{sha[:12]}-{n}", n + 1
+        # <stamp>-<nnn>-<rev>-<sha12>: a counter within the second, so the copies sort in the order they were written
+        within = re.compile(rf"{re.escape(stamp)}-([0-9]{{3,}})-")
+        same_second = [int(m.group(1)) for f in records.glob(f"{stamp}-*.json") if (m := within.match(f.name))]
+        name = f"{stamp}-{max(same_second, default=0) + 1:03d}-{rid}-{sha[:12]}"
         _write_once(records / f"{name}.json", text.encode("utf-8"), f"edits/{PUBLISHED_DIR}/{RECORDS_DIR}/")
-        S._atomic_write(record_path, text)
-        left_out = stale_human(ws) if superseded else None
+        # the log line goes before the record replace: a crash between the two leaves a line for a publish whose edit.json is live but
+        # whose record is missing (the session's next publish recovers it, logging it again with "recovered"), never a record without one
         _log(d, {"published_at": record["published_at"], "session": s.session_id, "revision": rid, "edit_sha256": sha,
                  "published": record["published"], "replaced": record.get("replaced"), "superseded_human": bool(superseded),
-                 "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous})
+                 "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous, "recovered": recovered})
+        S._atomic_write(record_path, text)
+        left_out = stale_human(ws) if superseded else None
         pins = _pin_states(ws, tl, context)
-    return dict(record, replaced=_rel(ws, moved) if moved is not None else None, previous=previous, human_left_out=left_out, pins=pins)
+    return dict(record, replaced=_rel(ws, moved) if moved is not None else None, previous=previous, recovered=recovered,
+                human_left_out=left_out, pins=pins)

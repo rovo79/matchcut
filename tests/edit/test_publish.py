@@ -209,7 +209,7 @@ def test_the_edit_stage_is_never_a_session_base(ws):
     edit(ws, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
     P.publish(ws)
     assert stages(ws)[-1] == "edit"
-    out = S.start(ws, restart=True)  # the default base: the latest fresh stage but edit
+    out = S.start(ws, restart=True)  # the default base: the latest canonical stage
     assert out["base_stage"] == "final"
     with pytest.raises(Refused, match="the edit stage cannot be a session's base"):
         S.start(ws, stage="edit", restart=True)

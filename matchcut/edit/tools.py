@@ -210,9 +210,10 @@ def _pin(ws: Path, a: Dict[str, Any]) -> Dict[str, Any]:
 
 
 TOOLS: List[Tool] = [
-    Tool("start", "Start an edit session on a stage (default: the latest fresh stage but edit, which is never a base); r000 is that stage on "
-                  "whole frames. Only a session on the latest canonical stage (final) can publish. A stale session is moved aside; a fresh "
-                  "one only with restart.",
+    Tool("start", "Start an edit session on a stage (default: the latest canonical stage; human or an earlier one by name; never edit); "
+                  "r000 is that stage on whole frames. Only a session on the latest canonical stage can publish. A stale session is moved "
+                  "aside; a fresh one only with restart. transition_mismatches: protected pins whose transition differs from the held one, "
+                  "with the fix.",
          _obj({"stage": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,40}$", "description": "a stage name (roughcut, final, human ...)"},
                "restart": {"type": "boolean"}}),
          _start),

@@ -207,7 +207,10 @@ def test_a_publish_cut_short_before_its_record_recovers_from_the_same_session(ma
     monkeypatch.setattr(os, "replace", real)
     assert stale_edit(w).startswith("edit.json is stale: it is not the file edit_publish.json describes")
     out = P.publish(w)  # the same session: edit.json is byte for byte its publish of r002
-    assert out["previous"] == r2 and out["replaced"] is None and stale_edit(w) is None
+    # previous: the revision the old record names (r001), not the interrupted one, which is "recovered"
+    assert out["previous"] == "r001" and out["recovered"] == r2 and out["replaced"] is None and stale_edit(w) is None
+    log = [json.loads(x) for x in (w / "edits" / "published" / "log.jsonl").read_text().splitlines()]
+    assert [(e["revision"], e["previous"], e["recovered"]) for e in log] == [("r001", None, None), (r2, "r001", None), (r2, "r001", r2)]
     # another session meeting such an edit.json is told it may be an interrupted publish
     real = flaky(monkeypatch, "replace", lambda a, b: b.endswith("/edit_publish.json"))
     edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 1}])
@@ -276,3 +279,209 @@ def test_the_stale_human_message_has_one_hint(make_ws):
     assert msg == ("human.json is stale: it was imported against the edit stage, and edit.json is stale: edit_publish.json is missing or "
                    f"unreadable {HINT}")
     assert msg.count("(") == 1
+
+
+def test_record_copies_made_in_the_same_second_sort_in_the_order_they_were_written(make_ws, monkeypatch):
+    w = make_ws()
+    S.start(w)
+    edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+    r2 = edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
+    monkeypatch.setattr(S, "_now", lambda: "2026-11-01T12:00:00+00:00")
+    order = [P.publish(w, r)["revision"] for r in (r2, "r001", r2)]
+    names = sorted(p.name for p in (w / "edits" / "published" / "records").iterdir())
+    assert [n.split("-")[2] for n in names] == order and [n.split("-")[1] for n in names] == ["001", "002", "003"]
+    assert all(n.startswith("20261101T120000Z-") for n in names)
+
+
+# ----------------------------------------------------------------------------------------------- the stage lock: bounded, shared for export
+HOLD = """
+import sys, time
+sys.path.insert(0, sys.argv[1])
+from matchcut.interchange.workspace import stage_lock
+with stage_lock(sys.argv[2], shared=sys.argv[3] == "shared"):
+    print("held", flush=True)
+    time.sleep(float(sys.argv[4]))
+"""
+
+
+@pytest.fixture
+def held_by_another_process():
+    import subprocess
+    import sys
+    procs = []
+
+    def hold(w: Path, mode: str = "exclusive", seconds: float = 20.0):
+        repo = str(Path(__file__).resolve().parents[2])
+        pr = subprocess.Popen([sys.executable, "-c", HOLD, repo, str(w), mode, str(seconds)], stdout=subprocess.PIPE, text=True)
+        assert pr.stdout.readline().strip() == "held"
+        procs.append(pr)
+        return pr
+    yield hold
+    for pr in procs:
+        pr.terminate()
+        pr.wait(30)
+
+
+def test_a_publish_gives_up_on_a_stage_lock_held_too_long_with_a_clear_refusal(make_ws, held_by_another_process, monkeypatch):
+    from matchcut.interchange import workspace as WSP
+    w = make_ws()
+    S.start(w)
+    edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+    held_by_another_process(w)
+    monkeypatch.setattr(WSP, "STAGE_LOCK_TIMEOUT", 0.5)
+    t0 = time.monotonic()
+    with pytest.raises(Refused, match=r"another import or publish \(or an export\) is running in .*\.stage\.lock was still held after "
+                                      r"0\.5 s; try again once it has finished"):
+        P.publish(w)
+    assert 0.4 < time.monotonic() - t0 < 10 and not (w / "edit.json").exists()
+    # an import too, as an InterchangeError
+    from matchcut.interchange import InterchangeError
+    cfg = PipelineConfig.load(w / "config.json")
+    with pytest.raises(InterchangeError, match="another import or publish"):
+        with stage_lock(w, timeout=0.2):
+            pass
+    assert not (w / "human.json").exists()
+    with pytest.raises(InterchangeError, match="another import or publish"):
+        export_workspace(w, cfg, stages=("final",), formats=("otio",))  # a shared lock waits for an exclusive holder too
+
+
+def test_exports_share_the_stage_lock_and_a_publish_waits_for_them(make_ws, held_by_another_process, monkeypatch):
+    from matchcut.interchange import workspace as WSP
+    w = make_ws()
+    S.start(w)
+    edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+    cfg = PipelineConfig.load(w / "config.json")
+    held_by_another_process(w, "shared")  # another export reading the stages
+    monkeypatch.setattr(WSP, "STAGE_LOCK_TIMEOUT", 0.5)
+    export_workspace(w, cfg, stages=("final",), formats=("otio",))  # shared with it: no wait
+    with pytest.raises(Refused, match="another import or publish"):
+        P.publish(w)  # exclusive: waits for the export, then gives up
+    assert not (w / "edit.json").exists()
+
+
+def test_a_publish_waits_for_an_export_then_goes_ahead(make_ws, held_by_another_process):
+    w = make_ws()
+    S.start(w)
+    edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
+    held_by_another_process(w, "shared", 1.5)
+    t0 = time.monotonic()
+    assert P.publish(w)["revision"] == "r001"
+    assert time.monotonic() - t0 > 1.0
+
+
+# ----------------------------------------------------------------------------------------------- I3b: a protected transition r000 lacks
+def mismatched_by_explicit_kind(w: Path) -> Pin:
+    """A protection set with an explicit transition while no session exists: final has a cut there, the pin holds a dissolve of 4."""
+    pin = pinned_final(w)
+    PinStore(w).put(pin)
+    out = V.pin_transition(w, pin="s0->s1", hold=True, kind="dissolve", frames=4)
+    assert out["held_transition"] == {"kind": "dissolve", "frames": 4} and out["junction"] is None
+    return pin
+
+
+def mismatched_by_restart(w: Path) -> Pin:
+    """The agent's own dissolve protected, then start --restart: r000 comes from final, built by the pipeline (which ignores the
+    protection), with a cut there."""
+    pin = pinned_final(w)
+    PinStore(w).put(pin)
+    S.start(w)
+    edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}])
+    assert V.pin_transition(w, pin="s0->s1", hold=True)["held_transition"] == {"kind": "dissolve", "frames": 4}
+    return pin
+
+
+MISMATCHES = [mismatched_by_explicit_kind, mismatched_by_restart]
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_start_and_inspect_flag_a_protected_transition_r000_lacks_and_say_how_to_resolve_it(make_ws, make_mismatch):
+    w = make_ws()
+    make_mismatch(w)
+    out = S.start(w, restart=True)
+    [m] = out["transition_mismatches"]
+    assert (m["pin"], m["n"], m["junction"], m["transition"], m["held_transition"]) == (
+        "s0->s1", 1, "s0-s1", {"kind": "cut", "frames": 0}, {"kind": "dissolve", "frames": 4})
+    assert '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}' in m["repair"]
+    assert 'pin_transition {"pin": "s0->s1", "hold": true}' in m["repair"]
+    d = V.inspect(w)
+    assert d["transition_mismatches"] == [m] and d["junctions"][0]["transition_mismatch"]
+    assert next(p for p in d["pins"] if p["pin"] == "s0->s1")["reason"] == m["repair"]
+    # the tool's result carries it too
+    assert T.call(w, "inspect", {})["transition_mismatches"] == [m]
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_the_held_transition_can_be_reached_and_published(make_ws, make_mismatch):
+    w = make_ws()
+    make_mismatch(w)
+    S.start(w, restart=True)
+    rid = edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}])  # the repair: the held transition
+    assert V.inspect(w)["transition_mismatches"] == []
+    out = P.publish(w)
+    assert out["revision"] == rid and [(p["pin"], p["state"]) for p in out["pins"]] == [("s0->s1", "held")]
+    assert Timeline.load(w / "edit.json").clips[1].transition_in.kind == "dissolve"
+    # once there, it stays: the protection holds the dissolve 4
+    with pytest.raises(Refused, match=r"protected by the editor pin s0->s1: it holds the dissolve 4f there now"):
+        S.propose(w, [{"op": "set_transition", "junction": 1, "kind": "cut"}])
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_an_untouched_mismatch_publishes(make_ws, make_mismatch):
+    w = make_ws()
+    make_mismatch(w)
+    S.start(w, restart=True)
+    rid = edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
+    assert P.publish(w)["revision"] == rid
+    assert Timeline.load(w / "edit.json").clips[1].transition_in.is_cut
+
+
+@pytest.mark.parametrize("make_mismatch", MISMATCHES)
+def test_another_transition_at_a_mismatched_protected_pin_is_refused_when_proposed(make_ws, make_mismatch):
+    w = make_ws()
+    make_mismatch(w)
+    S.start(w, restart=True)
+    for kind, frames in (("dissolve", 6), ("dip_to_black", 4)):
+        with pytest.raises(Refused, match=r"the transition at junction 1 \(c001\|c002\) is protected by the editor pin s0->s1: it holds a "
+                                          r'dissolve 4f, so only set_transition to that \(kind "dissolve", frames 4\) is allowed there'):
+            S.propose(w, [{"op": "set_transition", "junction": 1, "kind": kind, "frames": frames}])
+
+
+def test_the_rules_allow_only_the_held_transition_at_a_mismatched_protected_pin(make_ws):
+    """The rule on the whole proposal (whatever operation caused it), and the one publish applies from r000, are one function."""
+    from matchcut.edit import rules
+    from matchcut.pipeline.timeline import Transition
+    w = make_ws()
+    mismatched_by_explicit_kind(w)
+    S.start(w)
+    s = S.load(w)
+    base, ctx = s.timeline("r000"), s.context()
+    rate = ctx.rate
+
+    def at(kind, frames):
+        tl = base.copy()
+        tl.clips[1].transition_in = Transition(kind, float(frames / rate)) if frames else Transition()
+        return tl
+    assert rules.problems(base, at("dissolve", 4), {"c002"}, ctx) == []
+    assert rules.problems(base, at("dissolve", 6), {"c002"}, ctx) == [
+        "changes the transition the editor pin s0->s1 protects (cut -> dissolve 6f; the pin holds a dissolve 4f, the only other transition "
+        "allowed there)"]
+    assert rules.problems(at("dissolve", 4), at("dissolve", 6), {"c002"}, ctx) == [
+        "changes the transition the editor pin s0->s1 protects (dissolve 4f -> dissolve 6f)"]
+    assert P._pin_problems(base, at("dissolve", 6), ctx) == [("s0->s1", rules.pin_problems(base, at("dissolve", 6), ctx)[0][1])]
+    assert P._pin_problems(base, at("dissolve", 4), ctx) == [] and P._pin_problems(base, base, ctx) == []
+
+
+def test_a_revision_with_a_third_transition_is_refused_at_publish(make_ws):
+    """The protection is taken after the revisions were made: r001 has a dissolve of 4, the pin holds r002's dissolve of 6, r000 a cut."""
+    w = make_ws()
+    PinStore(w).put(pinned_final(w))
+    S.start(w)
+    r1 = edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}])
+    edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}])
+    V.pin_transition(w, pin="s0->s1", hold=True)
+    with pytest.raises(Refused, match=rf"pin s0->s1 was added or changed since {r1} was made, and {r1} changes the transition the editor pin "
+                                      r"s0->s1 protects \(cut -> dissolve 4f; the pin holds a dissolve 6f, the only other transition allowed "
+                                      r"there\)"):
+        P.publish(w, r1)
+    assert not (w / "edit.json").exists()
+    assert P.publish(w)["revision"] == "r002"

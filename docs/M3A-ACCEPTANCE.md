@@ -118,7 +118,13 @@ Record the run here (date, footage, agent, editor and version), and attach the t
 
 ## Known limitations
 
-- The pipeline ignores `hold_transition`: a protected transition is honoured by edit sessions only.
+- The pipeline ignores `hold_transition`: a protected transition is honoured by edit sessions only. At a protected pin a proposal may
+  set exactly the held transition (a repair) or leave it; `start` and `inspect` list the pins whose transition differs
+  (`transition_mismatches`), and such a cut still publishes.
+- A pin made in the TUI protects nothing from the agent until the pipeline runs again and the edit session is restarted from that new
+  stage: a session holds only the pins its base stage holds.
+- The workspace's stage lock waits at most 30 seconds; a publish, import or export that cannot take it is refused ("another import or
+  publish (or an export) is running").
 - There are no persistent timing locks: guards are per proposal.
 - A context change (config, shots, pins, music, source rate) requires proposing again.
 - Only a session on the latest canonical stage can publish (the default base); a session started on `human` or an earlier stage can edit

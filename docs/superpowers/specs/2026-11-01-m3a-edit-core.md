@@ -83,6 +83,9 @@ on the canonical timeline, with matchcut's own renderer.
     optional fields; older pins read as unprotected.
   - The edit CLI sets and clears it (`pin_transition`). The TUI's `l` and `r` keys keep making unprotected pins.
   - The pipeline engine ignores the field in M3a, and the docs say so.
+  - At a protected pin a proposal may leave the transition or set exactly the held one (a repair when the stage has another, e.g. a
+    protection set with an explicit transition, or a restart on a stage the pipeline built). Publish applies the same rule from `r000`.
+    `start` and `inspect` list such mismatches with how to resolve them.
 - **Match cuts:** a match cut stays a hard cut, with adjacency and cut points, always.
 - **Every transition** in the resulting proposal must satisfy:
   - kind is cut, dissolve or dip to black;

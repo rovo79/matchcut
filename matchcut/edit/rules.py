@@ -7,7 +7,7 @@ already have (a problem the pipeline left is reported by ``describe``, never ref
 - transitions: whole frames, at most ``max_fraction_of_clip`` of the shorter of their two clips, and a cut M2a's ``layout`` accepts (every
   clip longer than its transitions);
 - every editor pin ``before`` holds is still held (clip instances, adjacency, both cut points), and a transition it protects
-  (``hold_transition``) is unchanged;
+  (``hold_transition``) is unchanged or becomes exactly the one the pin holds (``ops.protected_transition_change``);
 - every match cut of ``before`` keeps its two clips adjacent, its cut points and its hard cut;
 - clips no operation touched are identical, and so is every junction between two of them, in frames;
 - the proposal's guards (``max_duration_change_frames``, ``keep_record_frames``, ``keep_on_beat``).
@@ -16,6 +16,7 @@ Transitions overlap their two clips (a new dissolve moves every later record pos
 """
 from __future__ import annotations
 
+import json
 from collections import Counter
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -27,7 +28,8 @@ from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, clip_origin
 
 from .model import EditContext, Refused, Row, frame_rows, running_frames
-from .ops import MAX_FRAMES, beat_frame, find_junction, held_pins, lock_reason, pin_label, transition_limit
+from .ops import (MAX_FRAMES, as_transition, beat_frame, find_junction, held_pins, held_transition, lock_reason, pin_label,
+                  protected_transition_change, transition_limit)
 
 GUARDS = ("max_duration_change_frames", "keep_record_frames", "keep_on_beat")
 
@@ -79,10 +81,11 @@ def _dedupe(items: Iterable[str]) -> List[str]:
 
 # ----------------------------------------------------------------------------------------------- the rules
 def pin_problems(before: Timeline, after: Timeline, ctx: EditContext) -> List[Tuple[Pin, str]]:
-    """(pin, one line) for every editor pin of ``ctx`` that ``before`` holds and ``after`` no longer holds as it was: its two clips
-    (within a session clip ids are stable, so the very two clips the pin holds in ``before``), their adjacency and both cut points, and
-    the transition the pin protects (``hold_transition``).  ``pin_outcome`` alone would accept another clip of the same shot at the same
-    point for a pin taken without clip instances."""
+    """(pin, one line) for every editor pin of ``ctx`` that ``before`` holds and ``after`` no longer holds as it was: its two clips (within
+    a session clip ids are stable, so the very two clips the pin holds in ``before``), their adjacency and both cut points, and the
+    transition the pin protects (``hold_transition``): it may stay, or become exactly the one the pin holds, nothing else
+    (``ops.protected_transition_change``; ``publish`` checks a revision against r000 with this same function). ``pin_outcome`` alone would
+    accept another clip of the same shot at the same point for a pin taken without clip instances."""
     out: List[Tuple[Pin, str]] = []
     rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
     ja = _junctions(after)
@@ -102,12 +105,37 @@ def pin_problems(before: Timeline, after: Timeline, ctx: EditContext) -> List[Tu
         if d is None or d.action != "pinned":
             out.append((pin, f"breaks the editor pin {pin_label(pin)}: {d.detail if d is not None and d.detail else 'the pin is lost'}"))
             continue
-        if pin.hold_transition:
-            t0 = (rb[site + 1].kind, rb[site + 1].tr)
-            t1 = (ra[k + 1].kind, ra[k + 1].tr)
-            if t0 != t1:
-                out.append((pin, f"changes the transition the editor pin {pin_label(pin)} protects ({_label(*t0)} -> {_label(*t1)})"))
+        line = protected_transition_change(pin, (rb[site + 1].kind, rb[site + 1].tr), (ra[k + 1].kind, ra[k + 1].tr))
+        if line is not None:
+            out.append((pin, line))
     return out
+
+
+def transition_mismatches(tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
+    """Every protected editor pin ``tl`` holds whose junction's transition is not the one the pin holds (a protection set with an explicit
+    transition, or a session on a stage the pipeline built ignoring the protection), with the two ways to resolve it: a proposal setting
+    the held transition (the only other change the rules allow there), or ``pin_transition`` protecting the junction's transition."""
+    rows = frame_rows(tl, ctx.rate)
+    ids = junction_ids(tl)
+    out: List[Dict[str, Any]] = []
+    for pin, site in held_pins(tl, ctx):
+        now = as_transition(rows[site + 1].kind, rows[site + 1].tr)
+        if not pin.hold_transition or pin.held_transition is None or held_transition(pin, now) == now:
+            continue
+        held = held_transition(pin, now)
+        out.append({"pin": pin_label(pin), "n": site + 1, "junction": ids[site], "transition": {"kind": now[0], "frames": now[1]},
+                    "held_transition": {"kind": held[0], "frames": held[1]}, "repair": mismatch_repair(pin, site + 1, now, held)})
+    return out
+
+
+def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int]) -> str:
+    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line."""
+    op = {"op": "set_transition", "junction": n, "kind": held[0]}
+    if held[1]:
+        op["frames"] = held[1]
+    return (f"the editor pin {pin_label(pin)} holds a {_label(*held)} but junction {n} has a {_label(*now)}: propose "
+            f"{json.dumps(op)} to give it the held transition (the only change allowed there), or run pin_transition "
+            f'{{"pin": "{pin_label(pin)}", "hold": true}} to protect the {_label(*now)} instead; left as it is, it still publishes')
 
 
 def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: EditContext, guards: Optional[Dict[str, Any]] = None) -> List[str]:
