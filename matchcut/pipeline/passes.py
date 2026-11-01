@@ -677,7 +677,7 @@ class BeatSyncPass(Pass):
             tl.stage = self.name
             return PassResult(tl, decisions)
 
-        tl = tl.snap_to_frames(ctx.shot_bounds)
+        tl = tl.snap_to_frames(ctx.shot_bounds).snap_transitions()  # beats are measured on the whole-frame record positions the cut will have
         fps = tl.fps
         for i in range(1, len(tl.clips)):
             prev, cur = tl.clips[i - 1], tl.clips[i]

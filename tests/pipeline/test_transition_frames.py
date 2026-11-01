@@ -3,6 +3,7 @@ interchange exporters' layout (the frames an editor sees).  Saved workspaces are
 from __future__ import annotations
 
 import hashlib
+import json
 import random
 from fractions import Fraction
 from pathlib import Path
@@ -118,40 +119,78 @@ def test_m2a_export_of_an_existing_workspace_is_unchanged(tmp_path):
 
 
 def _edl_events(text: str):
-    """(transition frames, source in, source out, record in, record out) per event line, as frame numbers, from a pipeline EDL."""
-    def frames(tc: str, base: int) -> int:
-        h, m, sec, f = (int(x) for x in tc.split(":"))
-        return ((h * 60 + m) * 60 + sec) * base + f
+    """(kind, transition frames, [source in, source out, record in, record out]) per event line of an EDL."""
     out = []
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) >= 8 and parts[1] == "AX" and parts[0].isdigit():
-            tr = int(parts[4]) if parts[3] == "D" else 0
-            tcs = parts[-4:]
-            out.append((parts[3], tr, tcs))
+        if len(parts) >= 8 and parts[0].isdigit() and parts[1] == "AX":
+            kind = parts[3]
+            out.append((kind, int(parts[4]) if kind == "D" else 0, parts[-4:]))
     return out
 
 
+def _source(rate: Fraction):
+    from matchcut.interchange.common import SourceInfo
+
+    return SourceInfo(path="/x.mp4", url="file:///x.mp4", rate=rate, duration_frames=10**6, width=320, height=180, has_audio=True, size=1, mtime_ns=1)
+
+
 @pytest.mark.parametrize("rate", RATES, ids=str)
-def test_the_pipeline_edl_agrees_with_the_exporters_layout(rate):
-    """final.edl (Timeline.to_edl) gives every dissolve the frames the M2a layout gives it, at the same record frame: half-frame ties and
-    long runs of fractional dissolves included (it used Python's round(), ties to even, one dissolve at a time)."""
+def test_the_pipeline_edl_is_the_m2a_edl_line_for_line(rate):
+    """final.edl (Timeline.to_edl) has every event of M2a's EDL with the same four timecodes and dissolve length: half-frame ties and long
+    runs of fractional dissolves included.  (It used round() per dissolve, ties to even, and ran the outgoing event through the dissolve.)"""
+    from matchcut.interchange.edl import export_edl
+
     rnd = random.Random(int(rate * 7))
-    base = int(round(float(rate)))
-    for _ in range(100):
+    for _ in range(60):
         tl = _random_timeline(rnd, rate)
         if rnd.random() < 0.5:  # exact ties: transitions of an odd number of half frames
             for c in tl.clips[1:]:
                 if not c.transition_in.is_cut:
                     c.transition_in = Transition(c.transition_in.kind, round((2 * rnd.randint(3, 8) + 1) / (2 * float(rate)), 6))
-        rows = layout(tl, rate)
-        dissolves = [e for e in _edl_events(tl.to_edl("t")) if e[0] == "D"]
-        want = [(r.tr, r.rec) for r in rows if r.tr]
-        got = []
-        for _, tr, tcs in dissolves:
-            h, m, sec, f = (int(x) for x in tcs[2].split(":"))
-            got.append((tr, ((h * 60 + m) * 60 + sec) * base + f))
-        assert got == want, (str(rate), got, want)
+        ours = _edl_events(tl.to_edl("t"))
+        theirs = _edl_events(export_edl(tl, "final", _source(rate), "t"))
+        assert ours == theirs, (str(rate), ours[:4], theirs[:4])
+
+
+@pytest.mark.parametrize("rate", [Fraction(25), Fraction(30000, 1001)], ids=str)
+def test_the_pipeline_edl_reads_back_as_the_same_cut(rate):
+    """M2a's EDL reader reads final.edl back with the same clips, source frames and transitions, and no overlap notes."""
+    from matchcut.interchange.edl import import_edl
+
+    rnd = random.Random(5)
+    for _ in range(30):
+        tl = _random_timeline(rnd, rate).snap_transitions()
+        back, notes = import_edl(tl.to_edl("t"), rate, "/x.mp4", None, _source(rate))
+        assert not any("overlap" in n or "starts" in n for n in notes), notes
+        want = [(r.in_f, r.out_f, r.tr) for r in layout(tl, rate)]
+        got = [(r.in_f, r.out_f, r.tr) for r in layout(back, rate)]
+        assert got == want
+
+
+@pytest.mark.parametrize("rate", RATES, ids=str)
+def test_whole_frame_transitions_are_idempotent_and_survive_storage_over_long_runs(rate):
+    """Stored to the microsecond, a thousand short dissolves re-laid out from the stored values give the same frames, and snapping twice
+    changes nothing (to 4 decimals, the stored values drifted from the layout after a few hundred dissolves at 59.94 fps)."""
+    fps = float(rate)
+    for tr_frames in (1, 2, 3, 6):
+        tl = Timeline(source="x.mp4", fps=fps)
+        for i in range(1000):
+            tl.clips.append(Clip(f"c{i + 1:04d}", i, round(i * 40 / fps, 6), round((i * 40 + 30) / fps, 6),
+                                 transition_in=Transition("dissolve", tr_frames / fps) if i else Transition()))
+        once = tl.snap_transitions()
+        stored = Timeline.from_dict(json.loads(json.dumps(once.to_dict())))
+        assert stored.snap_transitions().to_dict() == stored.to_dict()
+        assert [r.tr for r in layout(stored, rate)] == [0] + [tr_frames] * 999
+
+
+def test_the_shared_rounding_is_the_exporters_rounding():
+    """The pipeline and the interchange exporters use one implementation of seconds -> frames and of the rate snap."""
+    from matchcut.interchange import common
+    from matchcut.pipeline import frames
+
+    assert common.to_frames is frames.to_frames and common.COMMON_RATES is frames.COMMON_RATES
+    assert all(common.snap_rate(float(r)) == frames.snap_rate(float(r)) for r in frames.COMMON_RATES)
 
 
 def test_rounding_that_changes_the_cut_is_reported_not_silent():
