@@ -231,3 +231,29 @@ def test_a_long_sequence_of_fractional_transitions_stays_on_the_layout(rate):
     out = tl.snap_transitions()
     assert [r.tr for r in layout(tl, rate)] == [round(c.transition_in.duration * fps) if not c.transition_in.is_cut else 0 for c in out.clips]
     assert abs(record_frames(layout(out, rate)) - tl.duration * fps) <= 0.5 + 1e-6
+
+
+@pytest.mark.parametrize("with_music", [False, True], ids=["no music", "music"])
+def test_a_dissolve_that_rounds_to_no_frame_is_recorded_with_or_without_music(tmp_path, with_music):
+    """At 12 fps a 0.06 s dissolve is under a frame: the final cut turns it into a cut and says so, whether the final stage rounds it or (with
+    music) the beat-sync pass, which measures beats on whole-frame positions, rounds it first."""
+    from matchcut.pipeline.demo import make_click_track, make_demo_footage
+
+    src = make_demo_footage(tmp_path / "d12.mp4", fps=12)
+    cfg = PipelineConfig(source=str(src), workspace=str(tmp_path / "ws"), target_duration=8.0)
+    cfg.llm.backend = "mock"
+    cfg.render.enabled = False
+    cfg.transitions.dissolve_seconds = 0.06
+    if with_music:
+        cfg.music.path = str(make_click_track(tmp_path / "click.wav"))
+    pipe = Pipeline(cfg)
+    final = pipe.refine(pipe.rough_cut())
+    dropped = [d for d in final.history if d.action == "transition_dropped"]
+    assert dropped, [(d.pass_name, d.action) for d in final.history[-12:]]
+    assert all(c.transition_in.is_cut or c.transition_in.duration * 12 >= 1 - 1e-4 for c in final.clips)  # stored to the microsecond
+
+
+def test_an_edl_event_with_no_frames_of_its_own_says_so():
+    tl = Timeline(source="x.mp4", fps=25.0)
+    tl.clips = [Clip("c001", 0, 0, 2), Clip("c002", 1, 3, 3.2, transition_in=Transition("dissolve", 0.2)), Clip("c003", 2, 6, 8, transition_in=Transition("dissolve", 0.2))]
+    assert "has no frames of its own" in tl.to_edl("t")

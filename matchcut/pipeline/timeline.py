@@ -327,6 +327,8 @@ class Timeline:
             else:
                 lines.append(f"{event:03d}  AX       V     C        {tc(in_f)} {tc(src_out)} {tc(rec)} {tc(rec_out)}")
                 lines.append(f"* FROM CLIP NAME: shot_{c.shot_index:04d}")
+            if src_out <= in_f:  # the transitions take all of this clip (the final stage records transition_too_long)
+                lines.append(f"* COMMENT: shot_{c.shot_index:04d} is no longer than its transitions: this event has no frames of its own")
             if c.purpose:
                 lines.append(f"* COMMENT: {c.beat_id} {c.purpose}".strip())
             lines.append("")
