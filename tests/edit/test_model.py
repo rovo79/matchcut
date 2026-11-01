@@ -31,8 +31,9 @@ def test_min_frames_and_shot_frames():
     assert ctx_for(R5994).min_frames == 45  # 44.96
     ctx = ctx_for(R2997, frames_per_shot=100)
     assert ctx.shot_frames(0) == (0, 100) and ctx.shot_frames(3) == (300, 400)
-    ctx = EditContext(R25, {0: (0.01, 2.0), 1: (2.0, 4.0)})
-    assert ctx.shot_frames(0) == (1, 50)  # the in-point rounds up into the shot, the out-point down
+    ctx = EditContext(R25, {0: (0.01, 2.0), 1: (2.0, 4.06)})
+    # a shot's start and end round like any clip point (as M2a's layout rounds them): a point inside the shot is inside it in frames
+    assert ctx.shot_frames(0) == (0, 50) and ctx.shot_frames(1) == (50, 102)
     with pytest.raises(KeyError):
         ctx.shot_frames(7)
 

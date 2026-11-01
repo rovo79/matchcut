@@ -49,6 +49,7 @@ class OpResult:
     timeline: Timeline
     touched: FrozenSet[str]  # ids of the clips the operation changed, added or removed
     detail: str  # one line
+    issued: Tuple[str, ...] = ()  # ids of the new clips the operation made (replace, insert), sorted
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,10 @@ class OpsResult:
     timeline: Timeline
     touched: FrozenSet[str]
     details: Tuple[str, ...]  # one line per operation
+    issued: Tuple[str, ...] = ()  # every id a new clip took in the batch, sorted (also one a later operation removed again)
+
+
+MAX_FRAMES = 10 ** 9  # a frame count beyond this is refused (no cut is that long; it keeps the arithmetic finite)
 
 
 # ----------------------------------------------------------------------------------------------- arguments and addressing
@@ -71,6 +76,8 @@ def whole(op: Dict[str, Any], key: str, default: Any = _REQUIRED) -> int:
         raise Refused(f"{key} must be a whole number, not {v!r}")
     if isinstance(v, float) and not (math.isfinite(v) and v.is_integer()):
         raise Refused(f"{key} must be a whole number, not {v!r}")
+    if abs(v) > MAX_FRAMES:
+        raise Refused(f"{key} is out of range ({'-' if v < 0 else ''}more than {MAX_FRAMES} frames)")
     return int(v)
 
 
@@ -98,7 +105,9 @@ def find_junction(tl: Timeline, ref: Any) -> int:
     n = len(tl.clips) - 1
     if isinstance(ref, bool):
         raise Refused(f"a junction is named by its number or its id, not {ref!r}")
-    if isinstance(ref, int) or (isinstance(ref, str) and ref.isdigit()):
+    if isinstance(ref, str) and ref.isascii() and ref.isdigit() and len(ref) > 9:
+        raise Refused(f"no junction {ref[:12]}{'...' if len(ref) > 12 else ''}: this cut has {n} junction{'s' if n != 1 else ''}")
+    if isinstance(ref, int) or (isinstance(ref, str) and ref.isascii() and ref.isdigit()):
         k = int(ref)
         if not 1 <= k <= n:
             raise Refused(f"no junction {k}: this cut has {n} junction{'s' if n != 1 else ''}" + (f" (1..{n})" if n > 0 else ""))
@@ -437,7 +446,7 @@ def apply_op(tl: Timeline, op: Any, ctx: EditContext, reserved_ids: Collection[s
     if not isinstance(op, dict):
         raise Refused(f"an operation is an object with an \"op\", not {op!r}")
     name = op.get("op")
-    if name not in _OPS:
+    if not isinstance(name, str) or name not in _OPS:
         raise Refused(f"unknown op {name!r} (one of: {', '.join(OPS)})")
     extra = sorted(str(k) for k in op if k != "op" and k not in ARGS[name])
     if extra:
@@ -447,7 +456,8 @@ def apply_op(tl: Timeline, op: Any, ctx: EditContext, reserved_ids: Collection[s
         touched, detail = _OPS[name](out, op, ctx, frozenset(reserved_ids))  # type: ignore[call-arg]
     else:
         touched, detail = _OPS[name](out, op, ctx)
-    return OpResult(out, frozenset(touched), detail)
+    issued = tuple(sorted({c.id for c in out.clips} - {c.id for c in tl.clips})) if name in _NEW_CLIPS else ()
+    return OpResult(out, frozenset(touched), detail, issued)
 
 
 def apply_ops(tl: Timeline, ops: Sequence[Any], ctx: EditContext, reserved_ids: Collection[str] = ()) -> OpsResult:
@@ -457,14 +467,18 @@ def apply_ops(tl: Timeline, ops: Sequence[Any], ctx: EditContext, reserved_ids: 
     if isinstance(ops, (str, bytes, dict)) or not isinstance(ops, Sequence):
         raise Refused("ops must be a list of operations")
     reserved = set(reserved_ids) | {c.id for c in tl.clips}
-    cur, touched, details = tl, set(), []  # type: Timeline, Set[str], List[str]
+    cur, touched, details, issued = tl, set(), [], set()  # type: Timeline, Set[str], List[str], Set[str]
     for k, op in enumerate(ops):
+        name = op.get("op") if isinstance(op, dict) else None
+        where = f"op {k + 1}{f' ({name[:40]})' if isinstance(name, str) else ''}"
         try:
             res = apply_op(cur, op, ctx, reserved)
         except Refused as exc:
-            name = op.get("op") if isinstance(op, dict) else None
-            raise Refused(f"op {k + 1}{f' ({name})' if isinstance(name, str) else ''}: {exc}", k) from None
+            raise Refused(f"{where}: {exc}", k) from None
+        except (TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:  # malformed input no check above caught: a refusal
+            raise Refused(f"{where}: malformed operation ({type(exc).__name__}: {str(exc)[:120]})", k) from None
         cur, details = res.timeline, details + [res.detail]
         touched |= res.touched
+        issued |= set(res.issued)
         reserved |= {c.id for c in cur.clips}
-    return OpsResult(cur if cur is not tl else tl.copy(), frozenset(touched), tuple(details))
+    return OpsResult(cur if cur is not tl else tl.copy(), frozenset(touched), tuple(details), tuple(sorted(issued)))

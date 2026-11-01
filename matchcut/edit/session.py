@@ -7,8 +7,10 @@ Layout:
   revision, the next revision number and every clip id the session has ever issued (``reserved_ids``), so an id never names two clips;
 - ``revisions/rNNN.json``: immutable once written; a whole timeline plus the parent revision and the operations, guards, details, changes
   and timing that made it.  ``r000`` is the base stage on whole frames (``normalise``);
-- ``proposals/<id>.json``: an accepted proposal, its id the first 12 hex characters of the sha256 of the head revision id, the head
-  timeline and the operations and guards (``proposal_id``), so proposing the same thing again gives the same id;
+- ``proposals/<id>.json``: an accepted proposal, its id the first 12 hex characters of the sha256 of everything its result depends on:
+  the head revision id, the head timeline, the operations and guards, the reserved clip ids and the context's fingerprint
+  (``proposal_id``), so proposing the same thing again gives the same id and one id never names two results.  A proposal file is never
+  overwritten with other content;
 - ``renders/`` and ``published/`` (made by ``view`` and ``publish`` when they need them);
 - ``.lock``: every command that writes holds an exclusive ``fcntl.flock`` on it; the read-only ones a shared one.
 
@@ -18,7 +20,9 @@ the same proposal and revision ids.
 
 A session is stale when its base stage file has changed (or that stage is no longer listed, e.g. a ``human.json`` gone stale): every
 command that changes it refuses, the read-only ones say ``stale: true``, and ``start`` moves it aside to ``WS/edits.stale-<sha12>/``.
-Nothing in the store is ever deleted.
+The same holds when the source footage's frame rate is no longer the session's.  ``start`` with ``restart`` moves a fresh session to
+``WS/edits.replaced-<sha12>/``.  Nothing in the store is ever deleted, and a revision whose timeline no longer matches its
+``timeline_sha256`` is refused when read.
 
 Expected user errors raise ``SessionError`` (a ``Refused``) with a one-line message; a proposal the rules refuse raises
 ``ProposalRefused`` with its problems, timing and changes.
@@ -34,6 +38,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -41,12 +46,13 @@ from matchcut.pipeline.audio import MusicAnalysis
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import PinStore
 from matchcut.pipeline.junctions import stage_timeline_paths
+from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import Decision, Timeline, Transition, clip_origin
 
 from . import rules
 from .model import EditContext, Refused, context_from, frame_rows
-from .ops import apply_ops
+from .ops import apply_ops, held_pins, pin_label
 
 SESSION_SCHEMA = "matchcut.edit_session/1"
 REVISION_SCHEMA = "matchcut.edit_revision/1"
@@ -56,6 +62,8 @@ AGENT = "agent"  # the pass name of the decisions a proposal appends to the hist
 
 _REVISION_ID = re.compile(r"r[0-9]{3,}")
 _PROPOSAL_ID = re.compile(r"[0-9a-f]{12}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+MAX_REVISIONS = 10 ** 7  # a session.json whose next revision number is beyond this is not one this module wrote
 
 
 class SessionError(Refused):
@@ -101,10 +109,38 @@ def timeline_sha256(tl: Timeline) -> str:
     return _sha256_text(canonical_json(tl.to_dict()))
 
 
-def proposal_id(head: str, head_timeline: Timeline, ops: Any, guards: Any) -> str:
-    """The first 12 hex characters of the sha256 of the head revision id, the head timeline's canonical JSON and the canonical JSON of the
-    operations and guards."""
-    text = "\n".join([head, canonical_json(head_timeline.to_dict()), canonical_json({"ops": ops, "guards": guards})])
+def _floats(values: Any) -> List[float]:
+    return [float(x) for x in (values if values is not None else [])]
+
+
+def context_fingerprint(ctx: EditContext) -> Dict[str, Any]:
+    """Everything in ``ctx`` an operation or a rule reads, as plain JSON: the rate, the shots, the limits, the pins (with their protected
+    transitions), the music (its track, beats, downbeats and start) and the beat-snapping settings."""
+    music = ctx.music
+    return {
+        "rate": str(ctx.rate),
+        "bounds": [[k, float(lo), float(hi)] for k, (lo, hi) in sorted(ctx.bounds.items())],
+        "min_clip_seconds": float(ctx.min_clip_seconds),
+        "max_fraction_of_clip": float(ctx.max_fraction_of_clip),
+        "pins": sorted((p.to_dict() for p in ctx.pins), key=canonical_json),
+        "music": None if music is None else {"path": str(music.path), "duration": float(music.duration), "beats": _floats(music.beats),
+                                             "downbeats": _floats(music.downbeats), "beats_per_bar": int(music.beats_per_bar)},
+        "music_start": float(ctx.music_start),
+        "snap_window": float(ctx.snap_window),
+        "prefer_downbeats": bool(ctx.prefer_downbeats),
+    }
+
+
+def context_sha256(ctx: EditContext) -> str:
+    return _sha256_text(canonical_json(context_fingerprint(ctx)))
+
+
+def proposal_id(head: str, head_timeline: Timeline, ops: Any, guards: Any, reserved_ids: Sequence[str] = (), context: str = "") -> str:
+    """The first 12 hex characters of the sha256 of the head revision id, the head timeline's canonical JSON, the canonical JSON of the
+    operations and guards, the clip ids the session has reserved (sorted) and the context's fingerprint (``context_sha256``): every input
+    of the result, so one id never names two different results."""
+    text = "\n".join([head, canonical_json(head_timeline.to_dict()), canonical_json({"ops": ops, "guards": guards}),
+                      canonical_json(sorted(set(reserved_ids))), context])
     return _sha256_text(text)[:12]
 
 
@@ -121,9 +157,24 @@ def _atomic_write(path: Path, text: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path.parent)
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def _fsync_dir(d: Path) -> None:
+    """Flush a directory entry change (a rename) to disk, where the platform allows it."""
+    try:
+        fd = os.open(d, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _read_json(path: Path, what: str) -> Dict[str, Any]:
@@ -253,40 +304,45 @@ def _locked(ws: Path, shared: bool = False, create: bool = False) -> Iterator[Pa
 
 
 # ----------------------------------------------------------------------------------------------- r000
+def _plural(n: float, word: str = "frame") -> str:
+    return f"{n:g} {word}{'' if abs(n) == 1 else 's'}"
+
+
+def _edge_pins(tl: Timeline, ctx: EditContext) -> Dict[Tuple[int, str], str]:
+    """(clip index, edge) -> the label of the editor pin ``tl`` holds there."""
+    out: Dict[Tuple[int, str], str] = {}
+    for pin, site in held_pins(tl, ctx):
+        out[(site, "out")] = out[(site + 1, "in")] = pin_label(pin)
+    return out
+
+
 def normalise(tl: Timeline, ctx: EditContext) -> Tuple[Timeline, List[str]]:
     """A copy of ``tl`` on whole frames at ``ctx.rate`` (the session's ``r000``) and a note per point or transition that moved.
 
     - Every clip's identity is stamped first (``origin`` = ``clip_origin``), so pins and clip keys still name it once its points move.
-    - Source points are rounded to the nearest frame; a rounding that would leave the clip's shot is pulled back in (as
-      ``Timeline.snap_to_frames``), and a clip keeps at least one frame.
-    - Transitions are laid out on whole frames as M2a and the renderer lay them out (``model.frame_rows``: rounded over the running
-      total); one that rounds to no frame is a cut, and so is the first clip's.
+    - Every source point and transition takes exactly the frame M2a's layout and the renderer give it (``model.frame_rows``: points
+      rounded, a clip at least one frame, transitions rounded over the running total); a transition that rounds to no frame is a cut, and
+      so is the first clip's.  A point inside its shot stays inside it (``EditContext.shot_frames`` rounds the shot the same way).
+    - A note names the editor pin whose edge moved.  If the result no longer held a pin or a match cut that ``tl`` holds, ``SessionError``
+      is raised: protection is never dropped silently.
     ``tl`` is not changed."""
     out = tl.copy()
     notes: List[str] = []
     rate = ctx.rate
     for c in out.clips:
         c.origin = clip_origin(c)
-    for c in out.clips:
-        in_f, out_f = ctx.f(c.source_in), ctx.f(c.source_out)
-        if ctx.has_shot(c.shot_index):
-            lo_s, hi_s = ctx.bounds[c.shot_index]
-            lo, hi = ctx.shot_frames(c.shot_index)
-            if c.source_in >= lo_s - 1e-9 and in_f < lo:
-                in_f = lo
-            if c.source_out <= hi_s + 1e-9 and out_f > hi:
-                out_f = hi
-        out_f = max(out_f, in_f + 1)
-        parts = []
-        for label, before, frames in (("in", c.source_in, in_f), ("out", c.source_out, out_f)):
-            moved = frames - before * float(rate)
-            if abs(moved) > 0.01:
-                parts.append(f"{label} {before:.6g} s -> frame {frames} ({moved:+.2f}f)")
-        if parts:
-            notes.append(f"{c.id}: " + ", ".join(parts))
-        c.source_in, c.source_out = ctx.s(in_f), ctx.s(out_f)
+    pinned = _edge_pins(out, ctx)
     rows = frame_rows(out, rate)
     for i, (c, r) in enumerate(zip(out.clips, rows)):
+        parts = []
+        for label, before, frames in (("in", c.source_in, r.in_f), ("out", c.source_out, r.out_f)):
+            moved = frames - before * float(rate)
+            if abs(moved) > 0.01:
+                pin = pinned.get((i, label))
+                parts.append(f"{label} {before:.6g} s -> frame {frames} ({moved:+.2f}f)" + (f", the edge pin {pin} holds" if pin else ""))
+        if parts:
+            notes.append(f"{c.id}: " + ", ".join(parts))
+        c.source_in, c.source_out = ctx.s(r.in_f), ctx.s(r.out_f)
         old = c.transition_in
         new = Transition(r.kind, ctx.s(r.tr)) if i and r.tr else Transition()
         if not old.is_cut and (new.kind, new.duration) != (old.kind, old.duration):
@@ -295,9 +351,19 @@ def normalise(tl: Timeline, ctx: EditContext) -> Tuple[Timeline, List[str]]:
                 notes.append(f"{c.id}: the first clip's incoming {old.kind} ({old.duration:.6g} s) is a cut")
             elif abs(exact - r.tr) > 0.01:
                 notes.append(f"{c.id}: incoming {old.kind} {old.duration:.6g} s ({exact:.2f}f) -> "
-                             + (f"{r.tr} frames" if r.tr else "no frame: a cut"))
+                             + (_plural(r.tr) if r.tr else "no frame: a cut"))
         c.transition_in = new
     out.stage = EDIT_STAGE
+    # what r000 must still protect: every pin and match cut the base holds
+    lost = sorted(set(pinned.values()) - set(_edge_pins(out, ctx).values()))
+    matches_b = {(a.id, b.id) for a, b in zip(tl.clips, tl.clips[1:]) if is_match_cut(a, b)}
+    matches_0 = {(a.id, b.id) for a, b in zip(out.clips, out.clips[1:]) if is_match_cut(a, b)}
+    lost += [f"the match cut {a}|{b}" for a, b in sorted(matches_b - matches_0)]
+    if lost:
+        raise SessionError(f"putting the cut on whole frames would release {', '.join(lost)}: the session cannot start on it "
+                           "(re-run the pipeline, or move the pin in the Edit view)")
+    if [(r.in_f, r.out_f, r.tr, r.kind) for r in frame_rows(out, rate)] != [(r.in_f, r.out_f, r.tr, r.kind) for r in rows]:
+        raise SessionError("putting the cut on whole frames changed its frames: this is a bug, please report it")  # pragma: no cover
     return out, notes
 
 
@@ -328,8 +394,15 @@ class Session:
         return str(self.state["base_stage"])
 
     def stale(self) -> Optional[str]:
-        """Why the session is stale, or None."""
-        return stale_reason(self.ws, self.state)
+        """Why the session is stale (its base stage changed, or the source's frame rate), or None.  A context that cannot be read (the
+        footage is gone) is not a reason here: the commands that need it say so."""
+        why = stale_reason(self.ws, self.state)
+        if why is None:
+            try:
+                why = _rate_reason(self.state, self.context())
+            except SessionError:
+                pass
+        return why
 
     def context(self) -> EditContext:
         if self._ctx is None:
@@ -343,9 +416,18 @@ class Session:
         return sorted(ids, key=_revision_number)
 
     def revision(self, rev: Optional[str] = None) -> Dict[str, Any]:
-        """The revision document ``rev`` (default: the head)."""
+        """The revision document ``rev`` (default: the head), checked: its id is its file's and its timeline is the one its
+        ``timeline_sha256`` names (a changed revision file is refused)."""
         rev = check_revision_id(self.head if rev is None else rev)
-        return _read_json(self.dir / "revisions" / f"{rev}.json", f"revision {rev}")
+        doc = _read_json(self.dir / "revisions" / f"{rev}.json", f"revision {rev}")
+        try:
+            sha = _sha256_text(canonical_json(doc["timeline"]))
+        except (KeyError, TypeError, ValueError):
+            sha = None
+        if doc.get("id") != rev or sha is None or sha != doc.get("timeline_sha256"):
+            raise SessionError(f"revision {rev} was changed after it was written (its id or timeline no longer matches its "
+                               "timeline_sha256): revisions are immutable; check out another revision or start a new session")
+        return doc
 
     def timeline(self, rev: Optional[str] = None) -> Timeline:
         """The timeline of revision ``rev`` (default: the head)."""
@@ -354,6 +436,19 @@ class Session:
             return Timeline.from_dict(doc["timeline"])
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             raise SessionError(f"revision {doc.get('id', rev)} holds no readable timeline ({exc!r})") from None
+
+    def reserved_ids(self) -> List[str]:
+        """Every clip id the session has issued or used: ``session.json``'s, plus every id a revision on disk holds or issued (a revision
+        a crash left behind before ``session.json`` was updated included), sorted."""
+        ids = set(self.state["reserved_ids"])
+        for rid in self.revision_ids():
+            try:
+                doc = json.loads((self.dir / "revisions" / f"{rid}.json").read_text(encoding="utf-8"))
+                ids |= {str(c["id"]) for c in doc["timeline"]["clips"]}
+                ids |= {str(x) for x in doc.get("issued") or []}
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+        return sorted(ids)
 
     def children(self, rev: str) -> List[str]:
         """The revisions whose parent is ``rev``, oldest first."""
@@ -367,23 +462,51 @@ class Session:
         return out
 
 
+def _check_state(st: Dict[str, Any]) -> None:
+    """ValueError naming the first field of ``session.json`` that is not what ``start`` and ``apply`` write."""
+    if st.get("schema") != SESSION_SCHEMA:
+        raise ValueError(f"schema {st.get('schema')!r}, not {SESSION_SCHEMA}")
+    for key in ("session", "base_stage", "base_file", "base_sha256", "rate", "head", "next", "reserved_ids"):
+        if key not in st:
+            raise ValueError(f"no {key}")
+    for key in ("session", "base_stage", "base_file", "rate"):
+        if not isinstance(st[key], str) or not st[key]:
+            raise ValueError(f"{key} {st[key]!r}")
+    base = Path(st["base_file"])
+    if base.is_absolute() or ".." in base.parts or "\x00" in st["base_file"]:
+        raise ValueError(f"base_file {st['base_file']!r}")
+    if not isinstance(st["base_sha256"], str) or not _SHA256.fullmatch(st["base_sha256"]):
+        raise ValueError(f"base_sha256 {st['base_sha256']!r}")
+    try:
+        if Fraction(st["rate"]) <= 0:
+            raise ValueError
+    except (ValueError, ZeroDivisionError):
+        raise ValueError(f"rate {st['rate']!r}") from None
+    if not isinstance(st["head"], str) or not _REVISION_ID.fullmatch(st["head"]):
+        raise ValueError(f"head {st['head']!r}")
+    if not isinstance(st["next"], int) or isinstance(st["next"], bool) or not 1 <= st["next"] <= MAX_REVISIONS:
+        raise ValueError(f"next {st['next']!r}")
+    if not isinstance(st["reserved_ids"], list) or not all(isinstance(x, str) for x in st["reserved_ids"]):
+        raise ValueError("reserved_ids is not a list of clip ids")
+
+
 def _read_state(ws: Path) -> Dict[str, Any]:
     d = edits_dir(ws)
     if not (d / "session.json").exists():
         raise SessionError(f"no edit session in {ws}: run start first")
-    st = _read_json(d / "session.json", "edit session (edits/session.json)")
+    st = _read_json(d / "session.json", "edits/session.json")
     try:
-        if st.get("schema") != SESSION_SCHEMA:
-            raise ValueError(f"schema {st.get('schema')!r}, not {SESSION_SCHEMA}")
-        check_revision_id(st["head"])
-        if not isinstance(st["next"], int) or isinstance(st["next"], bool) or st["next"] < 1:
-            raise ValueError(f"next {st['next']!r}")
-        if not isinstance(st["reserved_ids"], list):
-            raise ValueError("reserved_ids is not a list")
-        str(st["session"]), str(st["base_stage"]), str(st["base_sha256"]), str(st["base_file"])
-    except (KeyError, ValueError, Refused) as exc:
-        raise SessionError(f"edits/session.json is unreadable ({exc}): run start with restart to move it aside") from None
+        _check_state(st)
+    except ValueError as exc:
+        raise SessionError(f"edits/session.json is unreadable ({str(exc)[:120]}): run start with restart to move it aside") from None
     return st
+
+
+def _rate_reason(state: Dict[str, Any], ctx: EditContext) -> Optional[str]:
+    if Fraction(state["rate"]) != ctx.rate:
+        return (f"the source footage's frame rate is {ctx.rate} now, the session was made at {state['rate']}: run start to begin a new "
+                f"session (this one is then kept in edits.stale-{state['base_sha256'][:12]}/)")
+    return None
 
 
 def _save_state(d: Path, st: Dict[str, Any]) -> None:
@@ -400,15 +523,15 @@ def load(ws: Path, ctx: Optional[EditContext] = None) -> Session:
 def _fresh(ws: Path, ctx: Optional[EditContext]) -> Session:
     """The session, refused when it is stale (every command that changes it calls this under the lock)."""
     s = load(ws, ctx)
-    why = s.stale()
+    why = stale_reason(ws, s.state) or _rate_reason(s.state, s.context())
     if why:
         raise SessionError(f"the edit session is stale: {why}")
     return s
 
 
-def _move_aside(ws: Path, d: Path, tag: str) -> Path:
-    """Move everything in ``WS/edits/`` but the lock into a new ``WS/edits.stale-<tag>[-n]/`` (never over an existing one)."""
-    base = Path(ws) / f"edits.stale-{tag}"
+def _move_aside(ws: Path, d: Path, tag: str, kind: str = "stale") -> Path:
+    """Move everything in ``WS/edits/`` but the lock into a new ``WS/edits.<kind>-<tag>[-n]/`` (never over an existing one)."""
+    base = Path(ws) / f"edits.{kind}-{tag}"
     target, n = base, 2
     while target.exists():
         target, n = base.with_name(f"{base.name}-{n}"), n + 1
@@ -416,6 +539,8 @@ def _move_aside(ws: Path, d: Path, tag: str) -> Path:
     for entry in sorted(d.iterdir()):
         if entry.name != ".lock":
             os.rename(entry, target / entry.name)
+    _fsync_dir(d)
+    _fsync_dir(Path(ws))
     return target
 
 
@@ -427,17 +552,30 @@ def _write_revision(d: Path, doc: Dict[str, Any]) -> None:
     _atomic_write(path, _pretty(doc))
 
 
+def _read_base(path: Path, ctx: EditContext) -> Tuple[str, Timeline, List[str]]:
+    """(the sha256 of the stage file's bytes, r000 made from those bytes, the normalisation notes)."""
+    try:
+        data = path.read_bytes()
+        base = Timeline.from_dict(json.loads(data.decode("utf-8")))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise SessionError(f"cannot read {path.name} ({str(exc)[:120]})") from None
+    r000, notes = normalise(base, ctx)
+    return hashlib.sha256(data).hexdigest(), r000, notes
+
+
 # ----------------------------------------------------------------------------------------------- commands
 def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
     """Start a session on ``stage`` (default: the latest fresh stage) and return its summary.
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
-    ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it aside the same way."""
+    ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
+    ``WS/edits.replaced-<sha12>/``."""
     ws = Path(ws)
     if not ws.is_dir():
         raise SessionError(f"no workspace {ws}")
     name, path = _base_stage(ws, stage)
     ctx = ctx if ctx is not None else workspace_context(ws)
+    _read_base(path, ctx)  # refused before anything is written when the stage cannot be read or normalised
     with _locked(ws, create=True) as d:
         moved: Optional[Path] = None
         if (d / "session.json").exists():
@@ -450,21 +588,14 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
                     raise SessionError("edits/session.json is unreadable: pass restart to move the session aside and start again")
                 moved = _move_aside(ws, d, "unreadable")
             else:
-                why = stale_reason(ws, old)
+                why = stale_reason(ws, old) or _rate_reason(old, ctx)
                 if why is None and not restart:
                     raise SessionError(f"a session is open on {old['base_stage']} (head {old['head']}): pass restart to move it aside "
                                        "and start again")
-                moved = _move_aside(ws, d, str(old["base_sha256"])[:12])
+                moved = _move_aside(ws, d, old["base_sha256"][:12], "stale" if why is not None else "replaced")
         elif any(e.name != ".lock" for e in d.iterdir()):
             moved = _move_aside(ws, d, "incomplete")  # what a start that never finished left behind
-        # the stage is read under the lock, and its hash is of the bytes read
-        data = path.read_bytes()
-        sha = hashlib.sha256(data).hexdigest()
-        try:
-            base = Timeline.from_dict(json.loads(data.decode("utf-8")))
-        except (ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise SessionError(f"cannot read {path.name} ({exc!r})") from None
-        r000, notes = normalise(base, ctx)
+        sha, r000, notes = _read_base(path, ctx)  # read again under the lock: the hash recorded is of the bytes r000 was made from
         (d / "revisions").mkdir(exist_ok=True)
         (d / "proposals").mkdir(exist_ok=True)
         created = _now()
@@ -517,16 +648,21 @@ def _evaluate(s: Session, ops: Any, guards: Any) -> Dict[str, Any]:
     if not ops:
         raise SessionError("ops is empty: a proposal needs at least one operation")
     if guards is not None and not isinstance(guards, dict):
-        raise SessionError(f"guards must be an object (any of {', '.join(rules.GUARDS)}), not {guards!r}")
+        raise SessionError(f"guards must be an object (any of {', '.join(rules.GUARDS)}), not {guards!r}"[:200])
     ops = _plain(list(ops), "ops")
     guards = _plain(guards, "guards") if guards else None
     head = s.head
     before = s.timeline(head)
     ctx = s.context()
-    pid = proposal_id(head, before, ops, guards)
-    res = apply_ops(before, ops, ctx, s.state["reserved_ids"])
+    reserved = s.reserved_ids()
+    ctx_sha = context_sha256(ctx)
+    pid = proposal_id(head, before, ops, guards, reserved, ctx_sha)
+    res = apply_ops(before, ops, ctx, reserved)
     after = res.timeline
-    probs = rules.problems(before, after, res.touched, ctx, guards)
+    try:
+        probs = rules.problems(before, after, res.touched, ctx, guards)
+    except (TypeError, ValueError, OverflowError) as exc:  # a malformed guard no check caught: a refusal, not a traceback
+        raise SessionError(f"malformed guards ({type(exc).__name__}: {str(exc)[:120]})") from None
     tm = rules.timing(before, after, ctx)
     ch = rules.changes(before, after, ctx)
     if probs:
@@ -538,14 +674,15 @@ def _evaluate(s: Session, ops: Any, guards: Any) -> Dict[str, Any]:
         d.data = dict(d.data, proposal=pid)
         after.history.append(d)
     after.stage = EDIT_STAGE
-    return {"schema": PROPOSAL_SCHEMA, "id": pid, "head": head, "head_sha256": timeline_sha256(before), "ops": ops, "guards": guards,
-            "details": list(res.details), "touched": sorted(res.touched), "changes": ch, "timing": tm, "problems": [],
-            "timeline_sha256": timeline_sha256(after), "timeline": after.to_dict()}
+    return {"schema": PROPOSAL_SCHEMA, "id": pid, "head": head, "head_sha256": timeline_sha256(before), "reserved_ids": reserved,
+            "context_sha256": ctx_sha, "ops": ops, "guards": guards, "details": list(res.details), "touched": sorted(res.touched),
+            "issued": list(res.issued), "changes": ch, "timing": tm, "problems": [], "timeline_sha256": timeline_sha256(after),
+            "timeline": after.to_dict()}
 
 
 def _summary(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {"proposal": doc["id"], "head": doc["head"], "changes": doc["changes"], "timing": doc["timing"], "problems": doc["problems"],
-            "details": doc["details"], "touched": doc["touched"]}
+            "details": doc["details"], "touched": doc["touched"], "issued": doc["issued"]}
 
 
 def propose(ws: Path, ops: Any, guards: Optional[Dict[str, Any]] = None, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
@@ -557,43 +694,52 @@ def propose(ws: Path, ops: Any, guards: Optional[Dict[str, Any]] = None, ctx: Op
         doc = _evaluate(s, ops, guards)
         path = d / "proposals" / f"{check_proposal_id(doc['id'])}.json"
         text = _pretty(doc)
-        try:
-            same = path.read_text(encoding="utf-8") == text
-        except OSError:
-            same = False
-        if not same:
+        if path.exists():
+            try:
+                same = json.loads(path.read_text(encoding="utf-8")) == json.loads(text)
+            except (OSError, ValueError):
+                same = False
+            if not same:
+                raise SessionError(f"proposals/{path.name} exists with other content (it was changed by hand?): it is never overwritten; "
+                                   "move it away to propose this again")
+        else:
             path.parent.mkdir(exist_ok=True)
             _atomic_write(path, text)
     return _summary(doc)
 
 
 def apply(ws: Path, proposal: str, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
-    """Apply the stored proposal ``proposal``: it must have been made at the current head; its operations are run again on the head and
-    the result must be exactly the stored one (a changed proposal file is refused).  Writes the next immutable revision and moves the
-    head to it."""
+    """Apply the stored proposal ``proposal``: it must have been made at the current head, with the session's current reserved clip ids
+    and the workspace's current context; its operations are run again on the head and the result must be exactly the stored one (a
+    changed proposal file is refused).  Writes the next immutable revision and moves the head to it."""
     pid = check_proposal_id(proposal)
     with _locked(ws) as d:
         s = _fresh(ws, ctx)
         stored = _read_json(d / "proposals" / f"{pid}.json", f"proposal {pid}")
         if stored.get("head") != s.head:
             raise SessionError(f"head moved: proposal {pid} was made at {stored.get('head')}, the head is now {s.head}: propose again")
+        if stored.get("reserved_ids") != s.reserved_ids():
+            raise SessionError(f"proposal {pid} was made before the session issued other clip ids (a revision was applied, then undone): "
+                               "propose again")
+        if stored.get("context_sha256") != context_sha256(s.context()):
+            raise SessionError(f"proposal {pid} was made before the workspace changed (its config, shots, pins, music or source rate): "
+                               "propose again")
         try:
             doc = _evaluate(s, stored.get("ops"), stored.get("guards"))
         except Refused as exc:
-            raise SessionError(f"proposal {pid} no longer applies: {exc}") from None
+            raise SessionError(f"proposal {pid} was changed after it was stored: its operations are refused now ({exc}); propose again") \
+                from None
         if doc["id"] != pid or json.loads(canonical_json(doc)) != stored:
-            raise SessionError(f"proposal {pid} does not match what its operations give when run again (the file was changed, or the "
-                               "workspace's pins, config or music changed since): propose again")
-        ids = s.revision_ids()
-        n = max([s.state["next"]] + [_revision_number(r) + 1 for r in ids])  # never over a revision a crash left behind
+            raise SessionError(f"proposal {pid} was changed after it was stored: it does not match what its operations give; propose again")
+        n = max([s.state["next"]] + [_revision_number(r) + 1 for r in s.revision_ids()])  # never over a revision a crash left behind
         rid = revision_name(n)
         tl = Timeline.from_dict(doc["timeline"])
         _write_revision(d, {"schema": REVISION_SCHEMA, "id": rid, "parent": s.head, "proposal": pid, "ops": doc["ops"],
-                            "guards": doc["guards"], "details": doc["details"], "touched": doc["touched"], "changes": doc["changes"],
-                            "timing": doc["timing"], "timeline_sha256": doc["timeline_sha256"], "timeline": doc["timeline"],
-                            "created": _now()})
-        st = dict(s.state, head=rid, next=n + 1, reserved_ids=sorted(set(s.state["reserved_ids"]) | {c.id for c in tl.clips}))
-        _save_state(d, st)
+                            "guards": doc["guards"], "details": doc["details"], "touched": doc["touched"], "issued": doc["issued"],
+                            "changes": doc["changes"], "timing": doc["timing"], "timeline_sha256": doc["timeline_sha256"],
+                            "timeline": doc["timeline"], "created": _now()})
+        reserved = set(doc["reserved_ids"]) | set(doc["issued"]) | {c.id for c in tl.clips}
+        _save_state(d, dict(s.state, head=rid, next=n + 1, reserved_ids=sorted(reserved)))
     return {"revision": rid, "parent": s.head, "head": rid, "proposal": pid, "changes": doc["changes"], "timing": doc["timing"]}
 
 
@@ -659,7 +805,11 @@ def log(ws: Path) -> Dict[str, Any]:
         s = load(ws)
         revs = []
         for rid in s.revision_ids():
-            doc = s.revision(rid)
+            try:
+                doc = s.revision(rid)
+            except SessionError as exc:
+                revs.append({"id": rid, "error": str(exc)})
+                continue
             ops = doc.get("ops") or []
             revs.append({"id": rid, "parent": doc.get("parent"), "proposal": doc.get("proposal"),
                          "ops": [op.get("op") if isinstance(op, dict) else None for op in ops],
