@@ -277,8 +277,9 @@ def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> Li
                                    f"junction's transition as it is (set the protection again with pin_transition to hold it)")
         else:
             d = pin_outcome(tl, pin, HUMAN_STAGE)
-            if d is None:
-                state, reason = "pending", "the pipeline has not applied this pin to this cut (re-run the pipeline to apply it)"
+            if d is None:  # (a pipeline run would apply it, and make this session and a published edit stage stale)
+                state, reason = "pending", ("not held by this cut: the pin was stored after the pipeline's last run, so the base stage "
+                                            "does not hold it either")
             elif d.action == "pin_unplaced":
                 state, reason = "not_placed", d.detail or "the pipeline could not place it"
             else:
@@ -388,7 +389,8 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
     total = d["duration_frames"]
     return {
         "session": {"session": s.session_id, "base_stage": s.base_stage, "head": s.head, "revision": rid, "is_head": rid == s.head,
-                    "revisions": n_revs, "stale": why is not None, "stale_reason": why},
+                    "revisions": n_revs, "stale": why is not None, "stale_reason": why,
+                    "can_publish": S.publish_blocker(ws, s.base_stage) is None, "publish_blocker": S.publish_blocker(ws, s.base_stage)},
         "rate": d["rate"], "fps": d["fps"], "duration_frames": total, "duration_seconds": _seconds(total, ctx.rate),
         "clips": d["clips"],
         "junctions": d["junctions"],

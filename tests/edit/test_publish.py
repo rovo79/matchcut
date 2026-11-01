@@ -92,14 +92,14 @@ def test_publishing_again_from_the_same_session_replaces_edit_json_and_keeps_the
     r2 = edit(ws, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
     second = P.publish(ws)
     assert (first["revision"], second["revision"], second["previous"], second["replaced"]) == (r1, r2, r1, None)
-    copies = sorted(p.name for p in (ws / "edits" / "published").iterdir())
+    copies = sorted(p.name for p in (ws / "edits" / "published").glob("r*.json"))
     assert copies == sorted([Path(first["published"]).name, Path(second["published"]).name])
     assert (ws / first["published"]).read_bytes() != (ws / "edit.json").read_bytes() == (ws / second["published"]).read_bytes()
     assert not (ws / "edits" / "replaced").exists()
     # an earlier revision may be published again: the same session, so it replaces edit.json too
     again = P.publish(ws, r1)
     assert again["revision"] == r1 and (ws / "edit.json").read_bytes() == (ws / first["published"]).read_bytes()
-    assert len(list((ws / "edits" / "published").iterdir())) == 2  # the same bytes: the immutable copy is reused
+    assert len(list((ws / "edits" / "published").glob("r*.json"))) == 2  # the same bytes: the immutable copy is reused
     assert json.loads((ws / "edit_publish.json").read_text())["decisions"] == 1
 
 
@@ -133,10 +133,13 @@ def test_publishing_from_another_session_is_refused_then_moves_the_old_pair_asid
 
 
 def test_a_corrupt_record_is_refused_without_replace(ws):
+    """Another session meets an edit.json whose record is unreadable: refused, naming a possibly interrupted publish; replace moves it."""
     edit(ws, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
     P.publish(ws)
     (ws / "edit_publish.json").write_text("{not json")
-    with pytest.raises(Refused, match="no readable edit_publish.json"):
+    S.start(ws, restart=True)
+    edit(ws, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
+    with pytest.raises(Refused, match=r"no readable edit_publish.json \(an interrupted publish\?\)"):
         P.publish(ws)
     assert P.publish(ws, replace=True)["replaced"]
 
@@ -152,9 +155,9 @@ def test_publishing_never_touches_final_the_passes_or_the_human_stage(ws, tmp_pa
     before = protected(ws)
     assert set(before) >= {"final.json", "01_tidy.json", "roughcut.json", "human.json", "human_import.json"}
     edit(ws, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
-    P.publish(ws)
+    P.publish(ws, supersede_human=True)
     edit(ws, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -2}])
-    P.publish(ws)
+    P.publish(ws)  # (the human stage is stale already: nothing more to supersede)
     assert protected(ws) == before
     # the human stage, imported before the publish, continues final's history, not the edit stage's: it is left out now (never deleted)
     assert stale_human(ws) == ("human.json is stale: edit.json was published after the import, and the human history does not continue it "

@@ -24,6 +24,8 @@ fingerprint names the exact version, else ``--stage`` and ``--base`` must.
 from __future__ import annotations
 
 import ast
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -32,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from matchcut.pipeline.config import MusicConfig, PipelineConfig
 from matchcut.pipeline.editorial import Pin, pin_change
@@ -54,6 +56,7 @@ HUMAN = "human"
 EDIT = EDIT_STAGE  # an agent's published edit session (matchcut.edit writes edit.json): exported when named, never by default
 DEFAULT_STAGES: Tuple[str, ...] = ("roughcut", "final")
 RESOLVE_SCRIPT = "open_in_resolve.py"
+STAGE_LOCK = ".stage.lock"  # WS/.stage.lock: held while the edit or the human stage is written (publish) or read and written (import)
 SNAPSHOT_DIR = ".stages"  # <exports>/.stages/<stage>-<first 12 hex of the stage file's sha256>.json: the stage as it was exported
 IMPORT_SCHEMA = "matchcut.human_import/1"
 _PLACEMENT_NOTE = re.compile(r"^(gap\b|event \S+ starts \d+ frames before)")  # the readers' notes about a gap or an overlap on the record side
@@ -787,6 +790,19 @@ def _name_stage(name: str, names: Sequence[str]) -> str:
     return ""
 
 
+@contextlib.contextmanager
+def stage_lock(ws: Path) -> Iterator[None]:
+    """Hold an exclusive ``flock`` on ``WS/.stage.lock`` for the block.  ``import_timeline`` holds it while it reads ``edit.json`` and its
+    record and writes ``human.json``; ``matchcut.edit``'s publish holds it (inside the session lock, which import never takes) while it
+    writes the edit stage, so neither sees the other half done.  One lock, always taken last: no deadlock."""
+    fd = os.open(Path(ws) / STAGE_LOCK, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _stage_file(ws: Path, stage: str) -> Path:
     return Path(ws) / EDIT_FILE if stage == EDIT else dict(stage_timeline_paths(ws)).get(stage, Path(ws) / f"{stage}.json")
 
@@ -795,12 +811,15 @@ def _snapshot_folders(ws: Path, imported: Path) -> List[Path]:
     return list(dict.fromkeys([Path(ws) / "exports" / SNAPSHOT_DIR, imported.resolve().parent / SNAPSHOT_DIR]))
 
 
-def _edit_in_play(ws: Path, imported: Path) -> bool:
-    """True when the edit stage could be the base of an editor's file: an ``edit.json`` (fresh or not) or an exported snapshot of one.
-    A file's base is then never assumed: it must be named by the file's fingerprint, or by ``--stage`` and ``--base``."""
+def _edit_in_play(ws: Path) -> str:
+    """What makes the edit stage a possible base of an editor's file in this workspace ("" when nothing does): its ``edit.json`` (fresh or
+    not), or a snapshot of one in its ``exports/.stages``.  A file's base is then never assumed: it must be named by the file's
+    fingerprint, or by ``--stage`` and ``--base``.  (A stray snapshot next to the imported file does not count: a workspace that never had
+    an edit stage imports exactly as before M3a.)"""
     if (Path(ws) / EDIT_FILE).exists():
-        return True
-    return any(any(f.glob(f"{EDIT}-*.json")) for f in _snapshot_folders(ws, imported) if f.is_dir())
+        return "an edit stage"
+    folder = Path(ws) / "exports" / SNAPSHOT_DIR
+    return "an exported edit stage" if folder.is_dir() and any(folder.glob(f"{EDIT}-*.json")) else ""
 
 
 def _fingerprint_stages(ws: Path, imported: Path, sha: str, stages: Sequence[str]) -> List[str]:
@@ -816,25 +835,44 @@ def _load_base(ws: Path, base: str, stage: str) -> Tuple[Path, Timeline, str]:
     """The base an import is diffed against, named by ``--base``: a path, or a snapshot's name in ``exports/.stages`` (with or without
     ``.json``).  (its path, its timeline, the sha256 of its bytes); a one-line ``InterchangeError`` when it cannot be read or is a timeline
     of another stage than ``stage``."""
-    candidates = [Path(base)]
-    if not Path(base).is_absolute():
-        folder = Path(ws) / "exports" / SNAPSHOT_DIR
+    folder = Path(ws) / "exports" / SNAPSHOT_DIR
+    named = re.fullmatch(r"([a-z][a-z0-9_]*)-([0-9a-f]{12})(\.json)?", base)
+    candidates: List[Path] = []
+    if named and not Path(base).is_absolute():  # a snapshot's name: exports/.stages first, whatever the current directory holds
+        candidates.append(folder / f"{named.group(1)}-{named.group(2)}.json")
+    candidates.append(Path(base))
+    if not Path(base).is_absolute() and not named:
         candidates += [folder / base, folder / f"{base}.json"]
     found = next((c for c in candidates if c.is_file()), None)
     if found is None:
-        raise InterchangeError(f"--base {base}: no such file (looked for {' and '.join(_shown(ws, c) for c in candidates)})")
+        raise InterchangeError(f"--base {base}: no such file (looked for {' and '.join(_shown(ws, c) for c in dict.fromkeys(candidates))})")
+    found = found.resolve()
     try:
         data = found.read_bytes()
         tl = Timeline.from_dict(json.loads(data.decode("utf-8")))
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise InterchangeError(f"--base {_shown(ws, found)} is not a stage timeline: {str(exc).splitlines()[0] if str(exc) else type(exc).__name__}") from exc
+    digest = hashlib.sha256(data).hexdigest()
+    snap = re.fullmatch(r"[a-z][a-z0-9_]*-([0-9a-f]{12})\.json", found.name)
+    if snap and found.parent.name == SNAPSHOT_DIR and not digest.startswith(snap.group(1)):
+        raise InterchangeError(f"--base {_shown(ws, found)} is damaged (its content does not hash to the {snap.group(1)} in its name): "
+                               "re-export, or restore the snapshot")
     if tl.stage and tl.stage != stage:
         raise InterchangeError(f"--base {_shown(ws, found)} is a {tl.stage} stage timeline, not {stage}: name the base the file was exported from")
-    return found, tl, hashlib.sha256(data).hexdigest()
+    return found, tl, digest
 
 
 def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str] = None, stage: Optional[str] = None,
                     base: Optional[str] = None) -> ImportResult:
+    """``_import_timeline`` under the workspace's stage lock (``stage_lock``): a publish never changes ``edit.json`` halfway through."""
+    if not Path(ws).is_dir():
+        return _import_timeline(ws, cfg, path, fmt, stage, base)
+    with stage_lock(ws):
+        return _import_timeline(ws, cfg, path, fmt, stage, base)
+
+
+def _import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str] = None, stage: Optional[str] = None,
+                     base: Optional[str] = None) -> ImportResult:
     """Read an editor's file, write ``human.json`` and ``human_import.json`` (never a canonical file) and return the human decisions.
 
     The stage compared with is ``stage`` when given, else the one the file says it was exported from (OTIO timeline metadata or name,
@@ -869,7 +907,10 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     if not canonical:
         raise InterchangeError(f"no timelines in {ws}: run the pipeline first")
     names = [s for s, _ in canonical]
-    claimable = names + [EDIT]  # the stages a file can say it was exported from
+    has_edit = _edit_in_play(ws)
+    # the stages a file can say it was exported from: edit only in a workspace that has (or exported) an edit stage, so a title such as
+    # "Interview - edit" means nothing new where there never was one
+    claimable = names + ([EDIT] if has_edit else [])
     if stage is not None:
         if stage == HUMAN:
             raise InterchangeError("the human stage is an import result: name one of the stages it is compared with")
@@ -891,7 +932,7 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         pick = stage  # when the file has no such project the reader says so
         if pick is None and known:
             pick = "final" if "final" in known else known[-1]
-        elif pick is None and EDIT in keys:
+        elif pick is None and EDIT in keys and has_edit:
             pick = EDIT
         if len(keys) == 1:
             pick = None  # the only project is read whatever it is called: --stage (or detection) only picks the stage it is compared with
@@ -918,7 +959,7 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
         if edited.stage and edited.stage not in claimable:
             notes.append(f"the file says it was exported from stage {edited.stage}, which this workspace does not have")
     notes = inotes + notes
-    in_play = _edit_in_play(ws, path) or EDIT in (stage, claimed)
+    in_play = bool(has_edit)
     edit_now = _edit(ws)
     current: Dict[str, Timeline] = dict(canonical) | ({EDIT: edit_now} if edit_now is not None else {})
     base_snapshot: Optional[Path] = None
@@ -955,7 +996,7 @@ def import_timeline(ws: Path, cfg: PipelineConfig, path: Path, fmt: Optional[str
     else:  # an edit stage is in play: the base is what the fingerprint names, exactly, or nothing
         fix = "name the base with --stage and --base SNAPSHOT (a file in exports/.stages)"
         if not fingerprint:
-            raise InterchangeError(f"{path.name} carries no stage fingerprint, and this workspace has an edit stage as well as {names[-1]}: "
+            raise InterchangeError(f"{path.name} carries no stage fingerprint, and this workspace has {has_edit} as well as {names[-1]}: "
                                    f"the base is ambiguous; {fix}")
         target = stage or claimed
         matches = _fingerprint_stages(ws, path, fingerprint, claimable)

@@ -74,8 +74,11 @@ seconds without moving any cut that lands on a downbeat, soften one hard cut tha
    the cut points (compare a frame at two edited cuts with the agent's render), the dissolves' lengths and positions, the music?
 8. In the editor trim one clip and turn one dissolve into a cut; re-export OTIO (or FCPXML, or an EDL). Before importing, have the agent
    publish one more change. Then `python -m matchcut.pipeline.cli import ws_m3a FILE`. Are the human decisions exactly the two you made
-   (not the agent's later change), and does the report say it was diffed against an earlier `edit`? Rename the EDL's title, import it again,
-   and check it is refused until you add `--stage edit --base edit-<12 hex>` (the snapshot's name in `exports/.stages/`).
+   (not the agent's later change), and does the report say it was diffed against an earlier `edit`? Then delete the EDL's `* MATCHCUT` comment
+   lines (as an editor that drops comments would; renaming its title alone changes nothing, the stage and fingerprint are in those
+   comments), import it again, and check it is refused until you add `--stage edit --base edit-<12 hex>` (the snapshot's name in
+   `exports/.stages/`). An EDL straight from your editor will most likely have lost the comments already: note whether it needed
+   `--stage`/`--base`.
 9. **Stale handling.** Re-run the passes (`python -m matchcut.pipeline refine ...`, or `R` in the TUI). Does `junctions` say
    `edit.json is stale` (and `human.json is stale`) and show the new `final`? Are `edit.json` and `human.json` still on disk?
 
@@ -118,7 +121,14 @@ Record the run here (date, footage, agent, editor and version), and attach the t
 - The pipeline ignores `hold_transition`: a protected transition is honoured by edit sessions only.
 - There are no persistent timing locks: guards are per proposal.
 - A context change (config, shots, pins, music, source rate) requires proposing again.
-- Only a session on the latest canonical stage can publish; the edit stage is never a session base.
+- Only a session on the latest canonical stage can publish (the default base); a session started on `human` or an earlier stage can edit
+  and render but says `can_publish: false`. The edit stage is never a session base.
+- Publishing is refused while a fresh `human.json` exists that it would leave out as stale; `supersede_human: true` publishes anyway and
+  reports `human_left_out` (human.json is never changed; re-import the editor's file).
+- A revision that no longer holds a pin the base holds under the pins stored now (a pin stored after it was made) cannot be published:
+  propose again, or release the pin.
+- Editors usually drop an EDL's `* MATCHCUT` comments, which carry its stage and fingerprint: once a workspace has an edit stage, such an
+  EDL needs `--stage` and `--base` to import.
 - An agent's edits are not carried across a pipeline re-run: start a new session on the new `final`.
 - No MCP transport (M3b), no GUI or TUI editing, no editor automation.
 

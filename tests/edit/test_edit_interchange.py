@@ -182,7 +182,7 @@ def test_the_human_stage_from_an_edit_import_is_stale_when_edit_json_changes(mak
     assert rec["stage"] == "edit" and "base_snapshot" not in rec  # edit.json is still the exported version
     kept = (x.ws / "human.json").read_bytes()
     edit(x.ws, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    P.publish(x.ws)
+    P.publish(x.ws, supersede_human=True)  # (the human stage continues the old edit.json)
     assert stale_human(x.ws) == ("human.json is stale: edit.json changed since the import (re-export, or re-import the editor's file: matchcut "
                                  "diffs it against the stage it was exported from)")
     assert [s for s, _ in load_stage_timelines(x.ws)][-1] == "edit" and (x.ws / "human.json").read_bytes() == kept
@@ -354,3 +354,84 @@ def test_an_agent_session_through_the_clis_start_propose_apply_publish_export_an
     assert json.loads((w / "human_import.json").read_text())["base_snapshot_sha256"] == exported_sha
     out = pipeline_cli("junctions", str(w))
     assert out.stdout.splitlines()[0] == "3 junctions in human (5 stages)"
+
+
+# ----------------------------------------------------------------------------------------------- review fixes
+def test_an_edl_whose_title_alone_was_renamed_still_imports_by_its_matchcut_comments(make_ws, tmp_path):
+    """The EDL's stage and fingerprint are its ``* MATCHCUT`` comment lines, not its title: a renamed title alone still imports."""
+    x = published(make_ws)
+    export_workspace(x.ws, x.cfg, stages=("edit",))
+    edl = (x.ws / "exports" / "edit.edl").read_text()
+    renamed = tmp_path / "renamed.edl"
+    renamed.write_text("\n".join(("TITLE: my cut" if ln.startswith("TITLE:") else ln) for ln in edl.splitlines()) + "\n")
+    res = import_timeline(x.ws, x.cfg, renamed)
+    assert res.stage == "edit" and res.decisions == []
+
+
+def test_an_edl_without_its_matchcut_comments_is_refused_once_there_is_an_edit_stage(make_ws, tmp_path):
+    """An editor that drops comments: no stage, no fingerprint; refused until --stage/--base name the base."""
+    x = published(make_ws)
+    export_workspace(x.ws, x.cfg, stages=("edit",))
+    edl = (x.ws / "exports" / "edit.edl").read_text()
+    stripped = tmp_path / "stripped.edl"
+    stripped.write_text("\n".join(ln for ln in edl.splitlines() if not ln.lstrip().startswith("* MATCHCUT")) + "\n")
+    msg = unchanged_on_refusal(x.ws, lambda: import_timeline(x.ws, x.cfg, stripped))
+    assert msg.startswith("stripped.edl carries no stage fingerprint, and this workspace has an edit stage as well as final")
+    res = import_timeline(x.ws, x.cfg, stripped, stage="edit", base=f"edit-{sha(x.ws / 'edit.json')[:12]}")
+    assert res.stage == "edit" and res.decisions == []
+
+
+@pytest.mark.parametrize("title", ["Interview - edit", "edit"])
+def test_without_an_edit_stage_a_title_naming_edit_imports_as_before(make_ws, tmp_path, title):
+    """A workspace that never had an edit stage: an EDL titled "... - edit" with its comments dropped is read against final, with the note,
+    exactly as before M3a."""
+    w = make_ws()
+    cfg = PipelineConfig.load(w / "config.json")
+    export_workspace(w, cfg)
+    edl = (w / "exports" / "final.edl").read_text()
+    f = tmp_path / "cut.edl"
+    f.write_text("\n".join((f"TITLE: {title}" if ln.startswith("TITLE:") else ln) for ln in edl.splitlines()
+                           if not ln.lstrip().startswith("* MATCHCUT STAGE")) + "\n")
+    res = import_timeline(w, cfg, f)
+    assert res.stage == "final" and any("carries no stage fingerprint" in n for n in res.notes)
+    assert "history_stage" not in json.loads((w / "human_import.json").read_text())
+    # an OTIO named "... - edit" with final's fingerprint is final's, not ambiguous
+    doc = json.loads((w / "exports" / "final.otio").read_text())
+    doc["name"] = "Interview - edit"
+    doc["metadata"]["matchcut"].pop("stage", None)
+    (tmp_path / "cut.otio").write_text(json.dumps(doc))
+    assert import_timeline(w, cfg, tmp_path / "cut.otio").stage == "final"
+    # and --stage edit is unknown there, as before
+    with pytest.raises(InterchangeError, match="no stage edit in"):
+        import_timeline(w, cfg, f, stage="edit")
+
+
+def test_base_names_a_snapshot_in_exports_stages_before_the_current_directory(make_ws, tmp_path, monkeypatch):
+    x = published(make_ws)
+    export_workspace(x.ws, x.cfg, stages=("edit",))
+    name = f"edit-{sha(x.ws / 'edit.json')[:12]}"
+    decoy = Timeline.load(x.ws / "edit.json")
+    decoy.clips[-1].source_out -= 0.4
+    (tmp_path / name).write_text(json.dumps(decoy.to_dict()))
+    (tmp_path / f"{name}.json").write_text(json.dumps(decoy.to_dict()))
+    monkeypatch.chdir(tmp_path)
+    for base in (name, f"{name}.json"):
+        res = import_timeline(x.ws, x.cfg, x.ws / "exports" / "edit.edl", stage="edit", base=base)
+        assert res.decisions == []
+        rec = json.loads((x.ws / "human_import.json").read_text())
+        assert rec["base_snapshot"] == str((x.ws / "exports" / ".stages" / f"{name}.json").resolve())
+    # a relative path that is not a snapshot's name is resolved and recorded absolute
+    res = import_timeline(x.ws, x.cfg, x.ws / "exports" / "edit.edl", stage="edit", base=f"./{name}.json")
+    assert json.loads((x.ws / "human_import.json").read_text())["base_snapshot"] == str((tmp_path / f"{name}.json").resolve())
+    assert res.decisions  # the decoy is another cut: the editor's file differs from it
+
+
+def test_a_snapshot_whose_content_does_not_match_its_name_is_refused_as_a_base(make_ws):
+    x = published(make_ws)
+    export_workspace(x.ws, x.cfg, stages=("edit",))
+    snap = x.ws / "exports" / ".stages" / f"edit-{sha(x.ws / 'edit.json')[:12]}.json"
+    tl = Timeline.load(snap)
+    tl.name = "changed by hand"
+    snap.write_text(json.dumps(tl.to_dict()))
+    msg = unchanged_on_refusal(x.ws, lambda: import_timeline(x.ws, x.cfg, x.ws / "exports" / "edit.edl", stage="edit", base=snap.stem))
+    assert "is damaged (its content does not hash to the" in msg

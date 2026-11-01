@@ -7,11 +7,14 @@ from rich.text import Text
 
 from matchcut.pipeline.editorial import Pin
 from matchcut.pipeline.junctions import SCORE_ROWS, Junction, JunctionState, frame_delta, signed
-from matchcut.pipeline.timeline import Decision
+from matchcut.pipeline.timeline import EDIT_STAGE, Decision
 
 
 def _same_points(a: float, b: float) -> bool:
     return round(a, 3) == round(b, 3)
+
+
+EDIT_NOT_HELD = "pin not held by this edit: stored after the last run (a run would apply it and leave the edit stage out as stale)"
 
 
 def _pin_badge(j: Junction, pin: Pin, decision: Optional[Decision]) -> str:
@@ -35,7 +38,9 @@ def _pin_badge(j: Junction, pin: Pin, decision: Optional[Decision]) -> str:
     return f"pinned ({pin.origin}), adjusted to out {placed_out:.2f}s / in {placed_in:.2f}s to fit the clips{check}"
 
 
-def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: Optional[Decision] = None) -> List[str]:
+def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: Optional[Decision] = None, latest_stage: str = "") -> List[str]:
+    """The junction's badges.  On the edit stage (``latest_stage``) a pin the edit does not hold is not called pending: a run would make the
+    edit stage stale (``EDIT_NOT_HELD``)."""
     out: List[str] = []
     if j.match_type and shown.locked:
         out.append(f"MATCH CUT ({j.match_type})")
@@ -51,16 +56,18 @@ def badges(j: Junction, shown: JunctionState, pin: Optional[Pin], pin_decision: 
     if shown.score is not None and shown.score.jump_cut_risk:
         out.append("jump-cut risk")
     if pin is not None:
-        out.append(_pin_badge(j, pin, pin_decision))
+        badge = _pin_badge(j, pin, pin_decision)
+        out.append(EDIT_NOT_HELD if latest_stage == EDIT_STAGE and badge.startswith("pin pending") else badge)
     return out
 
 
-def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool = False, pin_decision: Optional[Decision] = None) -> Text:
+def render_inspector(j: Junction, stage: str, pin: Optional[Pin], expanded: bool = False, pin_decision: Optional[Decision] = None,
+                     latest_stage: str = "") -> Text:
     shown = j.state_at(stage) or j.current
     base = j.baseline
     t = Text()
     t.append(f"Junction {j.index + 1} · {j.out_clip} → {j.in_clip} · shot {j.out_shot} → shot {j.in_shot} · beat {j.out_beat} → {j.in_beat}\n", style="bold")
-    marks = badges(j, shown, pin, pin_decision)
+    marks = badges(j, shown, pin, pin_decision, latest_stage)
     t.append((" · ".join(marks) if marks else "no match cut, lock or pin on this junction") + "\n", style="yellow" if marks else "dim")
     if base.score is None or shown.score is None:
         t.append("scores unavailable (no usable analysis for this workspace)\n", style="dim")

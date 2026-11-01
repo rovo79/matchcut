@@ -133,7 +133,7 @@ def test_inspect_pins_protections_and_released_pins(make_ws):
     assert not released["held"] and released["state"] == "released" and "trimmed by 4 frames (in)" in released["reason"]
     assert released["junction"] is None
     pending = pins["s3->s6"]
-    assert pending["state"] == "pending" and "not applied" in pending["reason"]
+    assert pending["state"] == "pending" and "stored after the pipeline's last run" in pending["reason"] and "re-run" not in pending["reason"]
     j = d["junctions"]
     assert j[0]["pinned"] and j[0]["pin"] == "s0->s1" and j[0]["protection"] == ["editor pin s0->s1: its clips stay adjacent with both cut points"]
     assert not j[3]["pinned"] and j[3]["protection"] == []

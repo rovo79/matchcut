@@ -64,7 +64,9 @@ on the canonical timeline, with matchcut's own renderer.
   - **Fingerprint:** the file names stage `edit` and carries a fingerprint, so `import_timeline` compares it with **that exact exported
     snapshot**. This works even when `edit.json` has been published again since.
   - **Unresolvable fingerprint:** if the fingerprint matches no snapshot, the import is refused. It is never guessed.
-  - **No fingerprint, or ambiguous:** a file without a fingerprint (an EDL whose title was changed), or whose base is ambiguous (names `edit`
+  - **No fingerprint, or ambiguous:** a file without a fingerprint (an EDL whose title was changed; *implementation note: an EDL's stage and fingerprint are its
+    `* MATCHCUT` comment lines, so the example is an EDL whose comments were dropped, as most editors do; a renamed title alone still
+    imports*), or whose base is ambiguous (names `edit`
     but a `final` snapshot matches, or the reverse), is refused unless `--stage` and `--base SNAPSHOT` name the base explicitly.
   - **Result:** the `human` stage made from such an import records `stage: "edit"`, the snapshot used, and the sha256 of `edit.json` and of
     the latest canonical stage. It is stale if either changes.

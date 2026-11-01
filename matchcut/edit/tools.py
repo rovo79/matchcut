@@ -261,11 +261,11 @@ TOOLS: List[Tool] = [
                "hold": {"type": "boolean"}, "kind": KIND, "frames": _int("the transition's length in whole frames", 0, MAX_FRAMES)},
               ["hold"]),
          _pin),
-    Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage: WS/edit.json, its record edit_publish.json and a "
-                    "copy in edits/published/. Needs a fresh session on the latest canonical stage. The same session's next publish "
-                    "replaces edit.json; another session's is refused unless replace (it is moved to edits/replaced/ first).",
-         _obj({"revision": REVISION, "replace": {"type": "boolean"}}),
-         lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)))),
+    Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage (edit.json, edit_publish.json, a copy in "
+                    "edits/published/). Needs a fresh session on the latest canonical stage whose revision holds every pin. Refused over "
+                    "another session's edit stage unless replace, and over a fresh human stage it would leave out unless supersede_human.",
+         _obj({"revision": REVISION, "replace": {"type": "boolean"}, "supersede_human": {"type": "boolean"}}),
+         lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)), bool(a.get("supersede_human", False)))),
 ]
 
 BY_NAME: Dict[str, Tool] = {t.name: t for t in TOOLS}

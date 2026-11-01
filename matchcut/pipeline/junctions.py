@@ -60,14 +60,8 @@ def _record(path: Path) -> Dict:
     return doc
 
 
-def stale_edit(ws: Path) -> Optional[str]:
-    """The one-line reason ``edit.json`` (the edit stage: an agent's published edit session) no longer fits the workspace, or None.
-
-    ``matchcut.edit`` records, in ``edit_publish.json``, the sha256 of ``edit.json`` itself, of the stage the session started from and of
-    the latest canonical stage, whose history the edit stage continues.  The edit stage is stale when the record is missing, unreadable or
-    describes another ``edit.json``, when either stage file has changed since (or is gone), or when another stage is the latest canonical
-    one now.  No edit.json: None.  The engine only reads these files.
-    """
+def _edit_reason(ws: Path) -> Optional[str]:
+    """``stale_edit`` without its hint: the one-line reason alone (``edit.json is stale: ...``), or None."""
     ws = Path(ws)
     path = ws / EDIT_FILE
     if not path.exists():
@@ -80,18 +74,30 @@ def stale_edit(ws: Path) -> Optional[str]:
         latest_name = str(record["latest_stage"])
         checks = [(str(record["base_stage"]), record["base_sha256"]), (latest_name, record["latest_stage_sha256"])]
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return f"edit.json is stale: {EDIT_RECORD} is missing or unreadable {EDIT_STALE_HINT}"
+        return f"edit.json is stale: {EDIT_RECORD} is missing or unreadable"
     if _sha256(path) != edit_sha:
-        return f"edit.json is stale: it is not the file {EDIT_RECORD} describes (changed since it was published) {EDIT_STALE_HINT}"
+        return f"edit.json is stale: it is not the file {EDIT_RECORD} describes (changed since it was published)"
     paths = dict(_canonical_paths(ws))
     for stage, want in checks:
         p = paths.get(stage)
         if p is None or _sha256(p) != want:
-            return f"edit.json is stale: {p.name if p is not None else stage + '.json'} changed since it was published {EDIT_STALE_HINT}"
+            return f"edit.json is stale: {p.name if p is not None else stage + '.json'} changed since it was published"
     latest = latest_canonical(ws)
     if latest is None or latest[0] != latest_name:
-        return f"edit.json is stale: {latest_name} is no longer the latest canonical stage {EDIT_STALE_HINT}"
+        return f"edit.json is stale: {latest_name} is no longer the latest canonical stage"
     return None
+
+
+def stale_edit(ws: Path) -> Optional[str]:
+    """The one-line reason ``edit.json`` (the edit stage: an agent's published edit session) no longer fits the workspace, or None.
+
+    ``matchcut.edit`` records, in ``edit_publish.json``, the sha256 of ``edit.json`` itself, of the stage the session started from and of
+    the latest canonical stage, whose history the edit stage continues.  The edit stage is stale when the record is missing, unreadable or
+    describes another ``edit.json``, when either stage file has changed since (or is gone), or when another stage is the latest canonical
+    one now.  No edit.json: None.  The engine only reads these files.
+    """
+    why = _edit_reason(ws)
+    return f"{why} {EDIT_STALE_HINT}" if why else None
 
 
 def edit_listed(ws: Path) -> bool:
@@ -130,7 +136,7 @@ def stale_human(ws: Path) -> Optional[str]:
             return f"human.json is stale: {path.name if path is not None else stage + '.json'} changed since the import {STALE_HINT}"
     listed = edit_listed(ws)
     if EDIT_STAGE in [s for s, _ in checks] and not listed:
-        return f"human.json is stale: it was imported against the edit stage, and {stale_edit(ws) or 'edit.json is gone'} {STALE_HINT}"
+        return f"human.json is stale: it was imported against the edit stage, and {_edit_reason(ws) or 'edit.json is gone'} {STALE_HINT}"
     if listed and history != EDIT_STAGE:
         return f"human.json is stale: edit.json was published after the import, and the human history does not continue it {STALE_HINT}"
     return None

@@ -11,7 +11,7 @@ from .config import DEFAULT_PASSES, PipelineConfig
 from .editorial import PinStore, pin_states
 from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_edit, stale_human
 from .pipeline import Pipeline
-from .timeline import HUMAN_STAGE, Timeline
+from .timeline import EDIT_STAGE, HUMAN_STAGE, Timeline
 
 
 def _common(p: argparse.ArgumentParser) -> None:
@@ -154,14 +154,21 @@ def _interchange(args: argparse.Namespace) -> int:
     return 0
 
 
+EDIT_NOT_HELD = ("not held by this edit (the pin was stored after the pipeline's last run; a run would apply it, and leave the edit "
+                 "stage out as stale)")
+
+
 def _pin_footer(ws: Path, stages) -> List[str]:
-    """On the human stage, one line per stored pin: what the editor's cut did with it (the engine's ``pin_states``, the answer the Edit view gives too)."""
-    if not stages or stages[-1][0] != HUMAN_STAGE:
+    """On the human or the edit stage, one line per stored pin: what that cut did with it (the engine's ``pin_states``, the answer the Edit
+    view gives too).  The edit stage holds every pin its base held (a publish refuses otherwise): a pin it does not hold was stored since
+    the pipeline's last run, and a run would make the edit stage stale, so it is not called pending."""
+    if not stages or stages[-1][0] not in (HUMAN_STAGE, EDIT_STAGE):
         return []
+    edit = stages[-1][0] == EDIT_STAGE
     lines = []
-    for st in pin_states(stages[-1][1], PinStore(ws).load(), HUMAN_STAGE):
-        what = {"applied": "applied", "changed": f"changed by the editor: {st.reason}", "not_placed": f"not placed: {st.reason}",
-                "pending": "pending (run again to apply)"}[st.state]
+    for st in pin_states(stages[-1][1], PinStore(ws).load(), stages[-1][0]):
+        what = {"applied": "held by this edit" if edit else "applied", "changed": f"changed by the editor: {st.reason}",
+                "not_placed": f"not placed: {st.reason}", "pending": EDIT_NOT_HELD if edit else "pending (run again to apply)"}[st.state]
         lines.append(f"pin {st.label}: {what}")
     return lines
 

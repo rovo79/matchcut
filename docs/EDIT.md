@@ -29,8 +29,9 @@ Design: [superpowers/specs/2026-11-01-m3a-edit-core.md](superpowers/specs/2026-1
 The stage order is: the canonical stages, then `edit` when `edit.json` is there and fresh, then `human` when it is fresh. A stale stage is
 left out of the order (and so of `junctions`, the TUI and the exports), never deleted.
 
-**Sessions.** `start` opens a session on a **base stage** (default: the latest fresh stage but `edit`; `edit` is never a base, see
-below). One session at a time lives in `WS/edits/`:
+**Sessions.** `start` opens a session on a **base stage** (default: the latest canonical stage, `final`, the only base that can publish;
+`human` or an earlier canonical stage by name; `edit` is never a base, see below). `start`, `log` and `inspect` report `can_publish` and,
+when it is false, `publish_blocker` (why). One session at a time lives in `WS/edits/`:
 
 | path | what |
 |---|---|
@@ -39,7 +40,9 @@ below). One session at a time lives in `WS/edits/`:
 | `edits/proposals/<id>.json` | accepted proposals |
 | `edits/renders/` | renders, previews and junction frames (named by a hash of what they show) |
 | `edits/published/<rev>-<sha12>.json` | an immutable copy of every published revision |
-| `edits/replaced/<sha12>/` | an `edit.json` (and its record) that another session's publish moved aside |
+| `edits/published/records/` | a copy of every `edit_publish.json` written |
+| `edits/published/log.jsonl` | append-only: one line per publish (time, session, revision, sha256, replaced / superseded flags) |
+| `edits/replaced/<sha12>/` | an `edit.json` (and its record) that another session's publish moved aside; `record-<sha12>/`: a record left without its `edit.json` |
 | `edits/.lock` | every writing command holds it exclusively, the read-only ones shared |
 
 `start` with `restart` (or on a stale session) moves the session to `WS/edits.replaced-<sha12>/` (`edits.stale-<sha12>/`); the lock and the
@@ -77,7 +80,7 @@ same table unchanged.
 
 | command | arguments | what it does |
 |---|---|---|
-| `start` | `{stage?, restart?}` | start a session (default base: the latest fresh stage but `edit`); a stale session is moved aside, a fresh one only with `restart: true` |
+| `start` | `{stage?, restart?}` | start a session (default base: the latest canonical stage); a stale session is moved aside, a fresh one only with `restart: true`; says `can_publish` |
 | `inspect` | `{revision?}` | the cut of a revision (default: the head) in frames: clips, junctions and their protections, shots and their use, story beats, music beats, pins, staleness |
 | `log` | `{}` | the revisions (id, parent, operations, summary), the head, staleness |
 | `propose` | `{ops, guards?}` | run operations on the head and check every rule; accepted: the proposal id, its changes by clip id and its timing |
@@ -89,13 +92,14 @@ same table unchanged.
 | `render` | `{revision?, junction?, quality?}` | render a revision (default: the head), whole or one junction's window; `quality` is `proxy` (default) or `full` |
 | `frames` | `{junction, revision?}` | the outgoing clip's last frame and the incoming clip's first frame as JPEG files, with their source frame numbers |
 | `pin_transition` | `{pin? \| junction?, hold, kind?, frames?}` | protect (`hold: true`) or release the transition at an editor pin's junction |
-| `publish` | `{revision?, replace?}` | publish a revision (default: the head; never `r000`) as the `edit` stage |
+| `publish` | `{revision?, replace?, supersede_human?}` | publish a revision (default: the head; never `r000`) as the `edit` stage |
 
 A session's whole life, as the CLI prints it (a 25 fps test workspace):
 
 ```shell
 $ python -m matchcut.edit WS start
-{"session": "dc8f9a5e-...", "base_stage": "final", "base_sha256": "0fe5cf...", "head": "r000", "normalised": [], "moved_aside": null}
+{"session": "dc8f9a5e-...", "base_stage": "final", "base_sha256": "0fe5cf...", "head": "r000", "normalised": [], "moved_aside": null,
+ "can_publish": true, "publish_blocker": null}
 
 $ python -m matchcut.edit WS propose '{"ops": [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5},
       {"op": "set_transition", "junction": 3, "kind": "dissolve", "frames": 6}], "guards": {"max_duration_change_frames": 12}}'
@@ -112,7 +116,8 @@ $ python -m matchcut.edit WS publish
 {"schema": "matchcut.edit_publish/1", "session": "dc8f9a5e-...", "revision": "r001", "timeline_sha256": "a477ae...",
  "edit_file": "edit.json", "edit_sha256": "9f5b4c...", "base_stage": "final", "base_file": "final.json", "base_sha256": "0fe5cf...",
  "latest_stage": "final", "latest_stage_file": "final.json", "latest_stage_sha256": "0fe5cf...", "published_at": "2026-11-01T16:24:20+00:00",
- "decisions": 2, "published": "edits/published/r001-9f5b4c501634.json", "replaced": null, "previous": null}
+ "decisions": 2, "published": "edits/published/r001-9f5b4c501634.json", "replaced": null, "previous": null, "human_left_out": null,
+ "pins": []}
 
 $ python -m matchcut.pipeline.cli junctions WS
 4 junctions in edit (4 stages)
@@ -173,7 +178,7 @@ command still prints one JSON object (`{"error": "terminated", "kind": "error"}`
 
 ### 1. Published agent edits are the `edit` stage
 
-`publish` writes, atomically and under the session lock:
+`publish` writes, atomically, under the session lock and the workspace's stage lock (`WS/.stage.lock`, which an import holds too):
 
 - `WS/edit.json`: the revision's timeline, stage `edit`. Its history is the latest canonical stage's history plus one `agent` decision per
   change (`trimmed`, `slipped`, `transition`, `removed`, `added`, `moved`), each naming its proposal, so junction attribution and pin
@@ -181,9 +186,11 @@ command still prints one JSON object (`{"error": "terminated", "kind": "error"}`
 - `WS/edit_publish.json` (`matchcut.edit_publish/1`): the session id, the revision and its timeline sha256, the sha256 of `edit.json`, the
   base stage and its sha256 when the session started, the latest canonical stage and its sha256, the time, the number of agent decisions,
   and the path of the published copy;
-- `WS/edits/published/<rev>-<sha12>.json`: an immutable copy of the same bytes.
+- `WS/edits/published/<rev>-<sha12>.json`: an immutable copy of the same bytes;
+- a copy of the record in `edits/published/records/`, and one line in `edits/published/log.jsonl`.
 
-It never touches `final.json`, a pass file, `human.json` or `human_import.json`.
+It never touches `final.json`, a pass file, `human.json` or `human_import.json`. The result is the record plus `replaced`, `previous`,
+`human_left_out` and `pins` (every stored pin and where it stands in the published cut: `held`, or `not_held` with the reason).
 
 What can be published, and when publishing is refused:
 
@@ -195,10 +202,22 @@ What can be published, and when publishing is refused:
   the editor's work unattributed, and a cut made from `human` listed before `human` would undo the editor's changes in every junction's
   history.
 - A stale session is refused, like every command that changes something.
+- **Pins are checked again.** The revision must hold every editor pin the base holds under the pins stored **now** (clips, adjacency, cut
+  points, and a protected transition: the one the pin holds). A pin stored after the revision was made, which it does not hold, is refused:
+  `pin s0->s1 was added or changed since r001 was made, and r001 breaks the editor pin s0->s1: c002 removed: propose the edits again (or
+  release the pin)`. A pin stored after the pipeline's last run (the base does not hold it either) is reported `not_held` ("not held by
+  this edit"), never "pending": a pipeline run would apply it, and make the edit stage stale.
+- **A fresh human stage is not left out silently.** While a fresh `human.json` exists that the publish would make stale (one imported
+  against a canonical stage, whose history does not continue an edit stage; or one imported against the edit stage, when `edit.json`
+  changes), the publish is refused, naming the human stage. `supersede_human: true` publishes anyway; the result's `human_left_out` says why
+  the human stage is now left out. `human.json` and `human_import.json` are never changed: re-import the editor's file to bring it back.
 - **Never a silent overwrite.** Publishing again from the same session replaces `edit.json` (the earlier copy stays in `published/`;
   `previous` names the revision it replaced). An `edit.json` another session published, or one without a readable record that describes it
-  (no record, a record of another file, a hand edit, a publish cut short between its two writes), is refused unless `replace: true`, which
-  first moves the old pair to `edits/replaced/<sha12 of the old edit.json>/` (`-2`, `-3` ... when that exists).
+  (no record, a record of another file, a hand edit), is refused unless `replace: true`, which first moves the old pair to
+  `edits/replaced/<sha12 of the old edit.json>/` (`-2`, `-3` ... when that exists); the refusal asks whether a publish was interrupted. A
+  publish cut short after `edit.json` was written but before its record is recognised (`edit.json` is byte for byte this session's publish
+  of one of its revisions) and the session's next publish goes ahead. A record left without its `edit.json` is archived in
+  `edits/replaced/record-<sha12>/` before a new one is written.
 
 **The edit stage is never a session base**, by default or by name: publishing replaces `edit.json`, so a session on it would be stale the
 moment it published. Start from `final` (or `human`, though that session cannot publish).
@@ -210,7 +229,10 @@ The edit stage through M2a (`matchcut.interchange`, see [INTEROP.md](INTEROP.md#
   fidelity report. It is never exported by default (`roughcut` and `final` are), like `human`.
 - `import` of an editor's re-export compares it with **that exact snapshot**, even after `edit.json` was published again. A fingerprint
   that matches nothing is refused; a file without one, or one whose fingerprint names another stage than the file does, is refused unless
-  `--stage` and `--base SNAPSHOT` name the base. The `human` stage it writes records `stage: "edit"`, the snapshot, and the sha256 of
+  `--stage` and `--base SNAPSHOT` name the base. **Once any edit stage or edit snapshot exists, a fingerprint-less import needs `--base`.**
+  An EDL's stage and fingerprint are its `* MATCHCUT` comment lines (renaming its title changes nothing); editors usually drop those
+  comments, so an EDL re-export will usually need `--stage edit --base edit-<12 hex>`. A workspace that never had an edit stage imports
+  exactly as before. The `human` stage it writes records `stage: "edit"`, the snapshot, and the sha256 of
   `edit.json` and of the latest canonical stage; it is stale once either changes.
 
 ### 2. Pinned junctions may change their transition
@@ -236,8 +258,8 @@ Editor pins come from the TUI's Edit view (`l` locks the inspected cut, `r` reve
 `pin_transition` protects or releases the transition at a pin's junction:
 
 ```shell
-python -m matchcut.edit WS pin_transition '{"pin": "s0->s1", "hold": true}'          # hold the head's transition there
-python -m matchcut.edit WS pin_transition '{"junction": 1, "hold": false}'           # release it
+python -m matchcut.edit WS pin_transition '{"pin": "s0->s1", "hold": true}'          # hold the head's transition (a pin the head holds)
+python -m matchcut.edit WS pin_transition '{"junction": 1, "hold": false}'           # release it (junction 1 holds a pin)
 python -m matchcut.edit WS pin_transition '{"pin": "s3->s6", "hold": true, "kind": "dissolve", "frames": 12}'  # a pin the head does not hold yet
 ```
 
@@ -246,7 +268,9 @@ else in the file; older pins read as unprotected, and the TUI's `l`/`r` keep mak
 context, every proposal made before the change must be proposed again (the result lists them). **The pipeline ignores the protection**
 (see the limitations).
 
-On the published `edit` stage a pinned junction keeps its `pinned` badge in `junctions` and the TUI (the edit stage cannot release a pin).
+On the published `edit` stage a pinned junction keeps its `pinned` badge in `junctions` and the TUI (a publish refuses a revision that
+releases a pin its base holds), and `junctions` ends with a line per stored pin: `held by this edit`, or `not held by this edit (...)` for a
+pin stored after the pipeline's last run.
 
 ## Rendering and naming
 
@@ -270,7 +294,7 @@ running render holds. `proxy` renders at `render.proxy_width`; `full` at the sou
 | the session | its base stage file changed or is gone, that stage is no longer listed, or the source's frame rate changed | every command that changes it refuses; read-only ones say `"stale": true`; `start` moves it to `edits.stale-<sha12>/` |
 | `edit` | `edit_publish.json` is missing, unreadable or describes another `edit.json`; the base stage file or the latest canonical stage file changed or is gone; another stage is the latest canonical one | left out of the stage order (`junctions` and the TUI say why), never deleted; export refuses it |
 | `human` imported against `edit` | `edit.json` or the latest canonical stage changed, or the edit stage is stale | left out, never deleted |
-| `human` imported against a canonical stage | that stage or the latest canonical stage changed, or **an `edit.json` was published after the import** (the human stage is listed after the edit stage and its history would not continue it) | left out, never deleted |
+| `human` imported against a canonical stage | that stage or the latest canonical stage changed, or **an `edit.json` was published after the import** (the human stage is listed after the edit stage and its history would not continue it; a publish does this only with `supersede_human`) | left out, never deleted |
 
 A pipeline re-run rewrites `final.json`, so it makes the session, the edit stage and a human stage stale together. Start a new session on
 the new `final` and redo the edits; matchcut does not carry an agent's edits across a pipeline run.
@@ -290,8 +314,13 @@ the new `final` and redo the edits; matchcut does not carry an agent's edits acr
 - **A context change requires a re-propose.** A change to the config, shots, pins (including `pin_transition`), music or the source's rate
   makes every stored proposal unusable: `apply` and `preview` refuse it until it is proposed again.
 - One session per workspace; a second agent must wait for the lock or work in a copy.
-- Only a session on the latest canonical stage can publish (see decision 1).
-- Publishing a revision made before a pin was added does not check the new pin: the edit stage's pin badges follow its history, like
-  `final`'s (a pin added later shows as pending until the pipeline runs).
-- A publish cut short between writing `edit.json` and its record leaves an `edit.json` the record does not describe: it is stale, and the
-  next publish needs `replace` (which moves it aside, so nothing is lost).
+- **Only a session on the latest canonical stage can publish** (the default base). A session on `human` or an earlier stage can edit,
+  preview and render but never publish (`can_publish: false`); its edits must be redone on `final`.
+- **Publishing over a fresh human stage is refused** unless `supersede_human: true`, which leaves the human stage out as stale (never
+  deleted): re-import the editor's file afterwards.
+- **Editors drop EDL comments.** An EDL's stage and fingerprint are its `* MATCHCUT` comment lines; once a workspace has an edit stage, an
+  EDL without them needs `--stage` and `--base` to import.
+- A pin stored after the pipeline's last run is not held by the edit stage (`not_held`); only a pipeline run applies it, and that makes the
+  edit stage stale.
+- Another session meeting an `edit.json` its record does not describe (a hand edit, or another session's interrupted publish) needs
+  `replace` (which moves it aside, so nothing is lost).

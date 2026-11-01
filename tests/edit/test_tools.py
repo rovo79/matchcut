@@ -17,7 +17,7 @@ COMMANDS = {"start", "inspect", "log", "propose", "apply", "undo", "redo", "chec
 
 def test_the_table_covers_every_command_once():
     assert [t.name for t in T.TOOLS] == list(T.BY_NAME) and set(T.BY_NAME) == COMMANDS
-    assert T.BY_NAME["publish"].schema["properties"].keys() == {"revision", "replace"}  # M3a task 4
+    assert T.BY_NAME["publish"].schema["properties"].keys() == {"revision", "replace", "supersede_human"}  # M3a task 4
     for t in T.TOOLS:
         assert t.description and len(t.description) < 400 and callable(t.handler)
         assert t.schema["type"] == "object" and t.schema["additionalProperties"] is False

@@ -216,7 +216,7 @@ class EditView(Vertical):
             store = PinStore(self._state.workspace)
             # where the human stage says a pin changed, the badge is on the junction the pin now sits at (its pair, or its surviving clip), not by shots
             pin = (store.get(*j.pin_key) if j.pin_lost and j.pin_key else None) or store.get(j.out_shot, j.in_shot)
-            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin)))
+            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin), self.stages[-1] if self.stages else ""))
         # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
         shown = j.state_at(stage) or j.current
         media = self._state.media()

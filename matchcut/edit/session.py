@@ -48,7 +48,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from matchcut.pipeline.audio import MusicAnalysis
 from matchcut.pipeline.config import PipelineConfig
 from matchcut.pipeline.editorial import PinStore
-from matchcut.pipeline.junctions import stage_timeline_paths
+from matchcut.pipeline.junctions import latest_canonical, stage_timeline_paths
 from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.shots import load_shots
 from matchcut.pipeline.timeline import AGENT_PASS, EDIT_STAGE, Decision, Timeline, Transition, clip_origin
@@ -277,12 +277,26 @@ def _base_stage(ws: Path, stage: Optional[str]) -> Tuple[str, Path]:
     paths = _stage_paths(ws)
     if not paths:
         raise SessionError(f"no stage timeline in {ws}: run the pipeline first")
-    if stage is None:
-        name = list(paths)[-1]
+    if stage is None:  # the latest canonical stage: the only base a session can publish from (an earlier stage or human: by name)
+        latest = latest_canonical(ws)
+        name = latest[0] if latest is not None and latest[0] in paths else list(paths)[-1]
         return name, paths[name]
     if not isinstance(stage, str) or stage not in paths:
         raise SessionError(f"no stage {stage!r} in {ws} (stages: {', '.join(paths)})")
     return stage, paths[stage]
+
+
+def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
+    """Why a session on ``base_stage`` can never publish (None when it can): the edit stage continues the history of the latest canonical
+    stage, so only a session on that stage can publish (``publish``)."""
+    latest = latest_canonical(ws)
+    if latest is None:
+        return f"no canonical stage in {ws}: run the pipeline first"
+    if base_stage != latest[0]:
+        return (f"the session is based on {base_stage}, not on the latest canonical stage {latest[0]}: the edit stage continues the history "
+                f'of {latest[0]}, so only a session started on it can publish (start {{"stage": "{latest[0]}", "restart": true}} and redo '
+                "the edits)")
+    return None
 
 
 def stale_reason(ws: Path, state: Dict[str, Any]) -> Optional[str]:
@@ -589,7 +603,8 @@ def _read_base(path: Path, ctx: EditContext) -> Tuple[str, Timeline, List[str]]:
 
 # ----------------------------------------------------------------------------------------------- commands
 def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
-    """Start a session on ``stage`` (default: the latest fresh stage but ``edit``, which is never a base) and return its summary.
+    """Start a session on ``stage`` (default: the latest canonical stage; ``edit`` is never a base) and return its summary, with
+    ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish).
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -631,8 +646,9 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
                  "base_sha256": sha, "rate": str(ctx.rate), "head": "r000", "next": 1, "reserved_ids": sorted({c.id for c in r000.clips}),
                  "created": created}
         _save_state(d, state)
+    blocker = publish_blocker(ws, name)
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
-            "moved_aside": moved.name if moved is not None else None}
+            "moved_aside": moved.name if moved is not None else None, "can_publish": blocker is None, "publish_blocker": blocker}
 
 
 def _change_decision(line: str, before: Timeline, after: Timeline) -> Decision:
@@ -858,5 +874,6 @@ def log(ws: Path) -> Dict[str, Any]:
                          "summary": "; ".join(doc.get("details") or []) if doc.get("parent") is not None else "base",
                          "changes": len(doc.get("changes") or []), "created": doc.get("created")})
         why = s.stale()
+    blocker = publish_blocker(ws, s.base_stage)
     return {"session": s.session_id, "base_stage": s.base_stage, "base_sha256": s.state["base_sha256"], "head": s.head,
-            "stale": why is not None, "stale_reason": why, "revisions": revs}
+            "stale": why is not None, "stale_reason": why, "can_publish": blocker is None, "publish_blocker": blocker, "revisions": revs}

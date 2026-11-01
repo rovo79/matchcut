@@ -22,7 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from matchcut.interchange import InterchangeError
 from matchcut.interchange.common import junction_ids, layout
-from matchcut.pipeline.editorial import pin_outcome
+from matchcut.pipeline.editorial import Pin, pin_outcome
 from matchcut.pipeline.passes import is_match_cut
 from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, clip_origin
 
@@ -78,6 +78,38 @@ def _dedupe(items: Iterable[str]) -> List[str]:
 
 
 # ----------------------------------------------------------------------------------------------- the rules
+def pin_problems(before: Timeline, after: Timeline, ctx: EditContext) -> List[Tuple[Pin, str]]:
+    """(pin, one line) for every editor pin of ``ctx`` that ``before`` holds and ``after`` no longer holds as it was: its two clips
+    (within a session clip ids are stable, so the very two clips the pin holds in ``before``), their adjacency and both cut points, and
+    the transition the pin protects (``hold_transition``).  ``pin_outcome`` alone would accept another clip of the same shot at the same
+    point for a pin taken without clip instances."""
+    out: List[Tuple[Pin, str]] = []
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    ja = _junctions(after)
+    present = {c.id for c in after.clips}
+    for pin, site in held_pins(before, ctx):
+        a, b = before.clips[site].id, before.clips[site + 1].id
+        k = ja.get((a, b))
+        if k is None:
+            gone = [x for x in (a, b) if x not in present]
+            why = f"{' and '.join(gone)} removed" if gone else f"its clips {a}|{b} are no longer adjacent"
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: {why}"))
+            continue
+        if _cut(ra, k)[:2] != _cut(rb, site)[:2]:
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: the cut {a}|{b} moved"))
+            continue
+        d = pin_outcome(after, pin, HUMAN_STAGE)
+        if d is None or d.action != "pinned":
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: {d.detail if d is not None and d.detail else 'the pin is lost'}"))
+            continue
+        if pin.hold_transition:
+            t0 = (rb[site + 1].kind, rb[site + 1].tr)
+            t1 = (ra[k + 1].kind, ra[k + 1].tr)
+            if t0 != t1:
+                out.append((pin, f"changes the transition the editor pin {pin_label(pin)} protects ({_label(*t0)} -> {_label(*t1)})"))
+    return out
+
+
 def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: EditContext, guards: Optional[Dict[str, Any]] = None) -> List[str]:
     """What ``after`` (the result of a proposal on ``before``) breaks, one line each; [] when it may be applied.  ``touched`` are the ids of
     the clips the operations changed (``OpResult.touched``, united over the proposal)."""
@@ -148,29 +180,7 @@ def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: Edi
             except InterchangeError:
                 pass
 
-    # editor pins and the transitions they protect.  Within a session clip ids are stable, so the very two clips the pin holds in ``before``
-    # must still be adjacent, with the same cut points (``pin_outcome`` alone would accept another clip of the same shot at the same point
-    # for a pin taken without clip instances)
-    for pin, site in held_pins(before, ctx):
-        a, b = before.clips[site].id, before.clips[site + 1].id
-        k = ja.get((a, b))
-        if k is None:
-            gone = [x for x in (a, b) if x not in count_a]
-            why = f"{' and '.join(gone)} removed" if gone else f"its clips {a}|{b} are no longer adjacent"
-            out.append(f"breaks the editor pin {pin_label(pin)}: {why}")
-            continue
-        if _cut(ra, k)[:2] != _cut(rb, site)[:2]:
-            out.append(f"breaks the editor pin {pin_label(pin)}: the cut {a}|{b} moved")
-            continue
-        d = pin_outcome(after, pin, HUMAN_STAGE)
-        if d is None or d.action != "pinned":
-            out.append(f"breaks the editor pin {pin_label(pin)}: {d.detail if d is not None and d.detail else 'the pin is lost'}")
-            continue
-        if pin.hold_transition:
-            t0 = (rb[site + 1].kind, rb[site + 1].tr)
-            t1 = (ra[k + 1].kind, ra[k + 1].tr)
-            if t0 != t1:
-                out.append(f"changes the transition the editor pin {pin_label(pin)} protects ({_label(*t0)} -> {_label(*t1)})")
+    out += [line for _, line in pin_problems(before, after, ctx)]
 
     # match cuts
     for i in range(len(before.clips) - 1):

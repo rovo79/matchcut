@@ -497,7 +497,7 @@ def test_a_session_on_the_human_stage_is_stale_once_that_stage_is(ws):
     final.save(ws / "human.json")
     sha = hashlib.sha256((ws / "final.json").read_bytes()).hexdigest()
     (ws / "human_import.json").write_text(json.dumps({"stage": "final", "stage_sha256": sha, "latest_stage": "final", "latest_stage_sha256": sha}))
-    assert S.start(ws, restart=True)["base_stage"] == "human"
+    assert S.start(ws, stage="human", restart=True)["base_stage"] == "human"  # (by name: the default base is final since the task 4 review)
     S.propose(ws, TRIM)
     touch_final(ws)
     with pytest.raises(S.SessionError, match="human.json \\(the base stage human\\) is stale itself"):

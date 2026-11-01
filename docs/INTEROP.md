@@ -357,7 +357,10 @@ editor's file came from:
   `<file> was exported from an edit stage (sha <12 hex>) that matches no snapshot (edit-<12 hex>.json is not in exports/.stages or <dir>/.stages)
   and is not edit.json now: matchcut does not guess the base; restore the snapshot, or name the base with --stage and --base SNAPSHOT (a file in
   exports/.stages)`. For a canonical stage the existing missing/damaged-snapshot messages apply.
-- **No fingerprint** (an EDL whose title was changed, an application that dropped the metadata) is refused:
+- **No fingerprint** (an EDL whose `* MATCHCUT` comment lines were deleted, as an editor that drops comments does; an application that
+  dropped the metadata) is refused. An EDL's stage and fingerprint are its `* MATCHCUT STAGE` and `* MATCHCUT STAGE_SHA256` comments, not
+  its title: renaming the title alone still imports. EDL re-exports from real editors usually drop the comments, so once a workspace has an
+  edit stage they will usually need `--stage` and `--base`:
   `<file> carries no stage fingerprint, and this workspace has an edit stage as well as final: the base is ambiguous; name the base with
   --stage and --base SNAPSHOT (a file in exports/.stages)`.
 - **An ambiguous base** (the file names `edit` but its fingerprint is a `final` file's, or the reverse) is refused:
@@ -367,7 +370,12 @@ editor's file came from:
   `.json`, e.g. `edit-0123456789ab`); it must be a stage timeline of stage `S`. The file's own word and fingerprint are then only noted.
   `--base` needs `--stage`.
 
-In a workspace that has never had an edit stage, imports behave exactly as before (no `--base` needed).
+In a workspace that has never had an edit stage (no `edit.json`, no `edit-*.json` in its `exports/.stages`), imports behave exactly as
+before: no `--base` is needed, and a title such as `Interview - edit` names no stage. Once any edit stage or edit snapshot exists, a
+fingerprint-less file needs `--stage` and `--base`. `--base NAME` (a snapshot's name, `<stage>-<12 hex>[.json]`) is looked up in
+`exports/.stages` first; the path recorded in `human_import.json` is absolute; a snapshot whose content does not hash to the 12 hex digits in
+its name is refused as damaged. `import` holds the workspace's stage lock (`WS/.stage.lock`) while it reads `edit.json` and writes the human
+stage, and a publish holds it while it writes the edit stage.
 
 **The human stage made from an edit import** records `stage: "edit"`, `stage_file: "edit.json"` and its sha256 now, the snapshot used
 (`base_snapshot`, `base_snapshot_sha256`), the latest canonical stage and its sha256, and `history_stage: "edit"` with the sha256 of
@@ -375,8 +383,9 @@ In a workspace that has never had an edit stage, imports behave exactly as befor
 the `agent` decisions, then the `human` ones). It is stale when `edit.json` changes (a new publish), when the latest canonical stage changes,
 or when the edit stage is stale. The same holds for a file imported against a canonical stage while a fresh edit stage exists (its history
 continues the edit stage's; a note says the agent's changes show as differences). Conversely, a `human.json` imported before an `edit.json`
-was published does not continue the edit stage's history, so publishing makes it stale (it is left out, never deleted; re-import the
-editor's file).
+was published does not continue the edit stage's history, so publishing would make it stale: `publish` refuses unless it is given
+`supersede_human: true`, and then reports `human_left_out` (the human stage is left out, never deleted or rewritten; re-import the editor's
+file to bring it back).
 
 ## DaVinci Resolve
 
