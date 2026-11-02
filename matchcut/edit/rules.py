@@ -162,6 +162,18 @@ def protections_of(pins: Sequence[Pin]) -> Dict[str, Dict[str, Any]]:
     return {pin_label(p): protection_of(p) for p in pins}
 
 
+def recorded_protection(value: Any) -> Optional[Dict[str, Any]]:
+    """A protection read from a record (an earlier session's r000) as ``protection_of`` gives it, when it protects; None when it does not
+    protect or is malformed."""
+    if not isinstance(value, dict) or value.get("hold_transition") is not True:
+        return None
+    try:
+        return protection_of(Pin.from_dict({"out_shot": 0, "in_shot": 0, "out_time": 0, "in_time": 0, "hold_transition": True,
+                                            "held_transition": value.get("held_transition")}))
+    except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
 def _words(t: Optional[Dict[str, Any]]) -> str:
     """A transition in words, with its article: "a cut", "a dissolve of 4 frames"."""
     if not t:
@@ -170,12 +182,26 @@ def _words(t: Optional[Dict[str, Any]]) -> str:
     return "a cut" if not frames else f"a {kind.replace('_', ' ')} of {frames} frames"
 
 
-def protection_changes(baseline: Dict[str, Dict[str, Any]], tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
+def _origin_words(origin: Dict[str, Any]) -> str:
+    """Where a baseline protection the pins no longer had when the session started comes from (``session.start``), in words."""
+    src = origin.get("from")
+    if src == "session":
+        who = origin.get("session") or origin.get("dir") or "?"
+        return f"had when the edit session {who} on this same base started (a restart keeps that baseline)"
+    return "had before this edit session started"
+
+
+def protection_changes(baseline: Dict[str, Dict[str, Any]], tl: Timeline, ctx: EditContext,
+                       origins: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Every transition protection recorded when the session started (``baseline``, r000's ``pin_protections``) that the pins stored now
     no longer give: **released** (``hold_transition`` cleared), **replaced** (another ``held_transition``), **weakened** (still protected,
     but no transition named) or **cleared** (the pin itself is gone).  Each entry names the pin, the change, the ``original`` and the
     current (``now``, None for a cleared pin) protection, where the pin sits in ``tl`` (``n``, ``junction``) and the ``transition`` ``tl``
-    has there.  ``publish`` refuses while one is not acknowledged; a protection added or restated is not a change."""
+    has there.  ``publish`` refuses while one is not acknowledged; a protection added or restated is not a change.
+
+    ``origins`` (r000's ``pin_protections_source["pins"]``) names, for a baseline protection the pins no longer had when the session
+    started, the earlier session on the same base it was inherited from; the reason then says so rather than "during the session"."""
+    origins = origins if isinstance(origins, dict) else {}
     rows = frame_rows(tl, ctx.rate)
     ids = junction_ids(tl)
     sites = {pin_label(p): site for p, site in held_pins(tl, ctx)}
@@ -201,15 +227,18 @@ def protection_changes(baseline: Dict[str, Dict[str, Any]], tl: Timeline, ctx: E
         tr = None if site is None else {"kind": as_transition(rows[site + 1].kind, rows[site + 1].tr)[0],
                                         "frames": as_transition(rows[site + 1].kind, rows[site + 1].tr)[1]}
         orig = _words(was.get("held_transition"))
-        what = {"cleared": "was cleared with the pin itself during the session (x in the TUI)",
-                "released": "was released during the session (pin_transition hold: false)",
-                "weakened": "was weakened during the session: the pin no longer names the transition it protects",
-                "replaced": f"was replaced during the session: the pin protects {_words((now or {}).get('held_transition'))} now"}[change]
+        origin = origins.get(label) if isinstance(origins.get(label), dict) else None
+        had = "had when this edit session started" if origin is None else _origin_words(origin)
+        during = "during the session" if origin is None else "since then"
+        what = {"cleared": f"was cleared with the pin itself {during} (x in the TUI)",
+                "released": f"was released {during} (pin_transition hold: false)",
+                "weakened": f"was weakened {during}: the pin no longer names the transition it protects",
+                "replaced": f"was replaced {during}: the pin protects {_words((now or {}).get('held_transition'))} now"}[change]
         where = (f"this cut has {_words(tr)} at junction {site + 1} ({ids[site]})" if site is not None
                  else "the pin's clips are not together in this cut")
         out.append({"pin": label, "change": change, "original": dict(was), "now": now,
                     "n": None if site is None else site + 1, "junction": None if site is None else ids[site], "transition": tr,
-                    "reason": f"the transition protection pin {label} had when this edit session started ({orig}) {what}; {where}"})
+                    "reason": f"the transition protection pin {label} {had} ({orig}) {what}; {where}"})
     return out
 
 

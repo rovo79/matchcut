@@ -372,10 +372,22 @@ def _unapplied(ws: Path, r000: Timeline, ctx: EditContext) -> List[Dict[str, Any
 
 
 def baseline_protections(s: "Session") -> Optional[Dict[str, Dict[str, Any]]]:
-    """The pins' transition protections when the session started (r000's ``pin_protections``), or None for a session started before they
-    were recorded."""
+    """The session's baseline of the pins' transition protections (r000's ``pin_protections``: see ``start_baseline``), or None for a
+    session started before they were recorded."""
     value = s.revision("r000").get("pin_protections")
     return value if isinstance(value, dict) else None
+
+
+def baseline_source(s: "Session") -> Optional[Dict[str, Any]]:
+    """Where the session's baseline came from (r000's ``pin_protections_source``: ``start_baseline``), or None when it was not recorded."""
+    value = s.revision("r000").get("pin_protections_source")
+    return value if isinstance(value, dict) else None
+
+
+def baseline_origins(s: "Session") -> Dict[str, Dict[str, Any]]:
+    """Per pin, where a baseline protection the pins no longer had at start was kept from (``baseline_source``'s ``pins``)."""
+    pins = (baseline_source(s) or {}).get("pins")
+    return pins if isinstance(pins, dict) else {}
 
 
 def protection_changes(s: "Session", tl: Timeline) -> List[Dict[str, Any]]:
@@ -385,7 +397,103 @@ def protection_changes(s: "Session", tl: Timeline) -> List[Dict[str, Any]]:
         raise SessionError("this edit session was started before matchcut recorded the pins' transition protections at start, so it cannot "
                            'tell whether one was released or replaced since: ask the user to restart the session (start {"restart": '
                            "true}) and redo the edits")
-    return rules.protection_changes(base, tl, s.context())
+    return rules.protection_changes(base, tl, s.context(), baseline_origins(s))
+
+
+# ----------------------------------------------------------------------------------------------- the baseline across a restart
+def _verify_revision(doc: Any, rev: str) -> bool:
+    """Whether the revision document ``doc`` is ``rev`` and still matches its hashes (``timeline_sha256``, ``document_sha256``)."""
+    if not isinstance(doc, dict):
+        return False
+    try:
+        sha = _sha256_text(canonical_json(doc["timeline"]))
+        whole = document_sha256(doc)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return doc.get("id") == rev and sha == doc.get("timeline_sha256") and whole == doc.get("document_sha256")
+
+
+def _moved_r000(moved: Path) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """("ok", r000) when a moved-aside session's r000 is there and matches its hashes; ("missing", None); ("changed", what it holds, when
+    it holds an object, else None)."""
+    path = moved / "revisions" / "r000.json"
+    if not path.exists():
+        return "missing", None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "changed", None
+    if not isinstance(doc, dict):
+        return "changed", None
+    return ("ok" if _verify_revision(doc, "r000") else "changed"), doc
+
+
+def _r000_base_sha(doc: Optional[Dict[str, Any]]) -> Optional[str]:
+    base = doc.get("base") if isinstance(doc, dict) else None
+    sha = base.get("sha256") if isinstance(base, dict) else None
+    return sha if isinstance(sha, str) else None
+
+
+def _moved_session_id(moved: Path) -> Optional[str]:
+    try:
+        sid = json.loads((moved / "session.json").read_text(encoding="utf-8")).get("session")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return sid if isinstance(sid, str) and sid else None
+
+
+def _recorded(doc: Optional[Dict[str, Any]]) -> List[Tuple[str, Dict[str, Any], Optional[Dict[str, Any]]]]:
+    """(label, protection, its recorded origin) for every protection an r000 document's baseline records."""
+    prot = doc.get("pin_protections") if isinstance(doc, dict) else None
+    if not isinstance(prot, dict):
+        return []
+    src = doc.get("pin_protections_source") if isinstance(doc, dict) else None
+    origins = src.get("pins") if isinstance(src, dict) and isinstance(src.get("pins"), dict) else {}
+    out = []
+    for label, value in sorted(prot.items()):
+        p = rules.recorded_protection(value)
+        if isinstance(label, str) and p is not None:
+            o = origins.get(label)
+            out.append((label, p, o if isinstance(o, dict) else None))
+    return out
+
+
+def start_baseline(ws: Path, moved: Optional[Path], sha: str, ctx: EditContext) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
+    """(the baseline of a session ``start`` makes on a stage file with sha256 ``sha``, where it came from).
+
+    The baseline is every pin's protection now (``rules.protections_of``), except after a restart (or a stale move-aside) on an unchanged
+    base: when the session ``start`` just moved aside (``moved``) has an r000 that matches its hashes and was made on a stage file with
+    this same sha256, its baseline is inherited, and for each pin the protection it recorded wins (a pin that is gone keeps it too, so
+    publish sees it as cleared).  Its origins are carried along, so a chain of restarts keeps the first session's protection.  A changed
+    base (the pipeline re-ran, another stage) takes the pins as they are (``kind`` ``fresh``).  A replaced r000 that is unreadable or no
+    longer matches its hashes cannot be trusted: the baseline is the pins now, and ``reason`` says so (``kind`` ``fresh``).
+
+    The source records the ``kind`` (``inherited`` or ``fresh``), the session inherited from, a ``reason`` and, per pin whose baseline is
+    not its protection now, where it was kept from (``rules.protection_changes`` words the reason with it)."""
+    current = rules.protections_of(ctx.pins)
+    baseline = dict(current)
+    source: Dict[str, Any] = {"kind": "fresh", "inherited_from": None, "reason": "no earlier session was replaced", "pins": {}}
+    if moved is None:
+        return baseline, source
+    status, doc = _moved_r000(moved)
+    sid = _moved_session_id(moved)
+    who = sid or moved.name
+    if status == "missing":
+        source["reason"] = f"the replaced {moved.name} holds no r000"
+    elif status != "ok":
+        source["reason"] = (f"the replaced session's r000 ({moved.name}/revisions/r000.json) no longer matches its hashes (it was changed "
+                            "after it was written), so its baseline cannot be trusted: the baseline is the pins as they are now")
+    elif _r000_base_sha(doc) != sha or not isinstance(doc.get("pin_protections"), dict):
+        source["reason"] = (f"the replaced session {who} was on another base (the pipeline re-ran, or another stage)"
+                            if isinstance(doc.get("pin_protections"), dict) else f"the replaced session {who} recorded no baseline")
+    else:
+        source.update(kind="inherited", inherited_from={"session": sid, "moved_to": moved.name},
+                      reason=f"the replaced session {who} was on this same base: its baseline is kept")
+        for label, p, origin in _recorded(doc):
+            if p != current.get(label):
+                baseline[label] = p
+                source["pins"][label] = origin or {"from": "session", "session": sid, "dir": moved.name}
+    return baseline, source
 
 
 def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
@@ -580,15 +688,7 @@ class Session:
         ``timeline_sha256`` names (a changed revision file is refused)."""
         rev = check_revision_id(self.head if rev is None else rev)
         doc = _read_json(self.dir / "revisions" / f"{rev}.json", f"revision {rev}")
-        try:
-            sha = _sha256_text(canonical_json(doc["timeline"]))
-        except (KeyError, TypeError, ValueError):
-            sha = None
-        try:
-            whole = document_sha256(doc)
-        except (TypeError, ValueError):
-            whole = None
-        if doc.get("id") != rev or sha is None or sha != doc.get("timeline_sha256") or whole != doc.get("document_sha256"):
+        if not _verify_revision(doc, rev):
             raise SessionError(f"revision {rev} was changed after it was written (its id, parent, operations or timeline no longer match "
                                "its hashes): revisions are immutable; check out another revision or start a new session")
         return doc
@@ -734,9 +834,10 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish) and
     ``transition_mismatches`` (``rules.transition_mismatches``: every protected pin r000 holds whose junction's transition is not the one
     the pin holds, with how to resolve it) and ``unapplied_pins`` (``rules.unapplied_pins``: every pin stored now that r000 does not hold,
-    which the session does not protect and fails closed at, with what to do) and ``pin_protections``: every pin's transition protection
-    now, which r000 records as the session's baseline (``publish`` refuses a protection released, replaced or weakened since, unless the
-    user acknowledges it: ``rules.protection_changes``).
+    which the session does not protect and fails closed at, with what to do) and ``pin_protections``: the session's baseline of the pins'
+    transition protections, which r000 records with ``pin_protections_source`` (``publish`` refuses a protection released, replaced or
+    weakened since, unless the user acknowledges it: ``rules.protection_changes``).  The baseline is the protections now, except that a
+    restart (or a stale move-aside) on an unchanged base inherits the replaced session's baseline (``start_baseline``).
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -767,13 +868,15 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
         elif any(e.name not in KEPT for e in d.iterdir()):
             moved = _move_aside(ws, d, "incomplete")  # what a start that never finished left behind
         sha, r000, notes = _read_base(path, ctx)  # read again under the lock: the hash recorded is of the bytes r000 was made from
+        base_file = path.relative_to(ws).as_posix()
+        baseline, source = start_baseline(ws, moved, sha, ctx)
         (d / "revisions").mkdir(exist_ok=True)
         (d / "proposals").mkdir(exist_ok=True)
         created = _now()
         _write_revision(d, {"schema": REVISION_SCHEMA, "id": "r000", "parent": None, "proposal": None, "ops": [], "guards": None,
                             "details": notes, "touched": [], "changes": [], "timing": None,
-                            "base": {"stage": name, "file": path.relative_to(ws).as_posix(), "sha256": sha},
-                            "pin_protections": rules.protections_of(ctx.pins),
+                            "base": {"stage": name, "file": base_file, "sha256": sha},
+                            "pin_protections": baseline, "pin_protections_source": source,
                             "timeline_sha256": timeline_sha256(r000), "timeline": r000.to_dict(), "created": created})
         state = {"schema": SESSION_SCHEMA, "session": str(uuid.uuid4()), "base_stage": name, "base_file": path.relative_to(ws).as_posix(),
                  "base_sha256": sha, "rate": str(ctx.rate), "head": "r000", "next": 1, "reserved_ids": sorted({c.id for c in r000.clips}),
@@ -783,7 +886,7 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
             "moved_aside": moved.name if moved is not None else None, "can_publish": can, "publish_blocker": blocker,
             "transition_mismatches": rules.transition_mismatches(r000, ctx),
-            "unapplied_pins": _unapplied(ws, r000, ctx), "pin_protections": rules.protections_of(ctx.pins)}
+            "unapplied_pins": _unapplied(ws, r000, ctx), "pin_protections": baseline, "pin_protections_source": source}
 
 
 def _change_decision(line: str, before: Timeline, after: Timeline) -> Decision:

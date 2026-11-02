@@ -41,7 +41,8 @@ refused with the repair (the exact ``set_transition``) and the alternative: ``ac
 exactly, which only the user may approve (an agent never passes it on its own).  An acknowledged mismatch is recorded and its pin reads
 ``mismatch_acknowledged``, never held.
 
-**Protection changes.**  ``start`` records every pin's protection in r000 (``pin_protections``, the session's baseline).  A protection
+**Protection changes.**  ``start`` records every pin's protection in r000 (``pin_protections``, the session's baseline; a restart on the
+same base keeps the replaced session's: ``session.start_baseline``).  A protection
 released, replaced or weakened since (or cleared with its pin: ``rules.protection_changes``) is refused the same way, even when the cut
 has the transition the old protection held: the user restores it, or acknowledges it in the same ``acknowledge_mismatches`` list (one list
 naming every pin whose protection the publish does not keep).  The result, the record (``acknowledged_protection_changes``, with
@@ -407,7 +408,7 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             "latest_stage": latest_name, "latest_stage_file": _rel(ws, latest_path), "latest_stage_sha256": latest_sha,
             "published_at": S._now(), "decisions": len(agent), "published": _rel(ws, copy), "transition_mismatches": mismatches,
             "acknowledged_mismatches": acknowledged, "acknowledged_protection_changes": acknowledged_changes,
-            "pin_protections_at_start": baseline,
+            "pin_protections_at_start": baseline, "pin_protections_source": S.baseline_source(s),
             "unapplied_pins": [dict(e, status="not protected by this edit") for e in unapplied],
         }
         if moved is not None:

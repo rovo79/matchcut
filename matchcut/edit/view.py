@@ -433,10 +433,12 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         n_revs = len(s.revision_ids())
         unapplied = S.unapplied_pins(s)
         baseline = S.baseline_protections(s)
+        origins = S.baseline_origins(s)
+        source = S.baseline_source(s)
     d = rules.describe(tl, ctx)
     rows = frame_rows(tl, ctx.rate)
     ids = [j["id"] for j in d["junctions"]]
-    changes = rules.protection_changes(baseline, tl, ctx) if baseline is not None else []
+    changes = rules.protection_changes(baseline, tl, ctx, origins) if baseline is not None else []
     acknowledged = acknowledged_in_record(ws, s.session_id, rid)
     acknowledged_changes = acknowledged_in_record(ws, s.session_id, rid, "acknowledged_protection_changes")
     changes_ack = bool(changes) and all(c["pin"] in acknowledged_changes for c in changes)
@@ -499,7 +501,7 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         "protections": protections,
         "transition_mismatches": rules.transition_mismatches(tl, ctx),
         "protection_changes": changes,
-        "pin_protections_at_start": baseline,
+        "pin_protections_at_start": baseline, "pin_protections_source": source,
         "unapplied_pins": unapplied,
     }
 
@@ -749,11 +751,11 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
     the pipeline has not applied yet); at a pin the head holds they must be the head's transition, since the rules keep a protected
     transition as it is and another one could never be reached there.
 
-    **While an edit session exists**, releasing or replacing a protection the pin already has (the editor's choice) is refused unless
-    ``user_approved`` is exactly that pin's label: the user's explicit approval, which an agent never gives itself.  Protecting a pin that
-    has no protection, or stating the same protection again, needs no approval.  Even an approved change counts at ``publish``: a
-    protection released, replaced or weakened since the session started is refused there until the user acknowledges it
-    (``rules.protection_changes``).
+    Releasing or replacing a protection the pin already has (the editor's choice) is refused unless ``user_approved`` is exactly that
+    pin's label: the user's explicit approval, which an agent never gives itself.  This holds whether or not an edit session exists.
+    Protecting a pin that has no protection, or stating the same protection again, needs no approval.  An approved change still counts
+    at ``publish``: a protection released, replaced or weakened since the session's baseline (which a restart on the same base keeps:
+    ``session.start_baseline``) is refused there until the user acknowledges it (``rules.protection_changes``).
 
     The pins are part of the edit context, so a change makes every proposal made before it stale: ``apply`` and ``preview`` refuse them
     until they are proposed again (the result lists them)."""
@@ -840,14 +842,15 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
             raise SessionError(f"user_approved names {user_approved}, but this changes pin {label}: the approval must name exactly the pin "
                                "being changed; nothing was written")
         weakens = target.hold_transition and (not new.hold_transition or not _same_transition(new.held_transition, target.held_transition))
-        approval_needed = has_session and changed and weakens
+        approval_needed = changed and weakens  # session or not: the API never releases or replaces a protection without the approval
         if approval_needed and user_approved != label:
             what = "release" if not new.hold_transition else f"replace it with a {_text(new.held_transition)}"
             raise SessionError(
-                f"pin {label} protects a {_text(target.held_transition)}, which the editor chose, and an edit session is open in {ws}: only "
+                f"pin {label} protects a {_text(target.held_transition)}, which the editor chose: only "
                 f"the user may release or change that protection. Ask the user; with their explicit approval to {what}, run "
-                f"pin_transition again with user_approved: \"{label}\" (an agent must never pass it on its own). Even then, publish "
-                "refuses the change until the user also acknowledges it (acknowledge_mismatches). To keep the protection instead, "
+                f"pin_transition again with user_approved: \"{label}\" (an agent must never pass it on its own). "
+                + ("Even then, publish refuses the change until the user also acknowledges it (acknowledge_mismatches). " if has_session
+                   else "") + "To keep the protection instead, "
                 f"repair the junction: propose set_transition with the {_text(target.held_transition)}; nothing was written")
         live: List[str] = _live_proposals(s, ctx) if changed and s is not None and ctx is not None else []
         if changed:
@@ -861,10 +864,11 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 "(apply and preview refuse them)")
     if mismatch:  # (a release keeps no transition; a protection set here is the head's: this is only for safety)
         note += (f"; the head revision has a {_text(now)} at this junction, not the {_text(new.held_transition)} held")
-    if changed and weakens and has_session:
-        note += (f"; the user approved changing the protection of pin {label} ({'released' if not new.hold_transition else 'replaced'}): "
-                 "publish refuses it until the user also acknowledges the change (acknowledge_mismatches), and the record then says the "
-                 "protection the session started with was not kept")
+    if changed and weakens:
+        note += (f"; the user approved changing the protection of pin {label} ({'released' if not new.hold_transition else 'replaced'})"
+                 + (": publish refuses it until the user also acknowledges the change (acknowledge_mismatches), and the record then says "
+                    "the protection was not kept; a restart on the same base keeps the baseline" if has_session else
+                    ": no edit session is open, so a session started later takes the pins as they are then as its baseline"))
     ids = junction_ids(head) if head is not None else []
     return {"pin": pin_label(new), "hold_transition": new.hold_transition, "held_transition": new.held_transition,
             "previous": {"hold_transition": target.hold_transition, "held_transition": target.held_transition}, "changed": changed,

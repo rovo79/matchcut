@@ -43,6 +43,10 @@ recorded run, `prototypes/editing_api/recorded-run-renderer-fix/proof.json` (90 
   `pin_transition` needs `user_approved` to release or replace one; strict verification of the original workspace; relative sources;
   `--keep-config` re-runs. 24 new tests ([below](#safety-review-fixes-2026-11-02-second-round)). Full suite: **1941 passed, 5 skipped,
   1 deselected**; the 2 collection errors (no `torch`, no `toolz`) are unchanged and are not passes.
+- **Restart bypass closed (2026-11-02, third round):** a restart on the same base keeps the protection baseline (inherited from the
+  replaced session's verified `r000`), and `pin_transition` needs `user_approved` to release or replace a protection whether or not a
+  session exists; EDIT.md gains a "Security boundary" section. 7 new tests ([below](#restart-bypass-closed-2026-11-02-third-round)).
+  Verified with focused tests only (461 passed); the full suite was not re-run for this round.
 - **Human gates: PENDING.** M3a's two ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md): A. Core Editorial, B. Editor Interoperability), M1, M2b,
   M2a and M2c.
 
@@ -214,6 +218,30 @@ stops if `WS` exists, checks ffmpeg (`brew install ffmpeg`), picks B6's snapshot
 | `tests/pipeline/test_config.py` (1) | `--keep-config` keeps `config.json` byte for byte (render off, proxy, force, relative source kept), refuses options that change the config and needs `-w`; the default behaviour unchanged |
 | `test_pin_safety.py`, `test_publish.py`, `test_publish_review.py`, `test_view.py` (changed) | the new wording ("ask the user to", the `--keep-config` command run as a subprocess from another directory with `config.json` unchanged), the record's new fields, `user_approved` where a test models the user's decision, `held: false` on a mismatched pin, the `TRANSITION-MISMATCH` line |
 
+## Restart bypass closed (2026-11-02, third round)
+
+From `66c223a`. The reviewer's probe7: a protected 4-frame dissolve released (with a `user_approved` the agent supplied itself, or by
+editing `editorial.json` during the session), then `start {"restart": true}`, a cut and `publish` published with no acknowledgement and
+called the pin `held`. The boundary is the supported API (the JSON CLI and `matchcut.edit`), not an actor with unrestricted filesystem
+access (EDIT.md, "Security boundary"). Now:
+
+1. **A restart keeps the baseline on the same base.** When `start` replaces a session (restart, or a stale move-aside) and the new base
+   stage file has the same sha256 as the replaced session's `r000` base, the replaced baseline is inherited after its `r000`'s hashes are
+   checked; per pin the replaced protection wins, and a chain of restarts carries it (with the session it first came from). `r000`
+   records `pin_protections_source` (`kind` `inherited` from a session id, or `fresh`; a `reason`; per pin, where a kept protection came
+   from), and the publish record copies it. A changed base (the pipeline re-ran) takes the pins as they are. A replaced `r000` that no
+   longer matches its hashes is not trusted: `start` goes on with a fresh baseline and its `reason` says so.
+2. **`user_approved` is always required** to release or replace an existing protection, session or not; protecting an unprotected pin or
+   restating one needs none.
+3. **Wording.** An inherited protection's refusal says so (`had when the edit session <id> on this same base started (a restart keeps that
+   baseline) ... was released since then`). EDIT.md states that a restart keeps the baseline, that `user_approved` is always required,
+   that an agent never supplies `user_approved`, `acknowledge_mismatches` or `supersede_human` on its own, and the security boundary.
+
+| tests | what they prove |
+|---|---|
+| `tests/edit/test_protection_changes.py` (25; 7 new, 1 rewritten) | probe7 through the tools for both routes (approved, hand edit during the session): restart keeps the baseline, publish refused until acknowledged, then recorded `released` with the original dissolve and never `held`; a chain of three restarts keeps it and its origin; a pipeline re-run takes a fresh baseline and publishes with nothing to acknowledge; a release or replacement without a session refused without `user_approved` (or with another pin's label), allowed with it; a tampered moved-aside `r000` (changed or garbled) falls back to a fresh baseline and says so; a restart after re-protecting the current cut keeps the original protection (rewritten from "restart takes a new baseline") |
+| `tests/edit/test_publish.py` (changed) | the record's new `pin_protections_source` field |
+
 ## Commands and results
 
 | command | result | time |
@@ -235,6 +263,10 @@ stops if `WS` exists, checks ffmpeg (`brew install ffmpeg`), picks B6's snapshot
 | `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | **1941 passed, 5 skipped, 1 deselected** (snapshots: 5 passed); `tests/edit` has 839 tests (834 passed, 5 skipped) | 984 s |
 | `python -m pytest tests -q` | interrupted: 2 errors during collection (`tests/test_data.py`: no `torch`; `tests/test_experiments.py`: no `toolz`), 0 tests run: **collection errors, not passes** | 2 s |
 | the reviewer's probes (`probe4.py` m2/m3, `probe_verify.sh` in strict mode, `probe5.py`) and the new procedure followed on a copy of a workspace with a relative source | m2/m3: the agent's release and re-protect refused; with the user's approval, publish refuses until acknowledged, then records the change and never says held; strict verify names all 21 changes on the tampered original (canonical mode still reads it unchanged, as documented); the relative-source workspace runs S2 to B7 from the repository root, `config.json` unchanged by `--keep-config`, the original untouched (strict) | |
+
+| **After the restart bypass fix (2026-11-02, third round, from `66c223a`; focused tests only):** | | |
+| `python -m pytest tests/edit/test_protection_changes.py tests/edit/test_pin_safety.py tests/edit/test_publish*.py tests/edit/test_session.py tests/edit/test_view.py tests/edit/test_cli.py tests/edit/test_tools.py tests/edit/test_docs.py tests/tui/test_edit.py -q` | 461 passed, 0 failed | 220 s |
+| the reviewer's probes `probe7.py`, `probe6.py` | probe7: both routes now refused at publish ("had when the edit session <id> on this same base started (a restart keeps that baseline)"), the restart's `pin_protections` keeps the dissolve; probe6 case 7: the release with no session open is refused without `user_approved`; cases 1-4 unchanged (refused until acknowledged, never held) | |
 
 The 5 skipped tests, in `tests/edit` and in the full suite, are the MCP checks. The 1 deselected is the perf case (run on its own, below);
 the 30 `imperfect` property cases run and pass in the full suite.

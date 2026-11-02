@@ -1,7 +1,7 @@
 """A transition protection the editor set is the user's to change: ``start`` records every pin's protection in r000 (the session's
-baseline), ``publish`` refuses a protection released, replaced, weakened or cleared since, unless the user acknowledges it, and while a
-session exists ``pin_transition`` refuses to release or replace a protection without ``user_approved`` naming the pin.  Nothing reads
-"held" for such a pin.  Also: the re-run command (absolute, ``--keep-config``) and a relative source path."""
+baseline), ``publish`` refuses a protection released, replaced, weakened or cleared since, unless the user acknowledges it, a restart on
+the same base keeps the baseline (a tampered moved-aside r000 falls back to a fresh one, saying so), and ``pin_transition`` always
+refuses to release or replace a protection without ``user_approved`` naming the pin.  Nothing reads "held" for such a pin.  Also: the re-run command (absolute, ``--keep-config``) and a relative source path."""
 from __future__ import annotations
 
 import json
@@ -178,20 +178,163 @@ def test_restoring_the_protection_publishes_without_acknowledgement(protected):
     assert out["acknowledged_protection_changes"] == [] and [p["state"] for p in out["pins"]] == ["held"]
 
 
-def test_restart_takes_a_new_baseline(protected):
+def test_a_restart_on_the_same_base_keeps_the_baseline(protected):
     w = protected
+    first = S.load(w).session_id
     V.pin_transition(w, pin="s0->s1", hold=False, user_approved="s0->s1")
     out = S.start(w, restart=True)
-    assert out["pin_protections"] == {"s0->s1": {"hold_transition": False, "held_transition": None}}
+    assert out["pin_protections"] == {"s0->s1": DISSOLVE4}
+    src = out["pin_protections_source"]
+    assert src["kind"] == "inherited" and src["inherited_from"]["session"] == first
+    assert src["pins"]["s0->s1"]["from"] == "session" and src["pins"]["s0->s1"]["session"] == first
     edit(w, ELSEWHERE)
-    assert P.publish(w)["acknowledged_protection_changes"] == []
-    # and the other way round: a protection made before the restart is the new baseline, and releasing it is a change again
+    with pytest.raises(Refused, match=rf"had when the edit session {first} on this same base started \(a restart keeps that baseline\) "
+                                      r"\(a dissolve of 4 frames\) was released since then"):
+        P.publish(w)
+    assert P.publish(w, acknowledge_mismatches=["s0->s1"])["acknowledged_protection_changes"][0]["change"] == "released"
+    # protecting the cut the head has now (no approval needed: the pin is unprotected) does not make it the baseline on this base: the
+    # original protection is the stricter one, so the next restart keeps it and publish sees a replacement
     V.pin_transition(w, pin="s0->s1", hold=True)
-    S.start(w, restart=True)
+    out = S.start(w, restart=True)
+    assert out["pin_protections"] == {"s0->s1": DISSOLVE4} and out["pin_protections_source"]["pins"]["s0->s1"]["session"] == first
     edit(w, ELSEWHERE)
-    V.pin_transition(w, pin="s0->s1", hold=False, user_approved="s0->s1")
-    with pytest.raises(Refused, match="was released during the session"):
+    with pytest.raises(Refused, match="was replaced since then: the pin protects a cut now"):
         P.publish(w, replace=True)
+
+
+# ----------------------------------------------------------------------------------------------- the reviewer's restart bypass (probe7)
+DISSOLVE4 = {"hold_transition": True, "held_transition": {"kind": "dissolve", "frames": 4}}
+RELEASED = {"hold_transition": False, "held_transition": None}
+CUT_AT_1 = [{"op": "set_transition", "junction": 1, "kind": "cut"}]
+
+
+def protected_dissolve(w: Path) -> Path:
+    """final has a 4-frame dissolve at the pin s0->s1, which protects it (set after the pipeline ran, with no session open)."""
+    from matchcut.pipeline.editorial import apply_pins
+    from matchcut.pipeline.timeline import Transition, clip_origin
+    tl = Timeline.load(w / "final.json")
+    for x in tl.clips:
+        x.origin = clip_origin(x)
+    tl.clips[1].transition_in = Transition("dissolve", 4 / 25)
+    ctx = S.workspace_context(w)
+    pin = pin_at(w, 0)
+    out, _ = apply_pins(tl, [pin], ctx.bounds, ctx.min_clip_seconds)
+    out.save(w / "final.json")
+    PinStore(w).put(pin)
+    V.pin_transition(w, pin="s0->s1", hold=True, kind="dissolve", frames=4)
+    return w
+
+
+def hand_release(w: Path) -> None:
+    d = json.loads((w / "editorial.json").read_text())
+    for p in d["pins"]:
+        p["hold_transition"] = False
+        p["held_transition"] = None
+    (w / "editorial.json").write_text(json.dumps(d))
+
+
+@pytest.mark.parametrize("route", ["approved", "hand"])
+def test_probe7_a_restart_after_a_release_is_refused_at_publish_until_acknowledged(make_ws, capsys, route):
+    w = protected_dissolve(make_ws())
+    assert T.call(w, "start", {})["pin_protections"] == {"s0->s1": DISSOLVE4}
+    first = S.load(w).session_id
+    if route == "approved":
+        T.call(w, "pin_transition", {"pin": "s0->s1", "hold": False, "user_approved": "s0->s1"})
+    else:
+        hand_release(w)
+    out = T.call(w, "start", {"restart": True})
+    assert out["pin_protections"] == {"s0->s1": DISSOLVE4} and out["pin_protections_source"]["kind"] == "inherited"
+    r000 = S.load(w).revision("r000")
+    assert r000["pin_protections"] == {"s0->s1": DISSOLVE4}
+    assert r000["pin_protections_source"]["inherited_from"] == {"session": first, "moved_to": out["moved_aside"]}
+    edit(w, CUT_AT_1)
+    assert [c["change"] for c in V.inspect(w)["protection_changes"]] == ["released"]
+    with pytest.raises(Refused, match=r"r001 cannot be published as protected: the transition protection pin s0->s1 had when the edit "
+                                      rf"session {first} on this same base started .*was released since then.*"
+                                      r'\{"acknowledge_mismatches": \["s0->s1"\]\}'):
+        P.publish(w)
+    assert not (w / "edit.json").exists()
+    pub = P.publish(w, acknowledge_mismatches=["s0->s1"])
+    [c] = pub["acknowledged_protection_changes"]
+    assert c["change"] == "released" and c["original"] == DISSOLVE4 and c["now"] == RELEASED
+    assert c["transition"] == {"kind": "cut", "frames": 0}
+    assert pub["pin_protections_at_start"] == {"s0->s1": DISSOLVE4} and pub["pin_protections_source"]["kind"] == "inherited"
+    assert [(p["pin"], p["state"]) for p in pub["pins"]] == [("s0->s1", "protection_change_acknowledged")]
+    never_held(w, capsys, pub)
+
+
+def test_a_chain_of_restarts_keeps_the_baseline(make_ws):
+    w = protected_dissolve(make_ws())
+    S.start(w)
+    first = S.load(w).session_id
+    hand_release(w)
+    ids = [first]
+    for _ in range(3):
+        out = S.start(w, restart=True)
+        assert out["pin_protections"] == {"s0->s1": DISSOLVE4}
+        src = S.load(w).revision("r000")["pin_protections_source"]
+        assert src["kind"] == "inherited" and src["inherited_from"]["session"] == ids[-1]
+        assert src["pins"]["s0->s1"]["session"] == first  # the origin is carried along the chain
+        ids.append(out["session"])
+    edit(w, CUT_AT_1)
+    with pytest.raises(Refused, match=rf"had when the edit session {first} on this same base started"):
+        P.publish(w)
+    assert P.publish(w, acknowledge_mismatches=["s0->s1"])["acknowledged_protection_changes"][0]["original"] == DISSOLVE4
+
+
+def test_a_pipeline_rerun_takes_a_fresh_baseline(make_ws):
+    w = protected_dissolve(make_ws())
+    S.start(w)
+    T.call(w, "pin_transition", {"pin": "s0->s1", "hold": False, "user_approved": "s0->s1"})
+    tl = Timeline.load(w / "final.json")  # the pipeline re-ran (after the release): another final.json
+    tl.name = "re-run"
+    tl.save(w / "final.json")
+    out = S.start(w)
+    assert out["moved_aside"].startswith("edits.stale-")
+    assert out["pin_protections"] == {"s0->s1": RELEASED}
+    src = out["pin_protections_source"]
+    assert src["kind"] == "fresh" and src["pins"] == {} and "another base" in src["reason"]
+    edit(w, CUT_AT_1)
+    pub = P.publish(w)
+    assert pub["acknowledged_protection_changes"] == [] and pub["pin_protections_source"]["kind"] == "fresh"
+
+
+def test_a_release_without_a_session_needs_user_approved(make_ws):
+    w = protected_dissolve(make_ws())
+    before = (w / "editorial.json").read_bytes()
+    for kw, what in (({"hold": False}, "release"), ({"hold": True, "kind": "cut"}, "replace it with a cut")):
+        with pytest.raises(Refused, match=rf"pin s0->s1 protects a dissolve of 4 frames, which the editor chose: only the user may release "
+                                          rf"or change that protection\. Ask the user; with their explicit approval to {what}, run "
+                                          r'pin_transition again with user_approved: "s0->s1"'):
+            T.call(w, "pin_transition", dict(pin="s0->s1", **kw))
+    with pytest.raises(Refused, match=r"user_approved names s1->s3, but this changes pin s0->s1"):
+        T.call(w, "pin_transition", {"pin": "s0->s1", "hold": False, "user_approved": "s1->s3"})
+    assert (w / "editorial.json").read_bytes() == before and not (w / "edits").exists()
+    out = T.call(w, "pin_transition", {"pin": "s0->s1", "hold": False, "user_approved": "s0->s1"})  # the user approved it
+    assert out["changed"] and "no edit session is open, so a session started later takes the pins as they are" in out["note"]
+    out = S.start(w)  # the user's approved decision, made before any session: the baseline as it is now
+    assert out["pin_protections"] == {"s0->s1": RELEASED} and out["pin_protections_source"]["kind"] == "fresh"
+
+
+@pytest.mark.parametrize("tamper", ["changed", "garbled"])
+def test_a_tampered_moved_aside_r000_falls_back_to_a_fresh_baseline_and_says_so(make_ws, tamper):
+    """The replaced session's r000 no longer matches its hashes: start does not refuse (that would leave the workspace stuck) and does
+    not trust it; the baseline is the pins now, and pin_protections_source says why."""
+    w = protected_dissolve(make_ws())
+    S.start(w)
+    path = w / "edits" / "revisions" / "r000.json"
+    if tamper == "changed":
+        doc = json.loads(path.read_text())
+        doc["details"] = ["changed by hand"]  # the hashes are not recomputed
+        path.write_text(json.dumps(doc))
+    else:
+        path.write_text("{not json")
+    out = S.start(w, restart=True)
+    src = out["pin_protections_source"]
+    assert src["kind"] == "fresh" and src["inherited_from"] is None and src["pins"] == {}
+    assert "no longer matches its hashes" in src["reason"] and "the baseline is the pins as they are now" in src["reason"]
+    assert out["pin_protections"] == {"s0->s1": DISSOLVE4}
+    assert S.load(w).revision("r000")["pin_protections_source"] == src
 
 
 def test_a_session_without_a_baseline_cannot_publish(protected):

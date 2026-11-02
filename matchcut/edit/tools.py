@@ -214,7 +214,8 @@ TOOLS: List[Tool] = [
     Tool("start", "Start an edit session (default base: the latest canonical stage, the only one that can publish; never edit); r000 is "
                   "that stage on whole frames. A fresh session is replaced only with restart. Lists transition_mismatches, and "
                   "unapplied_pins: pins the base does not hold, which this session cannot protect, so it refuses any change to their "
-                  "shots' clips and junctions and says how to protect them (re-run the pipeline, then restart).",
+                  "shots' clips and junctions and says how to protect them (re-run the pipeline, then restart). pin_protections is the "
+                  "baseline publish checks protections against; a restart on the same base keeps it.",
          _obj({"stage": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,40}$", "description": "a stage name (roughcut, final, human ...)"},
                "restart": {"type": "boolean"}}),
          _start),
@@ -260,8 +261,8 @@ TOOLS: List[Tool] = [
          lambda ws, a: V.frames(ws, a["junction"], a.get("revision"))),
     Tool("pin_transition", "Protect (hold: true) or release (hold: false) the transition at an editor pin's junction. The transition held is "
                            "the head's at that junction unless kind and frames are given. Changes editorial.json, so earlier proposals must "
-                           "be proposed again. An existing protection is the editor's choice: while a session exists, releasing or "
-                           "replacing it is refused unless user_approved names that pin, never without the user's explicit approval "
+                           "be proposed again. An existing protection is the editor's choice: releasing or replacing it (session or not) "
+                           "is refused unless user_approved names that pin, never without the user's explicit approval "
                            "(publish then also needs their acknowledge_mismatches). Protecting an unprotected pin, or restating a "
                            "protection, needs none.",
          _obj({"pin": {"type": "string", "pattern": PIN_LABEL, "description": "a pin's label (s1->s3)"}, "junction": JUNCTION,
@@ -282,7 +283,7 @@ TOOLS: List[Tool] = [
                                                   "the user's explicit approval)"},
                "acknowledge_mismatches": {"type": "array", "items": {"type": "string", "pattern": PIN_LABEL}, "maxItems": 10000,
                                           "description": "every pin whose protected transition differs from the held one, or whose "
-                                                         "protection was released, replaced or weakened during the session, carried "
+                                                         "protection was released, replaced or weakened since the baseline, carried "
                                                          "forward (only with the user's explicit approval)"}}),
          lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)), a.get("supersede_human"),
                                  a.get("acknowledge_mismatches"))),
