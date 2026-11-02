@@ -1,6 +1,6 @@
 """Publishing a session's revision as the workspace's ``edit`` stage (decision 1 of M3a).
 
-``publish(ws, rev=None, replace=False, supersede_human=False)`` writes, under the session lock and the workspace's stage lock
+``publish(ws, rev=None, replace=False, supersede_human=None, acknowledge_mismatches=None)`` writes, under the session lock and the workspace's stage lock
 (``interchange.workspace.stage_lock``, which an import holds too), each atomically:
 
 - ``WS/edits/published/<rev>-<sha12>.json``: an immutable copy of the bytes published (``<sha12>``: the first 12 hex characters of their
@@ -9,8 +9,10 @@
   it is fresh (``junctions.stale_edit``);
 - ``WS/edit_publish.json`` (``matchcut.edit_publish/1``): the session id, the revision and its timeline sha256, the sha256 of
   ``edit.json``, the base stage and its sha256 when the session started, the latest canonical stage and its sha256, the time, the number
-  of agent decisions, the published copy's path and ``transition_mismatches`` (``rules.transition_mismatches`` of the published cut:
-  the protected pins whose transition differs from the one they hold, left untouched by the edits); a copy of every record is kept in
+  of agent decisions, the published copy's path, ``transition_mismatches`` (``rules.transition_mismatches`` of the published cut: the
+  protected pins whose transition differs from the one they hold), ``acknowledged_mismatches`` (the ones the user approved carrying
+  forward), ``unapplied_pins`` (``rules.unapplied_pins``: pins the session did not protect, ``not protected by this edit``) and, when a
+  human stage was superseded, its reason and ``superseded_human_sha256``; a copy of every record is kept in
   ``edits/published/records/``
   (``<UTC second>-<nnn>-<rev>-<sha12>.json``, ``nnn`` counting within the second, so the names sort in the order they were written);
 - one line in ``WS/edits/published/log.jsonl`` (append-only): when the copy went live, from which session and revision, its sha256, the
@@ -29,7 +31,15 @@ session must be based on the **latest canonical stage** (``session.publish_block
 plus one ``agent`` decision per change, and a session's revisions carry their base's history.  The revision must still hold every editor
 pin the base holds under the pins stored **now** (clips, adjacency, cut points, and a protected transition: r000's, or exactly the one the
 pin holds, as ``rules.pin_problems`` checks every proposal): a pin added or changed since the revision was made is checked here, and a
-revision that does not hold it is refused (propose again, or release the pin).
+revision that does not hold it is refused (propose again, or release the pin).  A pin r000 does not hold (``rules.unapplied_pins``: made
+after the pipeline's last run, or never placed) fails closed: a revision that changes its two shots' clips or junctions is refused
+(``rules.unapplied_problems``, from r000, so a pin made after ``apply`` counts too); one that leaves them untouched publishes and lists it
+as not protected.
+
+**Protected-transition mismatches.**  While a protected pin's transition in the revision differs from the one it holds, the publish is
+refused with the repair (the exact ``set_transition``) and the alternative: ``acknowledge_mismatches`` naming every mismatching pin
+exactly, which only the user may approve (an agent never passes it on its own).  An acknowledged mismatch is recorded and its pin reads
+``mismatch_acknowledged``, never held.
 
 **Never a silent overwrite.**  Publishing again from the same session replaces ``edit.json`` (the earlier copy stays in
 ``edits/published/``).  An ``edit.json`` published by another session, or one without a readable record that describes it (a record of
@@ -42,8 +52,10 @@ one is written.  Nothing is ever deleted.
 
 **The human stage.**  A fresh ``human.json`` (an editor's re-export) is the latest stage.  A publish that would leave it out of the stage
 order as stale (a human stage based on a canonical stage, whose history does not continue the edit stage's; or one based on the edit stage,
-when ``edit.json`` changes) is refused unless ``supersede_human``; the result then says why the human stage is left out
-(``human_left_out``).  ``human.json`` and ``human_import.json`` are never changed: re-import the editor's file to bring it back.
+when ``edit.json`` changes) is refused unless ``supersede_human`` is the sha12 of that very ``human.json`` (the user's explicit approval,
+bound to the file: ``true``, a wrong or stale value, or a value with nothing to supersede is refused); the result then says why the human
+stage is left out (``human_left_out``).  ``human.json`` and ``human_import.json`` are never changed: re-import the editor's file to bring
+it back.
 """
 from __future__ import annotations
 
@@ -52,7 +64,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from matchcut.interchange.common import junction_ids
 from matchcut.interchange.workspace import stage_lock
@@ -157,19 +169,99 @@ def _pin_problems(base: Timeline, tl: Timeline, ctx: EditContext) -> List[Tuple[
     return [(pin_label(p), line) for p, line in rules.pin_problems(base, tl, ctx)]
 
 
-def _pin_states(ws: Path, tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
-    """Every stored pin and where it stands in the published cut, worded for the edit stage."""
+def _pin_states(ws: Path, tl: Timeline, ctx: EditContext, unapplied: List[Dict[str, Any]],
+                acknowledged: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every stored pin and where it stands in the published cut, worded for the edit stage: ``held``; ``mismatch_acknowledged`` (its clips
+    and cut points held, its protected transition not: carried forward with the user's acknowledgement); ``not_protected`` (a pin the
+    session's base does not hold: ``rules.unapplied_pins``); never held when it is not."""
     from .view import _pins
 
     out = []
-    for entry in _pins(tl, frame_rows(tl, ctx.rate), ctx, junction_ids(tl)):
+    for entry in _pins(tl, frame_rows(tl, ctx.rate), ctx, junction_ids(tl), unapplied, acknowledged):
         e = {k: entry[k] for k in ("pin", "state", "reason", "junction", "hold_transition", "held_transition", "transition_mismatch")}
-        if e["state"] == "pending":
-            e["state"] = "not_held"
-            e["reason"] = ("not held by this edit: the pin was stored after the pipeline's last run, so the base stage does not hold it "
-                           "either (a pipeline run would apply it, and leave this edit stage out as stale)")
+        if entry.get("protected") is False:
+            e["state"] = "not_protected"
+            e["reason"] = f"not protected by this edit: {entry['reason']}; {entry['action']}"
         out.append(e)
     return out
+
+
+def _check_acknowledged(rid: str, mismatches: List[Dict[str, Any]], acknowledge: Any, labels: List[str]) -> List[Dict[str, Any]]:
+    """The mismatches ``acknowledge`` (the pins the user approved carrying forward) acknowledges: it must name every mismatching pin
+    exactly once, and nothing else.  Raises ``SessionError`` otherwise, saying how to repair each mismatch or acknowledge it."""
+    if acknowledge is None:
+        acknowledge = []
+    if not isinstance(acknowledge, (list, tuple)) or not all(isinstance(x, str) for x in acknowledge):
+        raise SessionError(f"acknowledge_mismatches must be a list of pin labels (e.g. [\"s1->s3\"]), not {str(acknowledge)[:60]!r}")
+    if not mismatches and not acknowledge:
+        return []
+    wanted = [m["pin"] for m in mismatches]
+    issues: List[str] = []
+    seen: set = set()
+    for x in acknowledge:
+        if x in seen:
+            issues.append(f"it names {x} twice")
+        seen.add(x)
+        if x not in labels:
+            issues.append(f"{x} is not a stored pin" + (f" (pins: {', '.join(labels)})" if labels else " (there are no pins)"))
+        elif x not in wanted:
+            issues.append(f"{x} has no transition mismatch in {rid}")
+    missing = [x for x in wanted if x not in seen]
+    if missing:
+        issues.append(f"it does not name {', '.join(missing)}")
+    if not issues:
+        return [{"pin": m["pin"], "n": m["n"], "junction": m["junction"], "held_transition": m["held_transition"],
+                 "transition": m["transition"]} for m in mismatches]
+    lines = []
+    for m in mismatches:
+        held, now = m["held_transition"], m["transition"]
+        op = rules.repair_op(m["n"], (held["kind"], held["frames"]))
+        lines.append(f"pin {m['pin']} holds a {_tr(held)} but junction {m['n']} ({m['junction']}) has a {_tr(now)}: repair it by proposing "
+                     f"{json.dumps(op)}, applying it and publishing again")
+    head = (f"{rid} leaves {len(mismatches)} protected transition{'s' if len(mismatches) != 1 else ''} different from what the pin holds: "
+            + "; ".join(lines)) if mismatches else f"{rid} has no protected transition that differs from what its pin holds"
+    ack = json.dumps({"acknowledge_mismatches": wanted})
+    return_how = (f". Or, only if the user explicitly approves carrying {'these mismatches' if len(wanted) > 1 else 'this mismatch'} "
+                  f"forward, publish {ack} (it must name every mismatching pin, exactly); an agent must never acknowledge a mismatch "
+                  "without the user's explicit approval") if mismatches else ": publish without acknowledge_mismatches"
+    given = f"acknowledge_mismatches {json.dumps(list(acknowledge))} is refused: {'; '.join(issues)}. " if acknowledge else ""
+    raise SessionError(f"{given}{head}{return_how}")
+
+
+def _tr(t: Dict[str, Any]) -> str:
+    return "cut" if not t.get("frames") or t.get("kind") == "cut" else f"{t['kind']} {t['frames']}f"
+
+
+SHA12 = re.compile(r"[0-9a-f]{12}")
+
+
+def _check_supersede(supersede_human: Any, superseded: Optional[str], human_sha: Optional[str]) -> None:
+    """``supersede_human`` must be the sha12 of the ``human.json`` this publish would leave out (the file the user approved superseding),
+    given only when there is one; ``SessionError`` otherwise."""
+    shown = f'"{human_sha[:12]}"' if human_sha else '"<sha12 of human.json>"'
+    if supersede_human is False:  # (the old form's "no": nothing is superseded)
+        supersede_human = None
+    if supersede_human is True:
+        raise SessionError("supersede_human: true is no longer accepted: it now names the very human.json it supersedes, as the first 12 "
+                           f"hex characters of its sha256 (supersede_human: {shown}), and an agent must never pass it without the user's "
+                           "explicit approval")
+    if supersede_human is not None and (not isinstance(supersede_human, str) or not SHA12.fullmatch(supersede_human)):
+        raise SessionError(f"supersede_human must be the first 12 hex characters of the sha256 of the human.json to supersede, not "
+                           f"{str(supersede_human)[:40]!r}")
+    if superseded is None:
+        if supersede_human is not None:
+            raise SessionError(f"supersede_human names {supersede_human}, but this publish leaves no fresh human stage out (human.json is "
+                               "absent, stale already, or continues exactly this edit): there is nothing to supersede; publish without it")
+        return
+    if supersede_human is None:
+        raise SessionError(f"{superseded}; human.json and human_import.json are never changed or deleted (re-import the editor's file after "
+                           f"publishing to bring it back). human.json is {human_sha[:12] if human_sha else 'unreadable'}: to publish anyway, "
+                           f"the user must explicitly approve superseding it, then pass supersede_human: {shown} (an agent must never "
+                           "pass it without the user's explicit approval)")
+    if human_sha is None or supersede_human != human_sha[:12]:
+        raise SessionError(f"supersede_human names {supersede_human}, but human.json is {human_sha[:12] if human_sha else 'unreadable'} now "
+                           "(a different file from the one named: it changed since, or the value is wrong): ask the user again before "
+                           "superseding it")
 
 
 def _human_superseded(ws: Path, data: bytes) -> Optional[str]:
@@ -206,8 +298,8 @@ def _rel(ws: Path, path: Path) -> str:
     return path.relative_to(ws).as_posix()
 
 
-def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersede_human: bool = False,
-            ctx: Optional[EditContext] = None) -> Dict[str, Any]:
+def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersede_human: Any = None,
+            acknowledge_mismatches: Optional[Sequence[str]] = None, ctx: Optional[EditContext] = None) -> Dict[str, Any]:
     """Publish revision ``rev`` (default: the head) of the workspace's session as the ``edit`` stage; returns the record written, plus
     ``replaced`` (where an earlier edit stage was moved, or None), ``previous`` (the revision the session published before, or None),
     ``recovered`` (the revision whose publish this one completes, when an earlier publish was cut short before its record, or None),
@@ -239,18 +331,26 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         if tl.stage != EDIT_STAGE:
             raise SessionError(f"revision {rid} is not an edit stage timeline (stage {tl.stage!r})")  # pragma: no cover
         context = s.context()
-        broken = _pin_problems(s.timeline("r000"), tl, context)
+        r000 = s.timeline("r000")
+        broken = _pin_problems(r000, tl, context)
         mismatches = rules.transition_mismatches(tl, context)  # untouched ones: any other transition there is refused just above
         if broken:
             label, line = broken[0]
             raise SessionError(f"pin {label} was added or changed since {rid} was made, and {rid} {line}: propose the edits again "
                                "(or release the pin)" + (f"; also: {'; '.join(x for _, x in broken[1:])}" if len(broken) > 1 else ""))
+        # a pin stored now that r000 does not hold (made after the pipeline's last run, or one it could not place): the revision may not
+        # change its clips or junctions (the same rule as every proposal, applied from r000, so a pin stored after apply counts too)
+        unapplied = S.unapplied_pins(s)
+        hits = rules.unapplied_problems(r000, tl, unapplied)
+        if hits:
+            raise SessionError(f"{rid} cannot be published: " + "; ".join(hits))
+        labels = [pin_label(p) for p in context.pins]
+        acknowledged = _check_acknowledged(rid, mismatches, acknowledge_mismatches, labels)
         data = _timeline_bytes(tl)
         sha = _sha256(data)
         superseded = _human_superseded(ws, data)
-        if superseded and not supersede_human:
-            raise SessionError(f"{superseded}; human.json and human_import.json are never changed (re-import the editor's file after "
-                               "publishing to bring it back): pass supersede_human to publish anyway")
+        human_sha = S._sha256_file(ws / HUMAN_FILE) if superseded else None
+        _check_supersede(supersede_human, superseded, human_sha)
         edit_path, record_path = ws / EDIT_FILE, ws / EDIT_RECORD
         moved: Optional[Path] = None
         previous: Optional[str] = None
@@ -286,11 +386,14 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             "base_stage": s.base_stage, "base_file": s.state["base_file"], "base_sha256": s.state["base_sha256"],
             "latest_stage": latest_name, "latest_stage_file": _rel(ws, latest_path), "latest_stage_sha256": latest_sha,
             "published_at": S._now(), "decisions": len(agent), "published": _rel(ws, copy), "transition_mismatches": mismatches,
+            "acknowledged_mismatches": acknowledged,
+            "unapplied_pins": [dict(e, status="not protected by this edit") for e in unapplied],
         }
         if moved is not None:
             record["replaced"] = _rel(ws, moved)
         if superseded:
             record["superseded_human"] = superseded
+            record["superseded_human_sha256"] = human_sha
         text = json.dumps(record, indent=2) + "\n"
         stamp = record["published_at"].replace(":", "").replace("-", "").replace("+0000", "Z")
         records = d / PUBLISHED_DIR / RECORDS_DIR
@@ -304,9 +407,10 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         _log(d, {"published_at": record["published_at"], "session": s.session_id, "revision": rid, "edit_sha256": sha,
                  "published": record["published"], "replaced": record.get("replaced"), "superseded_human": bool(superseded),
                  "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous, "recovered": recovered,
-                 "transition_mismatches": len(mismatches)})
+                 "transition_mismatches": len(mismatches), "acknowledged_mismatches": acknowledged,
+                 "superseded_human_sha256": human_sha, "unapplied_pins": [e["pin"] for e in unapplied]})
         S._atomic_write(record_path, text)
         left_out = stale_human(ws) if superseded else None
-        pins = _pin_states(ws, tl, context)
+        pins = _pin_states(ws, tl, context, unapplied, {m["pin"]: m for m in acknowledged})
     return dict(record, replaced=_rel(ws, moved) if moved is not None else None, previous=previous, recovered=recovered,
                 human_left_out=left_out, pins=pins)

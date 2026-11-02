@@ -39,6 +39,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -286,6 +287,34 @@ def _base_stage(ws: Path, stage: Optional[str]) -> Tuple[str, Path]:
     if not isinstance(stage, str) or stage not in paths:
         raise SessionError(f"no stage {stage!r} in {ws} (stages: {', '.join(paths)})")
     return stage, paths[stage]
+
+
+def rerun_command(ws: Path) -> str:
+    """The exact shell command that re-runs the pipeline's passes on workspace ``ws`` with its own config, so the canonical stage applies
+    the pins stored now (``python -m matchcut.pipeline refine SOURCE -w WS --config WS/config.json``); "" when ``config.json`` names no
+    source (the TUI's R then)."""
+    ws = Path(ws)
+    try:
+        source = PipelineConfig.load(ws / "config.json").source
+    except (OSError, ValueError, TypeError, KeyError):
+        source = ""
+    if not source:
+        return ""
+    q = shlex.quote
+    return f"python -m matchcut.pipeline refine {q(str(source))} -w {q(str(ws))} --config {q(str(ws / 'config.json'))}"
+
+
+RERUN_IN_TUI = "press R in the TUI and continue through its checkpoints"
+
+
+def unapplied_pins(s: "Session") -> List[Dict[str, Any]]:
+    """``rules.unapplied_pins`` of the session: every pin stored now that its r000 does not hold, with what to do about it."""
+    return _unapplied(s.ws, s.timeline("r000"), s.context())
+
+
+def _unapplied(ws: Path, r000: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
+    cmd = rerun_command(ws)
+    return rules.unapplied_pins(r000, ctx, f"{cmd}, or {RERUN_IN_TUI}" if cmd else RERUN_IN_TUI, cmd)
 
 
 def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
@@ -633,7 +662,8 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     """Start a session on ``stage`` (default: the latest canonical stage; ``edit`` is never a base) and return its summary, with
     ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish) and
     ``transition_mismatches`` (``rules.transition_mismatches``: every protected pin r000 holds whose junction's transition is not the one
-    the pin holds, with how to resolve it).
+    the pin holds, with how to resolve it) and ``unapplied_pins`` (``rules.unapplied_pins``: every pin stored now that r000 does not hold,
+    which the session does not protect and fails closed at, with what to do).
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -678,7 +708,8 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     can, blocker = publish_state(ws, name, stale_reason(ws, state))  # (fresh but for a race: the base stage changed already)
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
             "moved_aside": moved.name if moved is not None else None, "can_publish": can, "publish_blocker": blocker,
-            "transition_mismatches": rules.transition_mismatches(r000, ctx)}
+            "transition_mismatches": rules.transition_mismatches(r000, ctx),
+            "unapplied_pins": _unapplied(ws, r000, ctx)}
 
 
 def _change_decision(line: str, before: Timeline, after: Timeline) -> Decision:
@@ -733,12 +764,16 @@ def _evaluate(s: Session, ops: Any, guards: Any) -> Dict[str, Any]:
         probs = rules.problems(before, after, res.touched, ctx, guards)
     except (TypeError, ValueError, OverflowError) as exc:  # a malformed guard no check caught: a refusal, not a traceback
         raise SessionError(f"malformed guards ({type(exc).__name__}: {str(exc)[:120]})") from None
+    # a pin stored now that r000 does not hold: the session fails closed at its two shots (rules.unapplied_problems)
+    probs = rules.unapplied_problems(before, after, unapplied_pins(s)) + probs
     tm = rules.timing(before, after, ctx)
     ch = rules.changes(before, after, ctx)
     if probs:
         raise ProposalRefused("refused: " + "; ".join(probs), probs, tm, ch, res.details)
     if [c.to_dict() for c in after.clips] == [c.to_dict() for c in before.clips]:
-        raise ProposalRefused("refused: the operations change nothing", [], tm, ch, res.details)
+        why = "; ".join(res.details)
+        raise ProposalRefused(f"refused: the operations change nothing: the cut would be identical to the head {head}, so there is nothing "
+                              f"to apply and nothing was stored ({why})", [], tm, ch, res.details)
     for line in ch:
         d = _change_decision(line, before, after)
         d.data = dict(d.data, proposal=pid)
@@ -904,6 +939,11 @@ def log(ws: Path) -> Dict[str, Any]:
                          "summary": "; ".join(doc.get("details") or []) if doc.get("parent") is not None else "base",
                          "changes": len(doc.get("changes") or []), "created": doc.get("created")})
         why = s.stale()
+        try:
+            unapplied: Optional[List[Dict[str, Any]]] = unapplied_pins(s)
+        except SessionError:  # (the context cannot be read: e.g. the footage is gone; the commands that need it say so)
+            unapplied = None
     can, blocker = publish_state(ws, s.base_stage, why)
     return {"session": s.session_id, "base_stage": s.base_stage, "base_sha256": s.state["base_sha256"], "head": s.head,
-            "stale": why is not None, "stale_reason": why, "can_publish": can, "publish_blocker": blocker, "revisions": revs}
+            "stale": why is not None, "stale_reason": why, "can_publish": can, "publish_blocker": blocker, "unapplied_pins": unapplied,
+            "revisions": revs}

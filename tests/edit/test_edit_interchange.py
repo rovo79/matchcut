@@ -182,7 +182,7 @@ def test_the_human_stage_from_an_edit_import_is_stale_when_edit_json_changes(mak
     assert rec["stage"] == "edit" and "base_snapshot" not in rec  # edit.json is still the exported version
     kept = (x.ws / "human.json").read_bytes()
     edit(x.ws, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    P.publish(x.ws, supersede_human=True)  # (the human stage continues the old edit.json)
+    P.publish(x.ws, supersede_human=sha(x.ws / "human.json")[:12])  # (the human stage continues the old edit.json)
     assert stale_human(x.ws) == ("human.json is stale: edit.json changed since the import (re-export, or re-import the editor's file: matchcut "
                                  "diffs it against the stage it was exported from)")
     assert [s for s, _ in load_stage_timelines(x.ws)][-1] == "edit" and (x.ws / "human.json").read_bytes() == kept

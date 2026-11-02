@@ -402,5 +402,30 @@ def pin_states(tl: Optional[Timeline], pins: Sequence[Pin], stage: str = "") -> 
     return out
 
 
+def _transition_words(kind: str, frames: int) -> str:
+    return "cut" if kind == "cut" or frames <= 0 else f"{kind.replace('_', ' ')} of {frames} frames"
+
+
+def protected_transition_note(tl: Timeline, pin: Pin, acknowledged: bool = False) -> str:
+    """When ``pin`` protects its junction's transition (``hold_transition`` with a ``held_transition``) and ``tl`` holds the pin's two clips
+    together with another transition there, one phrase saying the protection is not kept (and whether that mismatch was acknowledged at
+    publish); "" otherwise.  The edit stage's views use it so a mismatched pin is never shown as if its protection were satisfied."""
+    held = pin.held_transition
+    if not pin.hold_transition or not isinstance(held, dict):
+        return ""
+    site = pin_site(tl, pin)
+    if site is None or (tl.clips[site].shot_index, tl.clips[site + 1].shot_index) != pin.key:
+        return ""
+    t = tl.clips[site + 1].transition_in
+    frames = 0 if t.is_cut else int(round(t.duration * tl.fps)) if tl.fps > 0 else 0
+    now = ("cut", 0) if frames <= 0 else (t.kind, frames)
+    want = ("cut", 0) if str(held.get("kind", "cut")) == "cut" or not held.get("frames") else (str(held["kind"]), int(held["frames"]))
+    if now == want:
+        return ""
+    why = "mismatch acknowledged at publish" if acknowledged else "mismatch not acknowledged"
+    return (f"its protected transition is NOT kept: the pin holds a {_transition_words(*want)}, this cut has a {_transition_words(*now)} "
+            f"({why})")
+
+
 def pin_constraints(pins: Sequence[Pin]) -> List[str]:
     return [f"keep shot {p.out_shot} immediately followed by shot {p.in_shot} (an editor-locked junction)" for p in pins]

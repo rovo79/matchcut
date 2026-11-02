@@ -210,19 +210,20 @@ def _pin(ws: Path, a: Dict[str, Any]) -> Dict[str, Any]:
 
 
 TOOLS: List[Tool] = [
-    Tool("start", "Start an edit session on a stage (default: the latest canonical stage; human or an earlier one by name; never edit); "
-                  "r000 is that stage on whole frames. Only a session on the latest canonical stage can publish. A stale session is moved "
-                  "aside; a fresh one only with restart. transition_mismatches: protected pins whose transition differs from the held one, "
-                  "with the fix.",
+    Tool("start", "Start an edit session (default base: the latest canonical stage, the only one that can publish; never edit); r000 is "
+                  "that stage on whole frames. A fresh session is replaced only with restart. Lists transition_mismatches, and "
+                  "unapplied_pins: pins the base does not hold, which this session cannot protect, so it refuses any change to their "
+                  "shots' clips and junctions and says how to protect them (re-run the pipeline, then restart).",
          _obj({"stage": {"type": "string", "pattern": r"^[a-z][a-z0-9_]{0,40}$", "description": "a stage name (roughcut, final, human ...)"},
                "restart": {"type": "boolean"}}),
          _start),
     Tool("inspect", "The cut of a revision (default: the head) in frames: clips, junctions and their protections, shots (their use and "
                     "descriptions), story beats (actual and target length), music beats, editor pins (held or not, protected "
-                    "transitions) and whether the session is stale.",
+                    "transitions), unapplied_pins (pins this session does not protect) and whether the session is stale.",
          _obj({"revision": REVISION}),
          lambda ws, a: V.inspect(ws, a.get("revision"))),
-    Tool("log", "The session's revisions (id, parent, operations, summary), the head and whether the session is stale.",
+    Tool("log", "The session's revisions (id, parent, operations, summary), the head, whether the session is stale, and "
+                "unapplied_pins (pins this session does not protect).",
          _obj(),
          lambda ws, a: S.log(ws)),
     Tool("propose", "Run operations (all or nothing) on the head and check every rule and guard. Accepted: the proposal id, its changes by "
@@ -263,11 +264,20 @@ TOOLS: List[Tool] = [
                "hold": {"type": "boolean"}, "kind": KIND, "frames": _int("the transition's length in whole frames", 0, MAX_FRAMES)},
               ["hold"]),
          _pin),
-    Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage (edit.json, edit_publish.json, a copy in "
-                    "edits/published/). Needs a fresh session on the latest canonical stage whose revision holds every pin. Refused over "
-                    "another session's edit stage unless replace, and over a fresh human stage it would leave out unless supersede_human.",
-         _obj({"revision": REVISION, "replace": {"type": "boolean"}, "supersede_human": {"type": "boolean"}}),
-         lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)), bool(a.get("supersede_human", False)))),
+    Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage. Refused unless the session is fresh, on the "
+                    "latest canonical stage, keeps every held pin and leaves unapplied pins' clips and junctions untouched; over another "
+                    "session's edit stage without replace; while a protected transition differs from the held one (repair it, or "
+                    "acknowledge_mismatches naming every such pin); over a fresh human stage unless supersede_human is its sha12. Never "
+                    "pass acknowledge_mismatches or supersede_human without the user's explicit approval.",
+         _obj({"revision": REVISION, "replace": {"type": "boolean"},
+               "supersede_human": {"anyOf": [{"type": "string", "pattern": r"^[0-9a-f]{12}$"}, {"type": "boolean"}],
+                                   "description": "the first 12 hex characters of the sha256 of the human.json to supersede (only with "
+                                                  "the user's explicit approval)"},
+               "acknowledge_mismatches": {"type": "array", "items": {"type": "string", "pattern": PIN_LABEL}, "maxItems": 10000,
+                                          "description": "every pin whose protected transition differs from the held one, carried "
+                                                         "forward (only with the user's explicit approval)"}}),
+         lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)), a.get("supersede_human"),
+                                 a.get("acknowledge_mismatches"))),
 ]
 
 BY_NAME: Dict[str, Tool] = {t.name: t for t in TOOLS}

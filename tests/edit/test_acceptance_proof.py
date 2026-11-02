@@ -730,7 +730,8 @@ def check_p54(o):
     nothing.  The behaviour checked (nothing changes) is the same."""
     p = o["snap2"]
     assert o["offsets_after"][1] == 0
-    assert not p["ok"] and p["error"] == "refused: the operations change nothing" and p["changes"] == []
+    assert not p["ok"] and p["error"].startswith("refused: the operations change nothing: the cut would be identical to the head") and \
+        "nothing was stored" in p["error"] and p["changes"] == []
     assert "is already on the " in p["details"][0], p
     assert o["revisions_after_snap2"] == o["revisions_before_snap2"] and o["proposals_after_snap2"] == o["proposals_before_snap2"]
 
@@ -1001,7 +1002,7 @@ def published(scripted) -> SimpleNamespace:
     except Refused as exc:
         o["refused"] = str(exc)
     o["edit_after_refusal"] = (w / "edit.json").exists()
-    o["pub"] = P.publish(w, supersede_human=True)
+    o["pub"] = P.publish(w, supersede_human=sha(w / "human.json")[:12])  # bound to the very file the user approved superseding
     o["human_after"] = {n: (w / n).read_bytes() for n in o["human_before"]}
     o["junctions"] = mc("junctions", w).stdout
     return SimpleNamespace(ws=w, o=o)
@@ -1011,7 +1012,7 @@ def test_p73_publishing_over_a_fresh_editor_import_is_refused(published):
     o = published.o
     assert o["human_fresh_before"]
     assert o["refused"] is not None and "human.json (an editor's re-export, imported against final) is the latest stage" in o["refused"]
-    assert "pass supersede_human to publish anyway" in o["refused"] and not o["edit_after_refusal"]
+    assert f'pass supersede_human: "{sha(published.ws / "human.json")[:12]}"' in o["refused"] and not o["edit_after_refusal"]
 
 
 def test_p74_the_editors_import_is_never_touched(published):

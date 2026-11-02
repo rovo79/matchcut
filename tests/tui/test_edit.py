@@ -811,3 +811,35 @@ def test_locking_or_reverting_again_keeps_the_transition_protection_and_clearing
             assert not PinStore(ws).get(j.out_shot, j.in_shot).hold_transition and "protected" not in notes[-1]
 
     run_async(body())
+
+
+# -- a pin made while an edit session exists -------------------------------------------------------
+def test_a_pin_made_while_an_edit_session_exists_says_the_session_will_not_protect_it_yet(mock_workspace, tmp_path, monkeypatch):
+    """Requirement A: the session holds only the pins its base stage holds, so a pin made or changed in the TUI while WS/edits/session.json
+    exists says the session will not protect it until the pipeline is re-run and the session restarted; without a session it does not."""
+    from matchcut.edit import session
+    from matchcut.tui.views.edit import EDIT_SESSION_NOTE
+
+    ws = own_copy(mock_workspace, tmp_path)
+    notes = []
+    assert EDIT_SESSION_NOTE == ("an active edit session will not protect this pin until you re-run the pipeline and restart the session (it "
+                                 "refuses edits to these shots until then)")
+
+    async def body():
+        app = app_for(ws)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            await pilot.press("l")
+            await pilot.pause()
+            assert "edit session" not in notes[-1]  # no session yet
+            session.start(ws)
+            for key in ("l", "v"):  # made again, or changed (reverted)
+                await pilot.press(key)
+                await pilot.pause()
+                assert notes[-1].endswith(EDIT_SESSION_NOTE), notes[-1]
+                assert "an active edit session will not protect this pin until you re-run the pipeline and restart the session" in notes[-1]
+
+    run_async(body())

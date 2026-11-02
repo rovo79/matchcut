@@ -52,13 +52,18 @@ def test_publish_over_a_fresh_canonical_human_stage_is_refused_unless_superseded
     S.start(w)
     edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])
     kept = human_files(w)
+    sha12 = sha(w / "human.json")[:12]
     with pytest.raises(Refused, match=r"human.json \(an editor's re-export, imported against final\) is the latest stage .* leave it out of the "
-                                      r"stage order as stale; human.json and human_import.json are never changed .*pass supersede_human"):
+                                      r"stage order as stale; human.json and human_import.json are never changed or deleted .*"
+                                      rf'the user must explicitly approve superseding it, then pass supersede_human: "{sha12}" \(an agent '
+                                      r"must never pass it without the user's explicit approval\)"):
         P.publish(w)
     assert not (w / "edit.json").exists() and stale_human(w) is None
-    out = T.call(w, "publish", {"supersede_human": True})
+    out = T.call(w, "publish", {"supersede_human": sha12})
     assert out["human_left_out"] == stale_human(w) and out["human_left_out"].startswith("human.json is stale: edit.json was published")
-    assert json.loads((w / "edit_publish.json").read_text())["superseded_human"].startswith("human.json (an editor's re-export")
+    record = json.loads((w / "edit_publish.json").read_text())
+    assert record["superseded_human"].startswith("human.json (an editor's re-export")
+    assert record["superseded_human_sha256"] == sha(w / "human.json")
     assert human_files(w) == kept and load_stage_timelines(w)[-1][0] == "edit"
     log = [json.loads(x) for x in (w / "edits" / "published" / "log.jsonl").read_text().splitlines()]
     assert [e["superseded_human"] for e in log] == [True]
@@ -78,7 +83,7 @@ def test_republishing_over_a_human_stage_imported_against_the_edit_is_refused_un
         P.publish(w)
     assert P.publish(w, r1)["human_left_out"] is None  # the same edit.json again: the human stage still continues it
     assert stale_human(w) is None
-    out = P.publish(w, supersede_human=True)
+    out = P.publish(w, supersede_human=sha(w / "human.json")[:12])
     assert out["human_left_out"].startswith("human.json is stale: edit.json changed since the import")
 
 
@@ -138,20 +143,20 @@ def test_publish_reports_the_pins_and_words_a_pin_the_edit_does_not_hold_for_the
     held = pinned_final(w)
     PinStore(w).put(held)
     S.start(w)
-    edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
+    edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])  # (c002|c003: neither clip changes, nor the junction's transition)
     later = pin_of(Timeline.load(w / "final.json"), 2)  # stored after the pipeline's last run: neither final nor the edit holds it
     PinStore(w).put(later)
     out = P.publish(w)
     states = {p["pin"]: (p["state"], p["reason"]) for p in out["pins"]}
     assert states["s0->s1"] == ("held", "")
-    assert states["s3->s5"][0] == "not_held" and states["s3->s5"][1].startswith("not held by this edit")
-    assert "re-run" not in states["s3->s5"][1] and "pending" not in json.dumps(out["pins"])
+    assert states["s3->s5"][0] == "not_protected" and states["s3->s5"][1].startswith("not protected by this edit: pin s3->s5 was made or "
+                                                                                       "changed after the pipeline's last run")
+    assert "re-run the pipeline" in states["s3->s5"][1] and '"held"' not in json.dumps([p for p in out["pins"] if p["pin"] == "s3->s5"])
     assert main(["junctions", str(w)]) == 0
     footer = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("pin ")]
     assert footer == ["pin s0->s1: held by this edit",
-                      "pin s3->s5: not held by this edit (the pin was stored after the pipeline's last run; a run would apply it, and leave "
-                      "the edit stage out as stale)"]
-    assert "re-run the pipeline" not in json.dumps(V.inspect(w)["pins"])
+                      "pin s3->s5: not protected by this edit (the pin was made or changed after the pipeline's last run; a run would "
+                      "apply it, and leave the edit stage out as stale)"]
 
 
 def test_the_tui_badge_on_the_edit_stage_does_not_say_pending():
@@ -430,37 +435,52 @@ def test_the_held_transition_can_be_reached_and_published(make_ws, make_mismatch
 
 
 @pytest.mark.parametrize("make_mismatch", MISMATCHES)
-def test_an_untouched_mismatch_publishes(make_ws, make_mismatch):
+def test_an_untouched_inherited_mismatch_is_refused_at_publish_with_both_ways_out(make_ws, make_mismatch):
+    """Requirement B: proposals are unchanged (an unrelated edit is accepted), but publish never carries a protected-transition mismatch
+    forward silently: it names the repair (the exact set_transition op) and the explicit acknowledgement."""
     w = make_ws()
     make_mismatch(w)
     S.start(w, restart=True)
-    rid = edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    assert P.publish(w)["revision"] == rid
-    assert Timeline.load(w / "edit.json").clips[1].transition_in.is_cut
+    rid = edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])  # unrelated: accepted while the mismatch exists
+    with pytest.raises(Refused) as exc:
+        P.publish(w)
+    msg = str(exc.value)
+    assert msg.startswith(f"{rid} leaves 1 protected transition different from what the pin holds: pin s0->s1 holds a dissolve 4f but "
+                          "junction 1 (s0-s1) has a cut: repair it by proposing "
+                          '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}, applying it and publishing again')
+    assert ('Or, only if the user explicitly approves carrying this mismatch forward, publish {"acknowledge_mismatches": ["s0->s1"]} (it must '
+            "name every mismatching pin, exactly); an agent must never acknowledge a mismatch without the user's explicit approval") in msg
+    assert not (w / "edit.json").exists() and not (w / "edit_publish.json").exists()
 
 
 @pytest.mark.parametrize("make_mismatch", MISMATCHES)
-def test_publish_reports_an_untouched_mismatch_in_its_result_record_and_log(make_ws, make_mismatch):
-    """Not only as prose in pins[].reason: the result and edit_publish.json list it (as start and inspect do), each pins entry says
-    transition_mismatch, and the log line counts it."""
+def test_an_acknowledged_mismatch_publishes_and_is_recorded_in_the_result_record_and_log(make_ws, make_mismatch):
+    """With the exact list, the mismatch is carried forward and recorded (pin, held and current transition) in the result,
+    edit_publish.json and the log line; the pin reads mismatch_acknowledged, never held."""
     w = make_ws()
     make_mismatch(w)
     start = S.start(w, restart=True)
     edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    out = P.publish(w)
+    out = P.publish(w, acknowledge_mismatches=["s0->s1"])
     [m] = out["transition_mismatches"]
     assert m == start["transition_mismatches"][0] == V.inspect(w)["transition_mismatches"][0]
-    assert (m["pin"], m["n"], m["transition"], m["held_transition"]) == ("s0->s1", 1, {"kind": "cut", "frames": 0},
-                                                                         {"kind": "dissolve", "frames": 4})
+    ack = [{"pin": "s0->s1", "n": 1, "junction": "s0-s1", "held_transition": {"kind": "dissolve", "frames": 4},
+            "transition": {"kind": "cut", "frames": 0}}]
+    assert out["acknowledged_mismatches"] == ack
     record = json.loads((w / "edit_publish.json").read_text())
-    assert record["transition_mismatches"] == [m]
+    assert record["transition_mismatches"] == [m] and record["acknowledged_mismatches"] == ack
     [pin] = out["pins"]
-    assert pin["state"] == "held" and pin["transition_mismatch"] is True and pin["reason"] == m["repair"]
+    assert pin["state"] == "mismatch_acknowledged" and pin["transition_mismatch"] is True
+    assert pin["reason"].startswith("its clips and cut points are held, but its protected transition is not: the pin holds a dissolve of 4 "
+                                    "frames, this cut has a cut")
     line = json.loads((w / "edits" / "published" / "log.jsonl").read_text().splitlines()[-1])
-    assert line["transition_mismatches"] == 1
+    assert line["transition_mismatches"] == 1 and line["acknowledged_mismatches"] == ack
+    # inspect of the published revision says so too, never held
+    p = next(x for x in V.inspect(w)["pins"] if x["pin"] == "s0->s1")
+    assert p["state"] == "mismatch_acknowledged"
     # the tool's result carries the same
     edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 1}])
-    assert T.call(w, "publish", {})["transition_mismatches"] == [m]
+    assert T.call(w, "publish", {"acknowledge_mismatches": ["s0->s1"]})["acknowledged_mismatches"] == ack
 
 
 @pytest.mark.parametrize("make_mismatch", MISMATCHES)

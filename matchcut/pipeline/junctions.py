@@ -88,6 +88,16 @@ def _edit_reason(ws: Path) -> Optional[str]:
     return None
 
 
+def edit_acknowledged_mismatches(ws: Path) -> List[str]:
+    """The pins (labels) whose protected-transition mismatch the edit stage's record says the user acknowledged at publish
+    (``acknowledged_mismatches`` in ``edit_publish.json``); [] when there is none or the record is unreadable."""
+    try:
+        entries = _record(Path(ws) / EDIT_RECORD).get("acknowledged_mismatches") or []
+        return [str(e["pin"]) for e in entries if isinstance(e, dict) and "pin" in e]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
 def stale_edit(ws: Path) -> Optional[str]:
     """The one-line reason ``edit.json`` (the edit stage: an agent's published edit session) no longer fits the workspace, or None.
 

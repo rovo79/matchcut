@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from fractions import Fraction
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import AbstractSet, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from matchcut.interchange import InterchangeError
 from matchcut.interchange.common import junction_ids, layout
@@ -129,15 +129,128 @@ def transition_mismatches(tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]
     return out
 
 
-def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int]) -> str:
-    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line."""
-    op = {"op": "set_transition", "junction": n, "kind": held[0]}
+def repair_op(n: int, held: Tuple[str, int]) -> Dict[str, Any]:
+    """The ``set_transition`` operation that gives junction ``n`` the ``held`` transition."""
+    op: Dict[str, Any] = {"op": "set_transition", "junction": n, "kind": held[0]}
     if held[1]:
         op["frames"] = held[1]
+    return op
+
+
+def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int]) -> str:
+    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line."""
     return (f"the editor pin {pin_label(pin)} holds a {_label(*held)} but junction {n} has a {_label(*now)}: propose "
-            f"{json.dumps(op)} to give it the held transition (the only change allowed there); or, if the editor agrees, re-protect the "
-            f'current {_label(*now)} with pin_transition {{"pin": "{pin_label(pin)}", "hold": true}} (that replaces the protection the '
-            "editor chose); left as it is, it still publishes")
+            f"{json.dumps(repair_op(n, held))} to give it the held transition (the only change allowed there); or, if the editor agrees, "
+            f're-protect the current {_label(*now)} with pin_transition {{"pin": "{pin_label(pin)}", "hold": true}} (that replaces the '
+            "protection the editor chose); left as it is, publish refuses it unless the user explicitly approves carrying the mismatch "
+            f'forward (publish {{"acknowledge_mismatches": ["{pin_label(pin)}", ...]}})')
+
+
+# ----------------------------------------------------------------------------------------------- pins the session does not protect
+PENDING, NOT_PLACED, RELEASED = "pending", "not_placed", "released"  # the kinds of an unapplied pin
+RESTART = 'start {"restart": true}'
+
+
+def unapplied_pins(base: Timeline, ctx: EditContext, rerun: str = "re-run the pipeline", command: str = "") -> List[Dict[str, Any]]:
+    """Every editor pin of ``ctx`` (the pins stored now) that ``base`` (the session's r000) does not hold, so the session cannot protect it
+    the way it protects a held pin.  ``kind`` says why, and so what to do:
+
+    - ``pending``: the base's history has no pipeline decision for it (the pin was made or changed after the pipeline's last run); a run
+      applies it;
+    - ``not_placed``: the pipeline recorded that it could not place it (``pin_unplaced``); a plain re-run will not help;
+    - ``released``: the pipeline applied it, but the base no longer holds it (a ``human`` base whose editor changed it).
+
+    Each entry names the pin's two ``shots``, the ``junction`` where they are adjacent in ``base`` (or None), the ``affected_clips`` (every
+    clip of those shots) and ``affected_junctions`` (every junction with a neighbour of those shots): ``unapplied_problems`` refuses any
+    change to them.  ``rerun`` says how to re-run the pipeline on this workspace, in words; ``command`` is the bare shell command
+    (``rerun_command`` in each entry)."""
+    held = {id(p) for p, _ in held_pins(base, ctx)}
+    ids = junction_ids(base)
+    out: List[Dict[str, Any]] = []
+    for pin in ctx.pins:
+        if id(pin) in held:
+            continue
+        label = pin_label(pin)
+        shots = {pin.out_shot, pin.in_shot}
+        decision = pin_outcome(base, pin, "")  # the base's history, on canonical terms (r000 is never the human stage)
+        if decision is None:
+            kind = PENDING
+            reason = (f"pin {label} was made or changed after the pipeline's last run, so this edit session does not protect it yet (the "
+                      "session's base stage has no pipeline decision for it)")
+            action = (f"to protect it: re-run the pipeline so the canonical stage applies it ({rerun}), then restart the edit session "
+                      f"({RESTART})")
+        elif decision.action == "pin_unplaced":
+            kind = NOT_PLACED
+            reason = (f"pin {label} could not be placed by the pipeline's last run ({decision.detail or 'no reason recorded'}), so this edit "
+                      "session does not protect it")
+            action = ("a plain re-run will not place it: clear it (x) or make it again (l / v) on a junction it can hold in the TUI's Edit "
+                      f"view, re-run the pipeline ({rerun}), then restart the edit session ({RESTART})")
+        else:
+            kind = RELEASED
+            now = pin_outcome(base, pin, HUMAN_STAGE)
+            why = now.detail if now is not None and now.detail else "its clips or cut points differ"
+            reason = f"pin {label} is not held by the session's base stage ({why}), so this edit session does not protect it"
+            action = (f"make it again (l / v) in the TUI's Edit view, re-run the pipeline ({rerun}), then restart the edit session on the "
+                      f"latest canonical stage ({RESTART})")
+        site = next((i for i in range(len(base.clips) - 1)
+                     if (base.clips[i].shot_index, base.clips[i + 1].shot_index) == (pin.out_shot, pin.in_shot)), None)
+        out.append({"pin": label, "kind": kind, "shots": [pin.out_shot, pin.in_shot], "junction": None if site is None else ids[site],
+                    "affected_clips": [c.id for c in base.clips if c.shot_index in shots],
+                    "affected_junctions": [ids[i] for i in range(len(base.clips) - 1)
+                                           if base.clips[i].shot_index in shots or base.clips[i + 1].shot_index in shots],
+                    "protected": False, "reason": reason, "action": action, "rerun_command": command or None})
+    return out
+
+
+def _pairs(tl: Timeline, shots: AbstractSet[int]) -> Dict[Pair, Dict[str, Any]]:
+    """(outgoing id, incoming id) -> the incoming transition, for every junction of ``tl`` with a neighbour of ``shots``."""
+    return {(a.id, b.id): b.transition_in.to_dict() for a, b in zip(tl.clips, tl.clips[1:])
+            if a.shot_index in shots or b.shot_index in shots}
+
+
+def unapplied_changes(before: Timeline, after: Timeline, entry: Dict[str, Any]) -> List[str]:
+    """What ``after`` changes, relative to ``before``, of what an unapplied pin (``unapplied_pins``) covers; [] when nothing.
+
+    Judged on the result, whatever operation caused it (so an indirect change counts): a clip of one of the pin's two shots removed, added
+    or changed in any way (points, transition, shot), and a junction with a neighbour of those shots that is no longer a junction, becomes
+    one, or changes its transition.  A clip of another shot may change (an edge, or a ripple that moves record positions)."""
+    shots = set(entry["shots"])
+    b = {c.id: c for c in before.clips}
+    a = {c.id: c for c in after.clips}
+    out: List[str] = []
+    for cid, c in b.items():
+        if c.shot_index in shots and cid not in a:
+            out.append(f"removes {cid} (shot {c.shot_index})")
+    for cid, c in a.items():
+        old = b.get(cid)
+        if old is None:
+            if c.shot_index in shots:
+                out.append(f"adds {cid} (shot {c.shot_index})")
+        elif (c.shot_index in shots or old.shot_index in shots) and c.to_dict() != old.to_dict():
+            out.append(f"changes {cid} (shot {old.shot_index})")
+    pb, pa = _pairs(before, shots), _pairs(after, shots)
+    for (x, y) in pb:
+        if (x, y) not in pa:
+            out.append(f"separates {x}|{y}")
+    for (x, y), tr in pa.items():
+        if (x, y) not in pb:
+            out.append(f"joins {x}|{y}")
+        elif tr != pb[(x, y)] and not any(line.startswith(f"changes {y} ") for line in out):
+            out.append(f"changes the transition at {x}|{y}")
+    return _dedupe(out)
+
+
+def unapplied_problems(before: Timeline, after: Timeline, unapplied: Sequence[Dict[str, Any]]) -> List[str]:
+    """One line per unapplied pin (``unapplied_pins``) whose clips or junctions ``after`` changes (``unapplied_changes``): the session fails
+    closed there, since it cannot tell whether the change keeps the pin.  Each line says what to do."""
+    out: List[str] = []
+    for e in unapplied:
+        hits = unapplied_changes(before, after, e)
+        if hits:
+            shown = ", ".join(hits[:6]) + (f" and {len(hits) - 6} more" if len(hits) > 6 else "")
+            out.append(f"{e['reason']}, and this edit {shown} (the clips and junctions of shots {e['shots'][0]} and {e['shots'][1]} "
+                       f"cannot change until it does): {e['action']}")
+    return out
 
 
 def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: EditContext, guards: Optional[Dict[str, Any]] = None) -> List[str]:

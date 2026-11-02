@@ -258,10 +258,18 @@ def _same_transition(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -
     return _label(str(a.get("kind")), int(a.get("frames") or 0)) == _label(str(b.get("kind")), int(b.get("frames") or 0))
 
 
-def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> List[Dict[str, Any]]:
+def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str], unapplied: Optional[List[Dict[str, Any]]] = None,
+          acknowledged: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Every stored pin and where it stands in ``tl``: held at a junction (with the transition it protects, and whether that differs from
-    the junction's transition now), or not held (released by the cut, never placed, or not applied yet) with the reason."""
+    the junction's transition now), or not held (released by the cut, never placed, or not applied yet) with the reason.
+
+    A held pin whose protected transition differs from the one it holds is never called held: its ``state`` is ``transition_mismatch``
+    (or ``mismatch_acknowledged`` when ``acknowledged``, the pins a publish of this cut carried forward with the user's approval, names it).
+    ``unapplied`` (``rules.unapplied_pins`` of the session) adds, to a pin the session does not protect, ``protected: false`` and the
+    ``action`` that would protect it."""
     held = {id(p): site for p, site in held_pins(tl, ctx)}
+    not_protected = {e["pin"]: e for e in unapplied or []}
+    acknowledged = acknowledged or {}
     out: List[Dict[str, Any]] = []
     for pin in ctx.pins:
         entry: Dict[str, Any] = {"pin": pin_label(pin), "out_shot": pin.out_shot, "in_shot": pin.in_shot, "out_time": pin.out_time,
@@ -275,7 +283,14 @@ def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> Li
                          clips=[tl.clips[site].id, tl.clips[site + 1].id], transition=now, transition_mismatch=mismatch)
             if mismatch:
                 cur = (now["kind"], now["frames"])
-                entry["reason"] = rules.mismatch_repair(pin, site + 1, cur, held_of(pin, cur))
+                if pin_label(pin) in acknowledged:
+                    entry["state"] = "mismatch_acknowledged"
+                    entry["reason"] = (f"its clips and cut points are held, but its protected transition is not: the pin holds a "
+                                       f"{_text(pin.held_transition)}, this cut has a {_text(now)} (carried forward at publish with the "
+                                       "user's acknowledgement, acknowledge_mismatches)")
+                else:
+                    entry["state"] = "transition_mismatch"
+                    entry["reason"] = rules.mismatch_repair(pin, site + 1, cur, held_of(pin, cur))
         else:
             d = pin_outcome(tl, pin, HUMAN_STAGE)
             if d is None:  # (a pipeline run would apply it, and make this session and a published edit stage stale)
@@ -287,6 +302,9 @@ def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str]) -> Li
                 state, reason = "released", d.detail or "this cut no longer holds it"
             entry.update(held=False, state=state, reason=reason, junction=None, n=None, clips=None, transition=None,
                          transition_mismatch=False)
+            e = not_protected.get(pin_label(pin))
+            if e is not None:  # the session does not protect it at all: say what would
+                entry.update(protected=False, reason=e["reason"], action=e["action"])
         out.append(entry)
     return out
 
@@ -383,10 +401,11 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         why = s.stale()
         ctx = s.context()
         n_revs = len(s.revision_ids())
+        unapplied = S.unapplied_pins(s)
     d = rules.describe(tl, ctx)
     rows = frame_rows(tl, ctx.rate)
     ids = [j["id"] for j in d["junctions"]]
-    pins = _pins(tl, rows, ctx, ids)
+    pins = _pins(tl, rows, ctx, ids, unapplied, acknowledged_in_record(ws, s.session_id, rid))
     by_site = {p["n"] - 1: p for p in pins if p["held"]}
     for c, entry in zip(tl.clips, d["clips"]):
         entry["origin"] = c.origin or None
@@ -439,7 +458,23 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         "pins": pins,
         "protections": protections,
         "transition_mismatches": rules.transition_mismatches(tl, ctx),
+        "unapplied_pins": unapplied,
     }
+
+
+def acknowledged_in_record(ws: Path, session: str, rev: str) -> Dict[str, Any]:
+    """The mismatches (pin label -> entry) that the edit stage's record says were acknowledged when ``rev`` of ``session`` was published;
+    {} when the record is of another session or revision, or unreadable."""
+    from matchcut.pipeline.junctions import EDIT_RECORD
+
+    try:
+        record = json.loads((Path(ws) / EDIT_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict) or record.get("session") != session or record.get("revision") != rev:
+        return {}
+    entries = record.get("acknowledged_mismatches") or []
+    return {str(e["pin"]): e for e in entries if isinstance(e, dict) and "pin" in e}
 
 
 # ----------------------------------------------------------------------------------------------- frames

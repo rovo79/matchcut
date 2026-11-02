@@ -11,10 +11,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
-from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states
-from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_edit, stale_human
+from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states, protected_transition_note
+from matchcut.pipeline.junctions import Junction, build_junctions, edit_acknowledged_mismatches, scorer_for_workspace, stale_edit, stale_human
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import HUMAN_STAGE, clip_origin
+from matchcut.pipeline.timeline import EDIT_STAGE, HUMAN_STAGE, clip_origin
 from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
@@ -23,6 +23,10 @@ from ..widgets.inspector import render_inspector
 from ..widgets.timeline import TimelineTrack
 
 FRAME_IDS = ("out-frame", "in-frame", "blend-frame")
+# a pin made or changed while an edit session (matchcut.edit, WS/edits/session.json) exists: the session holds only the pins its base stage
+# holds, so it fails closed at this pin's shots until the pipeline applies it and the session is restarted
+EDIT_SESSION_NOTE = ("an active edit session will not protect this pin until you re-run the pipeline and restart the session (it refuses "
+                     "edits to these shots until then)")
 
 
 def _transition_text(held: Optional[dict]) -> str:
@@ -223,7 +227,8 @@ class EditView(Vertical):
             store = PinStore(self._state.workspace)
             # where the human stage says a pin changed, the badge is on the junction the pin now sits at (its pair, or its surviving clip), not by shots
             pin = (store.get(*j.pin_key) if j.pin_lost and j.pin_key else None) or store.get(j.out_shot, j.in_shot)
-            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin), self.stages[-1] if self.stages else ""))
+            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin), self.stages[-1] if self.stages else "",
+                                          self._pin_note(pin, stage)))
         # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
         shown = j.state_at(stage) or j.current
         media = self._state.media()
@@ -238,6 +243,16 @@ class EditView(Vertical):
         if not pins or not self.stages or self.stages[-1] != HUMAN_STAGE:
             return []
         return [f"pin {st.label} changed by the editor: {st.reason}" for st in pin_states(state.timeline(HUMAN_STAGE), pins, HUMAN_STAGE) if st.state == "changed"]
+
+    def _pin_note(self, pin: Optional[Pin], stage: str) -> str:
+        """On the edit stage, whether a protected pin's transition is kept there (``protected_transition_note``, with the record's
+        acknowledgement): never shown as satisfied when it is not."""
+        if pin is None or self._state is None or stage != EDIT_STAGE:
+            return ""
+        tl = self._state.timeline(EDIT_STAGE)
+        if tl is None:
+            return ""
+        return protected_transition_note(tl, pin, f"s{pin.out_shot}->s{pin.in_shot}" in edit_acknowledged_mismatches(self._state.workspace))
 
     def _pin_decision(self, pin: Optional[Pin]):
         """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
@@ -368,6 +383,8 @@ class EditView(Vertical):
         if j.baseline.stage != j.first_stage:
             note += (". these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, "
                      "unless that would split or reorder the beats or another pin holds them")
+        if (Path(self._state.workspace) / "edits" / "session.json").exists():
+            note += f". {EDIT_SESSION_NOTE}"
         self.app.notify(note)
         self._fingerprint = None
         self.refresh_from_state(self._state)

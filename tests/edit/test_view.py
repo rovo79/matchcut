@@ -152,7 +152,11 @@ def test_inspect_pins_protections_and_released_pins(make_ws):
     assert not released["held"] and released["state"] == "released" and "trimmed by 4 frames (in)" in released["reason"]
     assert released["junction"] is None
     pending = pins["s3->s6"]
-    assert pending["state"] == "pending" and "stored after the pipeline's last run" in pending["reason"] and "re-run" not in pending["reason"]
+    assert pending["state"] == "pending" and pending["protected"] is False
+    assert pending["reason"].startswith("pin s3->s6 was made or changed after the pipeline's last run, so this edit session does not protect it")
+    assert pending["action"].startswith("to protect it: re-run the pipeline so the canonical stage applies it (python -m matchcut.pipeline refine ")
+    assert released["protected"] is False and "not held by the session's base stage" in released["reason"]
+    assert [(e["pin"], e["kind"]) for e in d["unapplied_pins"]] == [("s5->s6", "released"), ("s3->s6", "pending")]
     j = d["junctions"]
     assert j[0]["pinned"] and j[0]["pin"] == "s0->s1" and j[0]["protection"] == ["editor pin s0->s1: its clips stay adjacent with both cut points"]
     assert not j[3]["pinned"] and j[3]["protection"] == []

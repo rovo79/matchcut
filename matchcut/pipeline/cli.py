@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import DEFAULT_PASSES, PipelineConfig
-from .editorial import PinStore, pin_states
-from .junctions import build_junctions, junction_detail, junction_line, load_stage_timelines, scorer_for_workspace, stale_edit, stale_human
+from .editorial import PinStore, pin_states, protected_transition_note
+from .junctions import (build_junctions, edit_acknowledged_mismatches, junction_detail, junction_line, load_stage_timelines,
+                        scorer_for_workspace, stale_edit, stale_human)
 from .pipeline import Pipeline
 from .timeline import EDIT_STAGE, HUMAN_STAGE, Timeline
 
@@ -154,8 +155,8 @@ def _interchange(args: argparse.Namespace) -> int:
     return 0
 
 
-EDIT_NOT_HELD = ("not held by this edit (the pin was stored after the pipeline's last run; a run would apply it, and leave the edit "
-                 "stage out as stale)")
+EDIT_NOT_HELD = ("not protected by this edit (the pin was made or changed after the pipeline's last run; a run would apply it, and leave "
+                 "the edit stage out as stale)")
 
 
 def _pin_footer(ws: Path, stages) -> List[str]:
@@ -165,10 +166,15 @@ def _pin_footer(ws: Path, stages) -> List[str]:
     if not stages or stages[-1][0] not in (HUMAN_STAGE, EDIT_STAGE):
         return []
     edit = stages[-1][0] == EDIT_STAGE
+    acknowledged = set(edit_acknowledged_mismatches(ws)) if edit else set()
     lines = []
     for st in pin_states(stages[-1][1], PinStore(ws).load(), stages[-1][0]):
         what = {"applied": "held by this edit" if edit else "applied", "changed": f"changed by the editor: {st.reason}",
-                "not_placed": f"not placed: {st.reason}", "pending": EDIT_NOT_HELD if edit else "pending (run again to apply)"}[st.state]
+                "not_placed": f"not placed: {st.reason}" + ("; not protected by this edit" if edit else ""),
+                "pending": EDIT_NOT_HELD if edit else "pending (run again to apply)"}[st.state]
+        note = protected_transition_note(stages[-1][1], st.pin, st.label in acknowledged) if st.state == "applied" else ""
+        if note:  # never "held" while the protected transition is not
+            what = f"clips and cut points held by this edit, but {note}" if edit else f"applied, but {note}"
         lines.append(f"pin {st.label}: {what}")
     return lines
 

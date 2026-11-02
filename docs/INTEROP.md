@@ -391,7 +391,8 @@ the `agent` decisions, then the `human` ones). It is stale when `edit.json` chan
 or when the edit stage is stale. The same holds for a file imported against a canonical stage while a fresh edit stage exists (its history
 continues the edit stage's; a note says the agent's changes show as differences). Conversely, a `human.json` imported before an `edit.json`
 was published does not continue the edit stage's history, so publishing would make it stale: `publish` refuses unless it is given
-`supersede_human: true`, and then reports `human_left_out` (the human stage is left out, never deleted or rewritten; re-import the editor's
+`supersede_human` set to the sha12 of that very `human.json` (given only with the user's explicit approval; `true` is refused), and then
+reports `human_left_out` (the human stage is left out, never deleted or rewritten; re-import the editor's
 file to bring it back).
 
 ## DaVinci Resolve
