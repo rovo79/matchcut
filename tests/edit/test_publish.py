@@ -72,7 +72,7 @@ def test_publish_writes_the_edit_stage_its_record_and_an_immutable_copy(ws):
         "edit_file": "edit.json", "edit_sha256": digest, "base_stage": "final", "base_file": "final.json", "base_sha256": sha(ws / "final.json"),
         "latest_stage": "final", "latest_stage_file": "final.json", "latest_stage_sha256": sha(ws / "final.json"), "decisions": 2,
         "published": f"edits/published/{rid}-{digest[:12]}.json", "transition_mismatches": [], "acknowledged_mismatches": [],
-        "unapplied_pins": []}
+        "acknowledged_protection_changes": [], "pin_protections_at_start": {}, "unapplied_pins": []}
     assert rec["published_at"] and out["replaced"] is None and out["previous"] is None and out["edit_sha256"] == digest
     assert (ws / rec["published"]).read_bytes() == data
     tl = Timeline.load(ws / "edit.json")
@@ -199,8 +199,8 @@ def test_only_a_session_on_the_latest_canonical_stage_can_publish(make_ws, base)
                                                          "latest_stage_sha256": sha(w / "final.json")}))
     S.start(w, stage=base)
     edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    with pytest.raises(Refused, match=rf"the session is based on {base}, not on the latest canonical stage final: .*\(start "
-                                      r'\{"stage": "final", "restart": true\}'):
+    with pytest.raises(Refused, match=rf"the session is based on {base}, not on the latest canonical stage final: .*\(ask the user to "
+                                      r'restart it with start \{"stage": "final", "restart": true\}'):
         P.publish(w)
     assert not (w / "edit.json").exists()
 

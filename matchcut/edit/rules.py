@@ -138,17 +138,86 @@ def repair_op(n: int, held: Tuple[str, int]) -> Dict[str, Any]:
 
 
 def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int]) -> str:
-    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line."""
-    return (f"the editor pin {pin_label(pin)} holds a {_label(*held)} but junction {n} has a {_label(*now)}: propose "
-            f"{json.dumps(repair_op(n, held))} to give it the held transition (the only change allowed there); or, if the editor agrees, "
-            f're-protect the current {_label(*now)} with pin_transition {{"pin": "{pin_label(pin)}", "hold": true}} (that replaces the '
-            "protection the editor chose); left as it is, publish refuses it unless the user explicitly approves carrying the mismatch "
-            f'forward (publish {{"acknowledge_mismatches": ["{pin_label(pin)}", ...]}})')
+    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line: the repair first;
+    releasing or changing the protection, or carrying the mismatch forward, only as the user's decision."""
+    label = pin_label(pin)
+    return (f"the editor pin {label} holds a {_label(*held)} but junction {n} has a {_label(*now)}: repair it by proposing "
+            f"{json.dumps(repair_op(n, held))} (the only change allowed there), applying it and publishing. Otherwise ask the user: only "
+            f"they may release or change the protection (pin_transition with user_approved: \"{label}\", given only with their explicit "
+            "approval), and left as it is, publish refuses it unless the user explicitly approves carrying the mismatch forward (publish "
+            f'{{"acknowledge_mismatches": ["{label}", ...]}})')
+
+
+# ----------------------------------------------------------------------------------------------- protections changed during a session
+def protection_of(pin: Pin) -> Dict[str, Any]:
+    """A pin's transition protection as plain JSON: ``hold_transition`` and ``held_transition`` ({"kind", "frames"} or None)."""
+    held = pin.held_transition
+    return {"hold_transition": bool(pin.hold_transition),
+            "held_transition": None if not isinstance(held, dict) else {"kind": as_transition(held.get("kind"), held.get("frames"))[0],
+                                                                        "frames": as_transition(held.get("kind"), held.get("frames"))[1]}}
+
+
+def protections_of(pins: Sequence[Pin]) -> Dict[str, Dict[str, Any]]:
+    """Every pin's protection (``protection_of``) by label: what ``start`` records in r000 as the session's baseline."""
+    return {pin_label(p): protection_of(p) for p in pins}
+
+
+def _words(t: Optional[Dict[str, Any]]) -> str:
+    """A transition in words, with its article: "a cut", "a dissolve of 4 frames"."""
+    if not t:
+        return "whatever transition its junction had"
+    kind, frames = as_transition(t.get("kind"), t.get("frames"))
+    return "a cut" if not frames else f"a {kind.replace('_', ' ')} of {frames} frames"
+
+
+def protection_changes(baseline: Dict[str, Dict[str, Any]], tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
+    """Every transition protection recorded when the session started (``baseline``, r000's ``pin_protections``) that the pins stored now
+    no longer give: **released** (``hold_transition`` cleared), **replaced** (another ``held_transition``), **weakened** (still protected,
+    but no transition named) or **cleared** (the pin itself is gone).  Each entry names the pin, the change, the ``original`` and the
+    current (``now``, None for a cleared pin) protection, where the pin sits in ``tl`` (``n``, ``junction``) and the ``transition`` ``tl``
+    has there.  ``publish`` refuses while one is not acknowledged; a protection added or restated is not a change."""
+    rows = frame_rows(tl, ctx.rate)
+    ids = junction_ids(tl)
+    sites = {pin_label(p): site for p, site in held_pins(tl, ctx)}
+    current = {pin_label(p): p for p in ctx.pins}
+    out: List[Dict[str, Any]] = []
+    for label in sorted(baseline):
+        was = baseline[label] or {}
+        if not was.get("hold_transition"):
+            continue
+        pin = current.get(label)
+        now = protection_of(pin) if pin is not None else None
+        if now is None:
+            change = "cleared"
+        elif not now["hold_transition"]:
+            change = "released"
+        elif was.get("held_transition") is not None and now["held_transition"] is None:
+            change = "weakened"
+        elif now["held_transition"] != was.get("held_transition"):
+            change = "replaced"
+        else:
+            continue
+        site = sites.get(label)
+        tr = None if site is None else {"kind": as_transition(rows[site + 1].kind, rows[site + 1].tr)[0],
+                                        "frames": as_transition(rows[site + 1].kind, rows[site + 1].tr)[1]}
+        orig = _words(was.get("held_transition"))
+        what = {"cleared": "was cleared with the pin itself during the session (x in the TUI)",
+                "released": "was released during the session (pin_transition hold: false)",
+                "weakened": "was weakened during the session: the pin no longer names the transition it protects",
+                "replaced": f"was replaced during the session: the pin protects {_words((now or {}).get('held_transition'))} now"}[change]
+        where = (f"this cut has {_words(tr)} at junction {site + 1} ({ids[site]})" if site is not None
+                 else "the pin's clips are not together in this cut")
+        out.append({"pin": label, "change": change, "original": dict(was), "now": now,
+                    "n": None if site is None else site + 1, "junction": None if site is None else ids[site], "transition": tr,
+                    "reason": f"the transition protection pin {label} had when this edit session started ({orig}) {what}; {where}"})
+    return out
 
 
 # ----------------------------------------------------------------------------------------------- pins the session does not protect
 PENDING, NOT_PLACED, RELEASED = "pending", "not_placed", "released"  # the kinds of an unapplied pin
 RESTART = 'start {"restart": true}'
+USER_ONLY = ("a re-run costs model calls and leaves the edit and human stages out as stale, and a restart moves this session aside, so an "
+             "agent never does either on its own")
 
 
 def unapplied_pins(base: Timeline, ctx: EditContext, rerun: str = "re-run the pipeline", command: str = "") -> List[Dict[str, Any]]:
@@ -163,7 +232,8 @@ def unapplied_pins(base: Timeline, ctx: EditContext, rerun: str = "re-run the pi
     Each entry names the pin's two ``shots``, the ``junction`` where they are adjacent in ``base`` (or None), the ``affected_clips`` (every
     clip of those shots) and ``affected_junctions`` (every junction with a neighbour of those shots): ``unapplied_problems`` refuses any
     change to them.  ``rerun`` says how to re-run the pipeline on this workspace, in words; ``command`` is the bare shell command
-    (``rerun_command`` in each entry)."""
+    (``rerun_command`` in each entry).  Every ``action`` that re-runs the pipeline or restarts the session asks the user to: an agent never
+    does either on its own (``USER_ONLY``)."""
     held = {id(p) for p, _ in held_pins(base, ctx)}
     ids = junction_ids(base)
     out: List[Dict[str, Any]] = []
@@ -177,21 +247,22 @@ def unapplied_pins(base: Timeline, ctx: EditContext, rerun: str = "re-run the pi
             kind = PENDING
             reason = (f"pin {label} was made or changed after the pipeline's last run, so this edit session does not protect it yet (the "
                       "session's base stage has no pipeline decision for it)")
-            action = (f"to protect it: re-run the pipeline so the canonical stage applies it ({rerun}), then restart the edit session "
-                      f"({RESTART})")
+            action = (f"to protect it, ask the user to re-run the pipeline so the canonical stage applies it ({rerun}), then to restart the "
+                      f"edit session ({RESTART}); {USER_ONLY}")
         elif decision.action == "pin_unplaced":
             kind = NOT_PLACED
             reason = (f"pin {label} could not be placed by the pipeline's last run ({decision.detail or 'no reason recorded'}), so this edit "
                       "session does not protect it")
-            action = ("a plain re-run will not place it: clear it (x) or make it again (l / v) on a junction it can hold in the TUI's Edit "
-                      f"view, re-run the pipeline ({rerun}), then restart the edit session ({RESTART})")
+            action = ("a plain re-run will not place it: ask the user to clear it (x) or make it again (l / v) on a junction it can hold in "
+                      f"the TUI's Edit view, to re-run the pipeline ({rerun}), then to restart the edit session ({RESTART}); {USER_ONLY}")
         else:
             kind = RELEASED
             now = pin_outcome(base, pin, HUMAN_STAGE)
             why = now.detail if now is not None and now.detail else "its clips or cut points differ"
             reason = f"pin {label} is not held by the session's base stage ({why}), so this edit session does not protect it"
-            action = (f"make it again (l / v) in the TUI's Edit view, re-run the pipeline ({rerun}), then restart the edit session on the "
-                      f"latest canonical stage ({RESTART})")
+            action = ("ask the user: either clear the pin in the TUI's Edit view (x), if the editor's change is what they want, or make it "
+                      f"again (l / v) there, re-run the pipeline ({rerun}) and restart the edit session on the latest canonical stage "
+                      f"({RESTART}); a re-run also leaves human.json (the editor's cut) out as stale until it is imported again; {USER_ONLY}")
         site = next((i for i in range(len(base.clips) - 1)
                      if (base.clips[i].shot_index, base.clips[i + 1].shot_index) == (pin.out_shot, pin.in_shot)), None)
         out.append({"pin": label, "kind": kind, "shots": [pin.out_shot, pin.in_shot], "junction": None if site is None else ids[site],

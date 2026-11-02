@@ -50,11 +50,16 @@ to be; only the user can say the cut is good, the brief is met, or the editor sh
 Give these rules to the agent with the brief:
 
 - edit only through `python -m matchcut.edit "$WS" ...` (reading `python -m matchcut.pipeline.cli junctions "$WS" ...` is allowed); never
-  write a workspace file by hand, never run the pipeline, never restart a session the user is working in, unless the user asks;
+  write a workspace file by hand;
+- **never re-run the pipeline and never restart a session the user is working in, unless the user asks.** A refusal that needs either
+  says "ask the user to ...": a re-run costs model calls and leaves the edit and human stages out as stale;
 - **never pass `acknowledge_mismatches` or `supersede_human` to `publish` without the user's explicit approval.** When `publish` refuses
   and names one of them, stop, show the user the refusal and wait. Both are editorial decisions: carrying a protected-transition
-  mismatch forward, or leaving an editor's re-import out of the stage order;
-- never re-protect a different transition with `pin_transition` at a pin the editor protected without the editor's agreement.
+  mismatch or a protection changed during the session forward, or leaving an editor's re-import out of the stage order;
+- **never release (`pin_transition {"hold": false}`) or replace a transition protection the editor set, and never pass `user_approved`,
+  without the user's explicit approval.** While a session exists `pin_transition` refuses it without `user_approved` naming the pin, and
+  even an approved change makes `publish` refuse until the user also acknowledges it. The agent's own way out of a mismatch is the repair
+  (`set_transition` to the held transition).
 
 ## Automated verification
 
@@ -71,20 +76,24 @@ pipeline run; no network, no model, no editor. All under `tests/edit/` unless na
 | `test_tools.py`, `test_cli.py` | The tool table and its schemas, exit codes 0/1/2 and one JSON object on stdout in every case, `@file` and `@-`, and that the engine, the review package, the interchange package and the TUI never import `matchcut.edit` |
 | `test_publish.py`, `test_publish_review.py` | Publish, its record, archive and log; the same and another session; the human stage; staleness; pins re-checked at publish; the stage lock |
 | `test_pin_safety.py` | A pin the session's base does not hold fails closed: every operation type touching its shots (trim, roll, slip, replace, insert, remove, move, set_transition, snap_to_beat) and indirect changes refused with what to do; edits elsewhere allowed; `start`/`inspect`/`log` list it; a pin made after apply makes publish refuse; an untouched revision publishes with the pin not protected; the exact re-run command it names, run, then `start` with restart: the pin held and protecting; the not-placed variant; CLI exit 1 with the JSON refusal. A protected-transition mismatch: refused at publish, repaired, acknowledged with the exact list and recorded, partial/extra/unknown lists refused, unrelated proposals accepted, never worded held (inspect, publish, `junctions`, the TUI). `supersede_human` bound to the file's sha12 (`true`, wrong, stale and needless values refused) |
-| `test_m3a_acceptance_tool.py` | `tools/m3a_acceptance.py`: snapshot, verify and report around a session and a publish, a changed or new canonical file named, and nothing ever written inside the workspace |
+| `test_protection_changes.py` | A protection the session started with (recorded in `r000`) and released, replaced or cleared during the session: `pin_transition` refuses it without `user_approved` naming the pin, `publish` refuses it until the user acknowledges it (API and CLI), the result, record and log say it, and nothing reads `held` (inspect, publish, `junctions` line and footer, the TUI); restoring the protection publishes; `restart` takes a new baseline; the re-run command (absolute, `--keep-config`, runnable from any directory); a relative source (resolved, or refused with the path and directory) |
+| `test_m3a_acceptance_tool.py` | `tools/m3a_acceptance.py`: snapshot, verify and report around a session and a publish, a changed or new canonical file named, and nothing ever written inside the workspace; strict mode (`--all`/`--strict`) naming every new, removed or changed file a session, a publish and hand edits leave on an original, quick hashing of large files, a missing source an error |
 | `test_edit_interchange.py` | `export --stage edit` in OTIO, FCPXML and EDL at 25 and 29.97 fps with fidelity, fingerprints and snapshot; re-import against the exact snapshot after a later publish; the refusals and `--stage`/`--base`; an end-to-end run through the CLIs only |
 | `tests/tui/test_edit.py` | The Edit view lists a published `edit` stage after `final`; a stale one is left out with its reason; a pin made while an edit session exists says the session will not protect it until the pipeline is re-run and the session restarted |
 | `tests/pipeline/test_junctions.py`, `tests/interchange/` | Every junction and interchange test from M2a stays green |
 
 ## Set-up (Mac desktop, real footage)
 
-Needs: macOS with Python 3.10 or later, ffmpeg and ffprobe on `PATH` (e.g. from Homebrew), a terminal with an image protocol for the TUI
+Needs: macOS with Python 3.10 or later, ffmpeg and ffprobe on `PATH` (from Homebrew, S2), a terminal with an image protocol for the TUI
 (Kitty, WezTerm, Ghostty or iTerm2), a video player, an agent that can run shell commands (a coding agent), an `ANTHROPIC_API_KEY` if the
 workspace's pipeline uses the real backend (a re-run of the passes may call the model), and for B an editor (DaVinci Resolve free or
 Studio, or Final Cut Pro).
 
 **Never modify the original project.** Everything below runs on a **copy** of an existing workspace; the original workspace and the
-source footage are only read, and step S5 proves it.
+source footage are only read, and step S5 (a strict snapshot of every file in the original) with A12 and B7 proves it.
+
+**Run every command from the repository root** (`cd ~/matchcut`, S1): `python -m matchcut.*` finds the package there. From anywhere else,
+set `PYTHONPATH=~/matchcut` first. The commands the edit CLI prints for a re-run carry `PYTHONPATH` themselves.
 
 S1. **[human]** Choose a workspace from an earlier real run whose cut has at least six junctions (music if you can), and a real creative
 brief for it. Set the variables (every later command uses them):
@@ -97,35 +106,53 @@ OUT=~/m3a-run/out                                     # snapshots, films and edi
 mkdir -p ~/m3a-run "$OUT"
 ```
 
-S2. **[auto]** The environment:
+S2. **[auto]** The environment (ffmpeg from Homebrew when it is missing):
 
 ```shell
+command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null || brew install ffmpeg
+ffmpeg -version | head -1 && ffprobe -version | head -1      # both must print a version
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-pipeline.txt -r requirements-tui.txt
-ffmpeg -version | head -1 && ffprobe -version | head -1
-python -m matchcut.edit --help > /dev/null && echo "matchcut.edit OK"
+python -m matchcut.edit --help > /dev/null && echo "matchcut.edit OK"    # from the repository root
 ```
 
-S3. **[auto]** Copy the workspace (an APFS clone: instant, and a change to the copy never touches the original), or with `ditto`:
+S3. **[auto]** Copy the workspace (an APFS clone: instant, and a change to the copy never touches the original), or with `ditto`. The
+copy must not exist yet: if `$WS` is there, stop and choose another path (or remove that old copy yourself); never copy over it.
 
 ```shell
-test ! -e "$WS" && cp -cR "$SRC_WS" "$WS"             # or: ditto "$SRC_WS" "$WS"
-diff -rq "$SRC_WS" "$WS" && echo "copy identical"
+if [ -e "$WS" ]; then echo "STOP: $WS already exists; choose another WS (or remove that old copy) before going on"; else
+  cp -cR "$SRC_WS" "$WS" && diff -rq "$SRC_WS" "$WS" && echo "copy identical"; fi   # or: ditto "$SRC_WS" "$WS"
 ```
 
-S4. **[auto]** The source footage (and music) the workspace uses; both are only read:
+S4. **[auto]** The source footage (and music) the workspace uses; both are only read. `config.json` may name the footage by a relative
+path (`python -m matchcut.pipeline run footage.mp4` stores `"footage.mp4"`, relative to the directory the pipeline ran in), which no
+command run from the repository root would find. The helper resolves it against the current directory and the directory the original run
+was made in, and prints the absolute path; the **copy's** `config.json` (never the original's) then names it absolutely, so every later
+step finds it:
 
 ```shell
-SRC=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["source"])' "$WS/config.json")
+SRC=$(python tools/m3a_acceptance.py source "$SRC_WS") && [ -e "$SRC" ] && echo "footage: $SRC"
+python -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["source"]=sys.argv[2]; open(p,"w").write(json.dumps(d, indent=2))' "$WS/config.json" "$SRC"
 MUSIC=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["music"]["path"] or "")' "$WS/config.json")
 ls -l "$SRC" ${MUSIC:+"$MUSIC"}
 ```
 
-S5. **[auto]** Snapshot the **original** workspace, to prove at the end that nothing touched it:
+If `source` exits 1 (`the source footage 'footage.mp4' that config.json names is not found ...`), stop before the second line: find the
+footage (`mdfind -name footage.mp4`), set `SRC=/absolute/path/to/footage.mp4`, check `[ -e "$SRC" ] && echo ok`, then run the second line
+(it writes the copy's config only). Alternatively run every pipeline and edit command from the directory where the relative path
+resolves, with `PYTHONPATH=~/matchcut`.
+
+S5. **[auto]** A **strict** snapshot of the **original** workspace: every file in its tree (path, size, sha256), to prove at the end that
+nothing touched it. Files above 256 MiB (renders) are hashed from their size and first and last MiB, and the output lists them (`--full`
+hashes them in full); the source footage outside the workspace is checked by size and modification time. A source it cannot find is an
+error (exit 1), never a silent pass:
 
 ```shell
-python tools/m3a_acceptance.py snapshot "$SRC_WS" -o "$OUT/original-workspace.snapshot.json"
+python tools/m3a_acceptance.py snapshot "$SRC_WS" --all -o "$OUT/original-workspace.snapshot.json"
 ```
+
+(If `$SRC_WS`'s footage is relative and not found from the repository root, run this one command from the directory where it resolves,
+with `python ~/matchcut/tools/m3a_acceptance.py ...`.)
 
 ### The helper script
 
@@ -133,8 +160,11 @@ python tools/m3a_acceptance.py snapshot "$SRC_WS" -o "$OUT/original-workspace.sn
 
 | command | what it does |
 |---|---|
-| `snapshot WS [-o FILE]` | records the sha256 of `final.json`, every pass file, `roughcut.json`, `editorial.json` and `human*.json`, and the source media's size and modification time (the footage, the probed file, the music), in a file outside the workspace (default `<WS>.m3a-snapshot.json` next to it) |
-| `verify WS SNAPSHOT` | exit 0 when every recorded file and medium is unchanged; otherwise exit 1 and one line per changed, missing or new file. `edit.json`, `edit_publish.json` and `edits/` are expected to change and are listed apart |
+| `source WS` | prints the source footage `config.json` names, as an absolute path (a relative one resolved from the current directory and the directory the run was made in); exit 1 with what to do when it is not found |
+| `snapshot WS [-o FILE]` | canonical mode, for the working copy: records the sha256 of `final.json`, every pass file, `roughcut.json`, `editorial.json` and `human*.json`, and the source media's size and modification time (the footage, the probed file, the music), in a file outside the workspace (default `<WS>.m3a-snapshot.json` next to it) |
+| `snapshot WS --all [--quick-above MIB \| --full] [-o FILE]` | strict mode, for the original workspace: every file, symlink and directory in the tree (path, size, sha256, modification time), nothing exempt; files above 256 MiB hashed from their size and first and last MiB (listed in the output) |
+| `verify WS SNAPSHOT [--strict]` | exit 0 when everything recorded is unchanged; otherwise exit 1 and one line per change. Canonical: changed, missing or new canonical files and media; `edit.json`, `edit_publish.json` and `edits/` are expected to change and are listed apart. Strict (`--strict` requires a `--all` snapshot): every new, removed or changed file or directory; a modification time alone never fails it, except on a quickly hashed file |
+| (both) | a source footage or music track that `config.json` names but that cannot be found is an error (exit 1), never a pass |
 | `report WS [--json]` | the session and its revisions, the published record, the provenance (base sha, latest canonical sha, session, revision, whether each still matches `edit.json`, the published copy and the stage files), the human import (stage, snapshot, decisions), the pins not protected by the edit, the acknowledged mismatches, and the films and renders to watch |
 
 ## A. M3a Core Editorial Acceptance
@@ -159,7 +189,7 @@ describe, narrative and rough-cut stages are reused; the passes run again). The 
 **[auto]** alternative, from the shell (the same thing without the TUI):
 
 ```shell
-python -m matchcut.pipeline refine "$SRC" -w "$WS" --config "$WS/config.json"
+python -m matchcut.pipeline refine "$SRC" -w "$WS" --keep-config     # --keep-config: WS/config.json is used as it is, never rewritten
 ```
 
 A3. **[auto]** Snapshot the canonical files the session must not change:
@@ -209,8 +239,8 @@ stands for one of them) and is refused (exit 1) with the pin, what the edit chan
 ```shell
 python -m matchcut.edit "$WS" propose '{"ops": [{"op": "trim", "clip": "c004", "edge": "in", "frames": 2}]}'; echo "exit $?"
 # refused: pin s5->s6 was made or changed after the pipeline's last run, so this edit session does not protect it yet ...
-#   to protect it: re-run the pipeline so the canonical stage applies it (python -m matchcut.pipeline refine ...), then restart the edit
-#   session (start {"restart": true})
+#   to protect it, ask the user to re-run the pipeline so the canonical stage applies it (PYTHONPATH=... python -m matchcut.pipeline
+#   refine /abs/footage -w /abs/ws --keep-config, ...), then to restart the edit session (start {"restart": true}); ...
 python -m matchcut.edit "$WS" log | python -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["unapplied_pins"], indent=1))'
 python tools/m3a_acceptance.py snapshot "$WS" -o "$OUT/after-second-pin.snapshot.json"
 ```
@@ -232,7 +262,10 @@ python -m matchcut.edit "$WS" publish | tee "$OUT/publish.json"
 ```
 
 The result lists the A8 pin under `unapplied_pins` and in `pins` as `not_protected`, and the A1 pin as `held`. If `publish` refuses with
-`acknowledge_mismatches` or `supersede_human`, the agent **stops and asks the user [human]**; it never passes either on its own.
+`acknowledge_mismatches` or `supersede_human`, the agent **stops and asks the user [human]**; it never passes either on its own. The
+same holds for a protection: if the agent wants to release one (`pin_transition {"hold": false}`) or protect another transition at a pin
+the editor protected, `pin_transition` refuses without `user_approved` and the agent asks the user; a change the user approves still
+makes `publish` refuse until the user acknowledges it, and the record lists it under `acknowledged_protection_changes`, never as held.
 
 A12. **[auto]** Render the published revision, check provenance, and check that nothing canonical changed:
 
@@ -243,13 +276,14 @@ cp "$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "
 python tools/m3a_acceptance.py report "$WS" | tee "$OUT/report-A.txt"
 python tools/m3a_acceptance.py verify "$WS" "$OUT/after-second-pin.snapshot.json"   # exit 0: every canonical file unchanged
 python tools/m3a_acceptance.py verify "$WS" "$OUT/before-session.snapshot.json"     # only "editorial.json: changed" (the A8 pin)
-python tools/m3a_acceptance.py verify "$SRC_WS" "$OUT/original-workspace.snapshot.json"   # exit 0: the original project untouched
+python tools/m3a_acceptance.py verify "$SRC_WS" "$OUT/original-workspace.snapshot.json" --strict   # exit 0: not one file of the original changed
 python -m matchcut.pipeline.cli junctions "$WS"      # "N junctions in edit"; the footer: the A1 pin held, the A8 pin not protected
 ```
 
 `report` must show provenance all `True` (base and latest canonical unchanged, `edit.json` and the published copy match the record,
-the current session), the A8 pin among the pins not protected, and `acknowledged mismatches: 0` (or exactly the ones the user approved).
-If the agent ran `pin_transition`, `editorial.json` changes too: `verify` names it; check it was the user's decision.
+the current session), the A8 pin among the pins not protected, `acknowledged mismatches: 0` and `acknowledged protection changes ...: 0`
+(or exactly the ones the user approved). If the agent ran `pin_transition`, `editorial.json` changes too: `verify` names it; check it was
+the user's decision (a release or a replacement needs `user_approved`, and shows in the report as an acknowledged protection change).
 
 A13. **[human]** Watch `$OUT/original.mp4` and `$OUT/revised.mp4` in full. Does the revision do what the brief asked, is it better (or
 at least not worse) elsewhere, is the pinned junction where you pinned it, and is the sound in sync? Open the TUI (`4`): it lands on
@@ -300,6 +334,8 @@ B1. **[auto]** Export the edit stage (every format, with the fidelity report and
 ```shell
 python -m matchcut.pipeline.cli export "$WS" --stage edit      # edit.otio, the edit project in matchcut.fcpxml, edit.edl
 cat "$WS/exports/fidelity.md"; ls "$WS/exports/.stages/"       # the snapshot edit-<12 hex>.json
+B1_SNAP=edit-$(python -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest()[:12])' "$WS/edit.json")
+ls -l "$WS/exports/.stages/$B1_SNAP.json"                       # this export's snapshot, named by the sha256 of edit.json; B6 uses it
 ```
 
 B2. **[human]** Open `$WS/exports/edit.otio` (and `matchcut.fcpxml`, project `edit`) in the editor. Compare with `$OUT/revised.mp4`:
@@ -336,7 +372,7 @@ editors do), import it, then name the base:
 ```shell
 grep -v '^\* MATCHCUT' "$WS/exports/edit.edl" > "$OUT/editor/edit-nocomments.edl"
 python -m matchcut.pipeline.cli import "$WS" "$OUT/editor/edit-nocomments.edl"; echo "exit $?"     # refused, exit 1
-python -m matchcut.pipeline.cli import "$WS" "$OUT/editor/edit-nocomments.edl" --stage edit --base "$(ls "$WS/exports/.stages/" | grep '^edit-' | head -1 | sed 's/\.json$//')"
+python -m matchcut.pipeline.cli import "$WS" "$OUT/editor/edit-nocomments.edl" --stage edit --base "$B1_SNAP"   # the B1 export's snapshot, by name
 python -m matchcut.pipeline.cli import "$WS" "$OUT/editor/edit-roundtrip.otio"                    # bring the B3 human stage back
 ```
 
@@ -345,10 +381,10 @@ python -m matchcut.pipeline.cli import "$WS" "$OUT/editor/edit-roundtrip.otio"  
 B7. **[auto]** Stale stages. Re-run the pipeline last (it rewrites `final.json`):
 
 ```shell
-python -m matchcut.pipeline refine "$SRC" -w "$WS" --config "$WS/config.json"
+python -m matchcut.pipeline refine "$SRC" -w "$WS" --keep-config
 python -m matchcut.pipeline.cli junctions "$WS" | tail -4     # "note: edit.json is stale: ...", "note: human.json is stale: ..."
 ls -l "$WS/edit.json" "$WS/edit_publish.json" "$WS/human.json" "$WS/human_import.json"   # all still there
-python tools/m3a_acceptance.py verify "$SRC_WS" "$OUT/original-workspace.snapshot.json"  # the original project untouched
+python tools/m3a_acceptance.py verify "$SRC_WS" "$OUT/original-workspace.snapshot.json" --strict  # exit 0: not one file of the original changed
 ```
 
 ### B: pass / fail
@@ -381,7 +417,9 @@ Record the run: date, editor and version, format(s) used.
 
 - The pipeline ignores `hold_transition`: a protected transition is honoured by edit sessions only. At a protected pin a proposal may
   set exactly the held transition (a repair) or leave it; `start` and `inspect` list mismatches with how to resolve them, and `publish`
-  refuses one until it is repaired or the user approves `acknowledge_mismatches`.
+  refuses one until it is repaired or the user approves `acknowledge_mismatches`. A protection released (`hold: false`), replaced or
+  weakened after `start` is refused at publish the same way; `pin_transition` itself refuses such a change without `user_approved`.
+- A relative source path in `config.json` resolves from the directory a command runs in (S4).
 - A pin made in the TUI is not held by a running session until the pipeline runs again and the session is restarted from that new stage;
   until then the session fails closed at the pin's shots (it refuses every change to their clips and junctions).
 - The workspace's stage lock and the session lock wait at most 30 seconds, then refuse.

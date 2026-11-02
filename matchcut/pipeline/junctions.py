@@ -98,6 +98,35 @@ def edit_acknowledged_mismatches(ws: Path) -> List[str]:
         return []
 
 
+def edit_protection_changes(ws: Path) -> Dict[str, Dict]:
+    """The pins (label -> entry) whose transition protection the edit stage's record says was released, replaced or weakened during the
+    edit session, or cleared with the pin, and acknowledged by the user at publish (``acknowledged_protection_changes`` in
+    ``edit_publish.json``); {} when there is none or the record is unreadable."""
+    try:
+        entries = _record(Path(ws) / EDIT_RECORD).get("acknowledged_protection_changes") or []
+        return {str(e["pin"]): e for e in entries if isinstance(e, dict) and "pin" in e}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _transition_text(t: object) -> str:
+    if not isinstance(t, dict) or str(t.get("kind", "cut")) == "cut" or not t.get("frames"):
+        return "a cut" if isinstance(t, dict) else "no transition named"
+    return f"a {str(t['kind']).replace('_', ' ')} of {t['frames']} frames"
+
+
+def protection_change_note(entry: Dict) -> str:
+    """One phrase for an acknowledged protection change (``edit_protection_changes``): never worded as if the protection were kept."""
+    orig = _transition_text((entry.get("original") or {}).get("held_transition"))
+    change = str(entry.get("change") or "changed")
+    now = entry.get("now")
+    after = {"released": "released", "cleared": "cleared with the pin", "weakened": "weakened (no transition named)",
+             "replaced": f"replaced by {_transition_text((now or {}).get('held_transition'))}"}.get(change, change)
+    has = f", this cut has {_transition_text(entry.get('transition'))}" if entry.get("transition") else ""
+    return (f"the transition protection it had when the edit session started ({orig}) was {after} during the session and is NOT kept"
+            f"{has} (protection change acknowledged at publish)")
+
+
 def stale_edit(ws: Path) -> Optional[str]:
     """The one-line reason ``edit.json`` (the edit stage: an agent's published edit session) no longer fits the workspace, or None.
 

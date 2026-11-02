@@ -131,8 +131,12 @@ def test_a_transition_protected_after_the_revision_is_checked_at_publish(make_ws
     with pytest.raises(Refused, match=r"pin s0->s1 was added or changed since r001 was made, and r001 changes the transition the editor pin "
                                       r"s0->s1 protects \(cut -> dissolve 4f\)"):
         P.publish(w)
-    # protecting the head's own transition (pin_transition without kind/frames) is consistent with the revision: it publishes
-    V.pin_transition(w, pin="s0->s1", hold=True)
+    # protecting the head's own transition (pin_transition without kind/frames) is consistent with the revision: it publishes.  It
+    # replaces the protection the editor set, so it needs the user's approval (the session started before that protection existed, so
+    # it is no change against the session's baseline)
+    with pytest.raises(Refused, match=r'only the user may release or change that protection.*user_approved: "s0->s1"'):
+        V.pin_transition(w, pin="s0->s1", hold=True)
+    V.pin_transition(w, pin="s0->s1", hold=True, user_approved="s0->s1")
     out = P.publish(w)
     assert [(p["pin"], p["state"], p["hold_transition"]) for p in out["pins"]] == [("s0->s1", "held", True)]
 
@@ -407,11 +411,11 @@ def test_start_and_inspect_flag_a_protected_transition_r000_lacks_and_say_how_to
     assert (m["pin"], m["n"], m["junction"], m["transition"], m["held_transition"]) == (
         "s0->s1", 1, "s0-s1", {"kind": "cut", "frames": 0}, {"kind": "dissolve", "frames": 4})
     assert '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}' in m["repair"]
-    assert 'pin_transition {"pin": "s0->s1", "hold": true}' in m["repair"]
-    # the set_transition repair comes first; re-protecting the current transition overrides the editor's choice, so it is theirs to make
+    # the set_transition repair comes first; releasing or changing the protection is the user's decision alone
     assert m["repair"].index("set_transition") < m["repair"].index("pin_transition")
-    assert 'or, if the editor agrees, re-protect the current cut with pin_transition {"pin": "s0->s1", "hold": true}' in m["repair"]
-    assert "instead" not in m["repair"]
+    assert ('Otherwise ask the user: only they may release or change the protection (pin_transition with user_approved: "s0->s1", given '
+            "only with their explicit approval)") in m["repair"]
+    assert "instead" not in m["repair"] and "if the editor agrees" not in m["repair"]
     d = V.inspect(w)
     assert d["transition_mismatches"] == [m] and d["junctions"][0]["transition_mismatch"]
     assert next(p for p in d["pins"] if p["pin"] == "s0->s1")["reason"] == m["repair"]
@@ -445,11 +449,12 @@ def test_an_untouched_inherited_mismatch_is_refused_at_publish_with_both_ways_ou
     with pytest.raises(Refused) as exc:
         P.publish(w)
     msg = str(exc.value)
-    assert msg.startswith(f"{rid} leaves 1 protected transition different from what the pin holds: pin s0->s1 holds a dissolve 4f but "
-                          "junction 1 (s0-s1) has a cut: repair it by proposing "
-                          '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}, applying it and publishing again')
-    assert ('Or, only if the user explicitly approves carrying this mismatch forward, publish {"acknowledge_mismatches": ["s0->s1"]} (it must '
-            "name every mismatching pin, exactly); an agent must never acknowledge a mismatch without the user's explicit approval") in msg
+    assert msg.startswith(f"{rid} cannot be published as protected: pin s0->s1 holds a dissolve 4f but junction 1 (s0-s1) has a cut: "
+                          'repair it by proposing {"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}, applying it and '
+                          "publishing again")
+    assert ('Only if the user explicitly approves carrying this forward, publish {"acknowledge_mismatches": ["s0->s1"]} (it must name every '
+            "such pin, exactly); the record then says the protection was not kept. An agent must never acknowledge a mismatch or a "
+            "protection change without the user's explicit approval") in msg
     assert not (w / "edit.json").exists() and not (w / "edit_publish.json").exists()
 
 

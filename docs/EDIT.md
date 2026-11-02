@@ -38,7 +38,7 @@ reason>`, the refusal `publish` gives. One session at a time lives in `WS/edits/
 | path | what |
 |---|---|
 | `edits/session.json` | the session id (a UUID made at `start`), the base stage, its file and sha256, the head revision, the next revision number, every clip id the session has issued |
-| `edits/revisions/rNNN.json` | immutable: a whole timeline plus the operations, results and changes that made it |
+| `edits/revisions/rNNN.json` | immutable: a whole timeline plus the operations, results and changes that made it; `r000` also records `pin_protections`, every pin's transition protection when the session started (the [baseline](#protection-changes-during-a-session) `publish` compares with) |
 | `edits/proposals/<id>.json` | accepted proposals |
 | `edits/renders/` | renders, previews and junction frames (named by a hash of what they show) |
 | `edits/published/<rev>-<sha12>.json` | an immutable copy of every published revision |
@@ -85,7 +85,7 @@ same table unchanged.
 
 | command | arguments | what it does |
 |---|---|---|
-| `start` | `{stage?, restart?}` | start a session (default base: the latest canonical stage); a stale session is moved aside, a fresh one only with `restart: true`; says `can_publish`, and lists `transition_mismatches` (protected pins whose transition in `r000` is not the one they hold, each with how to resolve it) and `unapplied_pins` (pins `r000` does not hold, which the session [does not protect](#pins-the-session-does-not-protect-fail-closed)) |
+| `start` | `{stage?, restart?}` | start a session (default base: the latest canonical stage); a stale session is moved aside, a fresh one only with `restart: true`; says `can_publish`, and lists `transition_mismatches` (protected pins whose transition in `r000` is not the one they hold, each with how to resolve it), `unapplied_pins` (pins `r000` does not hold, which the session [does not protect](#pins-the-session-does-not-protect-fail-closed)) and `pin_protections` (every pin's protection now: the session's baseline) |
 | `inspect` | `{revision?}` | the cut of a revision (default: the head) in frames: clips, junctions and their protections, shots and their use, story beats, music beats, pins, `unapplied_pins`, staleness |
 | `log` | `{}` | the revisions (id, parent, operations, summary), the head, staleness, `unapplied_pins` |
 | `propose` | `{ops, guards?}` | run operations on the head and check every rule; accepted: the proposal id, its changes by clip id and its timing |
@@ -96,8 +96,8 @@ same table unchanged.
 | `preview` | `{proposal, junction?, quality?}` | render an accepted proposal before applying it: the whole cut, or one junction's review window |
 | `render` | `{revision?, junction?, quality?}` | render a revision (default: the head), whole or one junction's window; `quality` is `proxy` (default) or `full` |
 | `frames` | `{junction, revision?}` | the outgoing clip's last frame and the incoming clip's first frame as JPEG files, with their source frame numbers |
-| `pin_transition` | `{pin? \| junction?, hold, kind?, frames?}` | protect (`hold: true`) or release the transition at an editor pin's junction |
-| `publish` | `{revision?, replace?, supersede_human?, acknowledge_mismatches?}` | publish a revision (default: the head; never `r000`) as the `edit` stage; `supersede_human` is the sha12 of the `human.json` it may leave out, `acknowledge_mismatches` the list of every pin whose protected transition differs from the held one; **an agent never passes either without the user's explicit approval** |
+| `pin_transition` | `{pin? \| junction?, hold, kind?, frames?, user_approved?}` | protect (`hold: true`) or release (`hold: false`) the transition at an editor pin's junction; while a session exists, releasing or replacing a protection the pin already has is refused unless `user_approved` is that pin's label: **never without the user's explicit approval** |
+| `publish` | `{revision?, replace?, supersede_human?, acknowledge_mismatches?}` | publish a revision (default: the head; never `r000`) as the `edit` stage; `supersede_human` is the sha12 of the `human.json` it may leave out, `acknowledge_mismatches` the list of every pin whose protected transition differs from the held one or whose protection was released, replaced or weakened during the session; **an agent never passes either without the user's explicit approval** |
 
 A session's whole life, as the CLI prints it (a 25 fps test workspace):
 
@@ -122,7 +122,8 @@ $ python -m matchcut.edit WS publish
  "edit_file": "edit.json", "edit_sha256": "9f5b4c...", "base_stage": "final", "base_file": "final.json", "base_sha256": "0fe5cf...",
  "latest_stage": "final", "latest_stage_file": "final.json", "latest_stage_sha256": "0fe5cf...", "published_at": "2026-11-01T16:24:20+00:00",
  "decisions": 2, "published": "edits/published/r001-9f5b4c501634.json", "transition_mismatches": [], "acknowledged_mismatches": [],
- "unapplied_pins": [], "replaced": null, "previous": null, "recovered": null, "human_left_out": null, "pins": []}
+ "acknowledged_protection_changes": [], "pin_protections_at_start": {}, "unapplied_pins": [], "replaced": null, "previous": null,
+ "recovered": null, "human_left_out": null, "pins": []}
 
 $ python -m matchcut.pipeline.cli junctions WS
 4 junctions in edit (4 stages)
@@ -138,9 +139,12 @@ beat change, match cut, the pin that holds it, its protection, the beat offset w
 `description` (the describe stage's entry from `descriptions.json`, or null) and `unused_shots`, the `story_beats` (actual length in
 `frames`; `pace`, `target_seconds` and `target_frames` from `narrative.json`), the `music` beats, the stored `pins` (each with its
 `state`: `held`; `transition_mismatch` or `mismatch_acknowledged` when its clips and cut points are held but its protected transition is
-not, never `held`; `pending`, `not_placed` or `released` when the cut does not hold it, with `protected: false` and the `action` that would
-protect it when the session's `r000` does not hold it either), the `protections` that apply, the `transition_mismatches` (protected pins
-whose junction has another transition than the one held, each with its `repair`) and the `unapplied_pins` (below).
+not; `protection_changed` or `protection_change_acknowledged` when the protection it had at `start` was released, replaced or weakened
+since; `pending`, `not_placed` or `released` when the cut does not hold it, with `protected: false` and the `action` that would protect it
+when the session's `r000` does not hold it either; `held` is `true` only in the state `held`, and `clips_held` says whether its clips and
+cut points are), the `protections` that apply (a junction flags `transition_mismatch` and `protection_change`), the
+`transition_mismatches` (protected pins whose junction has another transition than the one held, each with its `repair`), the
+`protection_changes` and `pin_protections_at_start` ([below](#protection-changes-during-a-session)) and the `unapplied_pins` (below).
 
 ### Operations
 
@@ -206,14 +210,27 @@ These are product decisions, not open questions. Each is enforced by the code an
    TUI), music or the source's rate makes every stored proposal unusable: `apply` and `preview` refuse it (`propose again`).
 7. **A pin the session's base does not hold fails closed** ([below](#pins-the-session-does-not-protect-fail-closed)), and **a
    protected-transition mismatch is never published silently** ([below](#pins-and-pin_transition)).
+8. **A protection changed during a session is never published silently.** `start` records every pin's protection in `r000`; `publish`
+   refuses while one of them was released, replaced or weakened since, unless the user acknowledges it in `acknowledge_mismatches`, and
+   the record then says the protection was not kept ([below](#protection-changes-during-a-session)). While a session exists,
+   `pin_transition` itself refuses to release or replace a protection without `user_approved` naming the pin.
 
 ### What an agent must never do without the user
 
-`supersede_human` and `acknowledge_mismatches` are editorial decisions that belong to the user. **An agent must not pass either without
-the user's explicit approval** for that publish: when `publish` refuses and names one of them, the agent stops, shows the user the
-refusal (which human.json would be left out, or which protected transitions differ and how to repair them), and waits. The refusals and
-the tool descriptions say so too. The same holds for re-protecting a different transition with `pin_transition` at a pin the editor
-protected, and for re-running the pipeline or restarting a session the user is working in.
+These are the user's decisions; **an agent must not take any of them without the user's explicit approval**:
+
+- `supersede_human` and `acknowledge_mismatches` on `publish` (an agent must not pass either without the user's explicit approval for
+  that publish): leaving an editor's re-import out of the stage order, or carrying a
+  protected-transition mismatch or a protection changed during the session forward. When `publish` refuses and names one of them, the
+  agent stops, shows the user the refusal (which human.json would be left out, which protected transitions differ and how to repair them,
+  which protections changed), and waits;
+- `pin_transition` with `user_approved`: releasing (`hold: false`) or replacing a protection a pin already has. The editor chose it; the
+  agent's own way out of a mismatch is the repair (`set_transition` to the held transition), never a new protection;
+- re-running the pipeline (`python -m matchcut.pipeline refine ...`, or `R` in the TUI): it costs model calls and leaves the edit and
+  human stages out as stale; and restarting a session the user is working in (`start {"restart": true}`). The refusals that need either
+  say "ask the user to".
+
+The refusals and the tool descriptions say so too.
 
 ## The three decisions as they behave now
 
@@ -332,10 +349,30 @@ python -m matchcut.edit WS pin_transition '{"pin": "s3->s6", "hold": true, "kind
 ```
 
 It sets or clears the pin's optional `hold_transition` and `held_transition` (`{"kind", "frames"}`) in `editorial.json`, changing nothing
-else in the file; older pins read as unprotected. The TUI never sets a protection, and **keeps one**: `l` (lock again) and `v` (revert)
+else in the file; older pins read as unprotected.
+
+**While an edit session exists**, a protection the pin already has is the editor's choice: releasing it (`hold: false`) or replacing it
+(`hold: true` with another transition, including re-protecting the junction's current transition over a different held one) is refused
+unless `user_approved` names exactly that pin, which an agent passes **only with the user's explicit approval**:
+
+```shell
+python -m matchcut.edit WS pin_transition '{"pin": "s0->s1", "hold": false}'
+# refused: pin s0->s1 protects a dissolve of 4 frames, which the editor chose, and an edit session is open in WS: only the user may
+#   release or change that protection. Ask the user; with their explicit approval to release, run pin_transition again with
+#   user_approved: "s0->s1" (an agent must never pass it on its own). Even then, publish refuses the change until the user also
+#   acknowledges it (acknowledge_mismatches). To keep the protection instead, repair the junction: propose set_transition with the
+#   dissolve of 4 frames; nothing was written
+python -m matchcut.edit WS pin_transition '{"pin": "s0->s1", "hold": false, "user_approved": "s0->s1"}'   # the user approved it
+```
+
+A `user_approved` that names another pin is refused. Protecting a pin that has no protection, or stating the same protection again,
+needs no approval. Without a session the guard does not apply (a later `start` records the pins as they are then as its baseline).
+
+The TUI never sets a protection, and **keeps one**: `l` (lock again) and `v` (revert)
 on a protected pin replace its cut points and keep its `hold_transition` and `held_transition`, even when the cut points move, because
 the protection is about the junction's transition, not its points (the notification says `its transition stays protected (...)`). Only
-`pin_transition {"hold": false}` releases it, or clearing the pin (`x`), whose notification says the protection is released with it.
+`pin_transition {"hold": false}` releases it (with the user's approval while a session exists), or clearing the pin (`x`), whose
+notification says the protection is released with it.
 Because the pins are part of the context, every proposal made before the change must be proposed again (the result lists them). **The
 pipeline ignores the protection** (see the limitations).
 
@@ -348,20 +385,19 @@ is another matter, below):
   protection.
 
 `start` and `inspect` list such pins in `transition_mismatches` (and `inspect` flags the junction with `transition_mismatch` and gives
-the pin the state `transition_mismatch`, never `held`), each with its `repair`: first, propose `{"op": "set_transition", "junction": N,
-"kind": ..., "frames": ...}` with the held transition; or, **if the editor agrees**, re-protect the current transition with
-`pin_transition {"pin": ..., "hold": true}` (that replaces the protection the editor chose, so it is the editor's decision, not the
-agent's).
+the pin the state `transition_mismatch` with `held: false`, never `held`), each with its `repair`: first, propose `{"op":
+"set_transition", "junction": N, "kind": ..., "frames": ...}` with the held transition, apply it and publish; otherwise **ask the user**:
+only they may release or change the protection (`pin_transition` with `user_approved`), or approve carrying the mismatch forward.
 
 **Proposals are not blocked by an inherited mismatch**: an unrelated edit is accepted while one exists, and at the pin the transition may
 stay or become exactly the held one. **`publish` refuses** while any protected pin's transition in the published revision differs from
 the one it holds:
 
 ```text
-r001 leaves 1 protected transition different from what the pin holds: pin s0->s1 holds a dissolve 4f but junction 1 (s0-s1) has a cut:
-repair it by proposing {"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}, applying it and publishing again. Or, only
-if the user explicitly approves carrying this mismatch forward, publish {"acknowledge_mismatches": ["s0->s1"]} (it must name every
-mismatching pin, exactly); an agent must never acknowledge a mismatch without the user's explicit approval
+r001 cannot be published as protected: pin s0->s1 holds a dissolve 4f but junction 1 (s0-s1) has a cut: repair it by proposing {"op":
+"set_transition", "junction": 1, "kind": "dissolve", "frames": 4}, applying it and publishing again. Only if the user explicitly approves
+carrying this forward, publish {"acknowledge_mismatches": ["s0->s1"]} (it must name every such pin, exactly); the record then says the
+protection was not kept. An agent must never acknowledge a mismatch or a protection change without the user's explicit approval
 ```
 
 **Acknowledging is an editorial decision**: the agent must not pass `acknowledge_mismatches` without the user's explicit approval. The
@@ -369,11 +405,44 @@ list must name every mismatching pin exactly once; a partial list, an extra or u
 When acknowledged, the result, `edit_publish.json` and the publish log record each acknowledged mismatch (`acknowledged_mismatches`: pin,
 junction, held and current transition), and the pin's state is `mismatch_acknowledged`, never `held` or satisfied.
 
+### Protection changes during a session
+
+`start` records every pin's protection (`hold_transition`, `held_transition`) in `r000` (`pin_protections`, covered by the revision's
+`document_sha256`, so a changed baseline is refused like any changed revision); `start` with `restart` records a new baseline from the
+pins as they are then. `publish` compares the pins stored **now** with that baseline as well as with the published cut. A protection the
+session started with that is
+
+- **released** (`pin_transition {"hold": false}`, approved by the user),
+- **replaced** (another held transition, e.g. re-protecting the junction's current cut over a held dissolve),
+- **weakened** (still protected, but no longer naming a transition), or
+- **cleared** with its pin (`x` in the TUI)
+
+is a **protection change**, refused at publish exactly like a mismatch, even when the published cut has the transition the old
+protection held:
+
+```text
+r002 cannot be published as protected: the transition protection pin s0->s1 had when this edit session started (a dissolve of 4 frames)
+was released during the session (pin_transition hold: false); this cut has a cut at junction 1 (s0-s1): publishing would not keep the
+protection the session started with; ask the user whether to restore it (only they may change a protection) or to carry the change
+forward. Only if the user explicitly approves carrying this forward, publish {"acknowledge_mismatches": ["s0->s1"]} ...
+```
+
+The way out is the user's: restore the protection (`pin_transition` back to the baseline; at a junction the head holds, first give it
+that transition with `set_transition`), or acknowledge the change. **`acknowledge_mismatches` covers both kinds**: it must name every pin
+with a transition mismatch or a protection change, exactly once (one list, so the user approves one set of pins whose protection the
+publish does not keep). When acknowledged, the result's and `edit_publish.json`'s `acknowledged_protection_changes` and the publish log
+list each change (pin, `change`, the `original` protection, the protection `now`, and the `transition` published); the record also keeps
+`pin_protections_at_start`. The pin's state is `protection_change_acknowledged` (`protection_changed` in `inspect` before publishing),
+never `held`; `junctions` ends its list line with `PROTECTION-CHANGED` and its footer says `clips and cut points kept by this edit, but
+the transition protection it had when the edit session started (a dissolve of 4 frames) was released during the session and is NOT kept,
+this cut has a cut (protection change acknowledged at publish)`; the TUI shows the same words after the pin badge on the edit stage. A
+protection added or restated during the session is not a change.
+
 On the published `edit` stage a pinned junction keeps its `pinned` badge in `junctions` and the TUI (a publish refuses a revision that
 releases a pin its base holds), and `junctions` ends with a line per stored pin: `held by this edit`; `clips and cut points held by this
 edit, but its protected transition is NOT kept: the pin holds a dissolve of 4 frames, this cut has a cut (mismatch acknowledged at
-publish)` for a mismatched protected pin (the TUI adds the same words after the pin badge on the edit stage); or `not protected by this
-edit (...)` for a pin made after the pipeline's last run.
+publish)` for a mismatched protected pin (the TUI adds the same words after the pin badge on the edit stage, and the list line ends
+`TRANSITION-MISMATCH`); or `not protected by this edit (...)` for a pin made after the pipeline's last run.
 
 ### Pins the session does not protect (fail closed)
 
@@ -381,11 +450,28 @@ Pins are made in the TUI (`l`, `v`) and stored in `editorial.json`; the pipeline
 the way it protects a held pin only when its `r000` (the canonical base) holds it. A pin the base does not hold is **unapplied** for the
 session, of one of three kinds:
 
-| kind | when | what to do (the refusal says it, with the exact command) |
+| kind | when | what to do (the refusal says it, with the exact command; every step is the user's, so it reads "ask the user to ...") |
 |---|---|---|
-| `pending` | the base's history has no pipeline decision for it: it was made or changed after the pipeline's last run | re-run the pipeline so the canonical stage applies it (`python -m matchcut.pipeline refine SOURCE -w WS --config WS/config.json`, or `R` in the TUI), then restart the session (`start {"restart": true}`) |
-| `not_placed` | the pipeline recorded that it could not place it (`pin_unplaced`, e.g. `shot 2 is not in this cut`) | a plain re-run will not help: clear it (`x`) or make it again (`l` / `v`) on a junction it can hold, re-run the pipeline, then restart |
-| `released` | the pipeline applied it but the base no longer holds it (a `human` base whose editor changed it) | make it again in the TUI, re-run the pipeline, restart on the latest canonical stage |
+| `pending` | the base's history has no pipeline decision for it: it was made or changed after the pipeline's last run | ask the user to re-run the pipeline so the canonical stage applies it (`PYTHONPATH=REPO python -m matchcut.pipeline refine /abs/SOURCE -w /abs/WS --keep-config`, or `R` in the TUI), then to restart the session (`start {"restart": true}`) |
+| `not_placed` | the pipeline recorded that it could not place it (`pin_unplaced`, e.g. `shot 2 is not in this cut`) | a plain re-run will not help: ask the user to clear it (`x`) or make it again (`l` / `v`) on a junction it can hold, re-run the pipeline, then restart |
+| `released` | the pipeline applied it but the base no longer holds it (a `human` base whose editor changed it) | ask the user: clear the pin in the TUI (`x`) if the editor's change is what they want, or make it again (`l` / `v`), re-run the pipeline and restart on the latest canonical stage; a re-run also leaves `human.json` out as stale until it is imported again |
+
+**The re-run command** (`rerun_command`) is `PYTHONPATH=<this repository> python -m matchcut.pipeline refine <source> -w <workspace>
+--keep-config`:
+
+- `PYTHONPATH` lets it run from any directory: `python -m matchcut.*` otherwise needs the repository root as the current directory;
+- the source and the workspace are absolute when they can be resolved;
+- `--keep-config` runs with `WS/config.json` exactly as it is and never rewrites it. A plain `refine SOURCE -w WS --config WS/config.json`
+  rewrites `config.json`: it turns `render.enabled` back on, resets `render.proxy` and `force`, and stores the source and workspace as
+  given. `--keep-config` needs `-w` and refuses any option that would change the config. The TUI's `R` also runs with the workspace's own
+  config.
+
+A relative source (`python -m matchcut.pipeline run footage.mp4` stores `"footage.mp4"`, relative to the directory the pipeline ran from)
+is looked for from the current directory, then from the directory the run was made in when `config.json`'s `workspace` says it. When it is
+not found, the command keeps the path as written and says so: run from the directory where it resolves, or set an absolute source in
+`config.json`. `start` (and every command that reads the footage) refuses such a workspace with the same explanation, naming the relative
+path and the current directory. Re-running is the user's decision: it costs model calls and makes this session, the edit stage and a human
+stage stale.
 
 `start`, `inspect` and `log` list them in `unapplied_pins` (pin, kind, its two `shots`, the `junction` where they are adjacent, the
 `affected_clips` and `affected_junctions`, `protected: false`, the `reason`, the `action` and the bare `rerun_command`).
@@ -403,15 +489,18 @@ allowed. The refusal names the pin and says what to do:
 ```text
 refused: pin s1->s3 was made or changed after the pipeline's last run, so this edit session does not protect it yet (the session's base
 stage has no pipeline decision for it), and this edit changes c002 (shot 1) (the clips and junctions of shots 1 and 3 cannot change until
-it does): to protect it: re-run the pipeline so the canonical stage applies it (python -m matchcut.pipeline refine footage.mp4 -w ws
---config ws/config.json, or press R in the TUI and continue through its checkpoints), then restart the edit session (start {"restart": true})
+it does): to protect it, ask the user to re-run the pipeline so the canonical stage applies it (PYTHONPATH=/repo python -m
+matchcut.pipeline refine /films/footage.mp4 -w /films/ws --keep-config, or press R in the TUI and continue through its checkpoints), then to
+restart the edit session (start {"restart": true}); a re-run costs model calls and leaves the edit and human stages out as stale, and a
+restart moves this session aside, so an agent never does either on its own
 ```
 
 `apply` and `preview` re-check (a pin is part of the context, so a proposal made before it is refused: propose again), and so does
 `publish`, from `r000` (a pin made after `apply` makes the publish refuse when the revision changed what it covers). A revision that
 leaves them untouched publishes; its result and record list each as not protected by this edit. When a pin is made or changed in the TUI
 while `WS/edits/session.json` exists, its notification says: `an active edit session will not protect this pin until you re-run the
-pipeline and restart the session`.
+pipeline and restart the session` (not when a pin the session's base already applied is locked again at the same points and clips:
+nothing the session sees changes).
 
 ## Rendering and naming
 
@@ -468,8 +557,10 @@ the new `final` and redo the edits; matchcut does not carry an agent's edits acr
   preview and render but never publish (`can_publish: false`); its edits must be redone on `final`.
 - **Publishing over a fresh human stage is refused** unless `supersede_human` is the sha12 of that human.json (only with the user's
   explicit approval), which leaves the human stage out as stale (never deleted): re-import the editor's file afterwards.
-- **Publishing over a protected-transition mismatch is refused** unless it is repaired or the user explicitly approves
-  `acknowledge_mismatches` (naming every mismatching pin).
+- **Publishing over a protected-transition mismatch, or over a protection released, replaced or weakened during the session, is
+  refused** unless it is repaired (restored) or the user explicitly approves `acknowledge_mismatches` (naming every such pin). A session
+  started before `start` recorded the baseline (an `r000` without `pin_protections`) cannot publish: ask the user to restart it.
+- **A relative source path** in `config.json` resolves from the directory a command runs in: run from there, or set an absolute source.
 - **Editors drop EDL comments.** An EDL's stage and fingerprint are its `* MATCHCUT` comment lines; once a workspace has an edit stage, an
   EDL without them needs `--stage` and `--base` to import.
 - A pin stored after the pipeline's last run is not protected by the edit stage (`not_protected`); only a pipeline run applies it, and that

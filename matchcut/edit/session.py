@@ -254,7 +254,8 @@ def workspace_context(ws: Path) -> EditContext:
     try:
         src, _notes = _source(ws, cfg)
     except InterchangeError as exc:
-        raise SessionError(f"cannot read the source footage: {exc}") from None
+        hint = relative_source_hint(ws)
+        raise SessionError(f"cannot read the source footage: {exc}" + (f" ({hint})" if hint else "")) from None
     music: Optional[MusicAnalysis] = None
     if cfg.music.path and (ws / "music.json").exists():
         try:
@@ -289,19 +290,70 @@ def _base_stage(ws: Path, stage: Optional[str]) -> Tuple[str, Path]:
     return stage, paths[stage]
 
 
-def rerun_command(ws: Path) -> str:
-    """The exact shell command that re-runs the pipeline's passes on workspace ``ws`` with its own config, so the canonical stage applies
-    the pins stored now (``python -m matchcut.pipeline refine SOURCE -w WS --config WS/config.json``); "" when ``config.json`` names no
-    source (the TUI's R then)."""
+REPO_ROOT = Path(__file__).resolve().parents[2]  # python -m matchcut.* runs from here (or with PYTHONPATH set to it)
+
+
+def resolve_path(ws: Path, written: str, cfg: Optional[PipelineConfig] = None) -> Optional[Path]:
+    """A path ``config.json`` names (the source footage, the music track), absolute when it is found, else None.  A relative path is
+    relative to the directory the pipeline ran from, which is not recorded: it is looked for from the current directory, then from the
+    directory the run must have been made in when ``config.json``'s ``workspace`` is relative and names this very workspace
+    (``"footage_edit"`` for ``WS=/x/footage_edit`` gives ``/x``)."""
     ws = Path(ws)
+    if not written:
+        return None
+    path = Path(written).expanduser()
+    if path.is_absolute():
+        return path if path.exists() else None
+    if cfg is None:
+        try:
+            cfg = PipelineConfig.load(ws / "config.json")
+        except (OSError, ValueError, TypeError, KeyError):
+            cfg = None
+    candidates = [Path.cwd() / path]
+    rel_ws = Path(str(cfg.workspace or "")) if cfg is not None else Path()
+    here = ws.resolve()
+    if rel_ws.parts and not rel_ws.is_absolute() and ".." not in rel_ws.parts and here.parts[-len(rel_ws.parts):] == rel_ws.parts:
+        candidates.append(Path(*here.parts[:-len(rel_ws.parts)]) / path)
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return None
+
+
+def resolve_source(ws: Path) -> Tuple[Optional[Path], str]:
+    """(the source footage ``config.json`` names, as an absolute path when it is found (``resolve_path``), else None; the path as written
+    there, "" when there is none).  ``python -m matchcut.pipeline run footage.mp4`` stores ``"footage.mp4"``: a relative path."""
     try:
-        source = PipelineConfig.load(ws / "config.json").source
+        cfg = PipelineConfig.load(Path(ws) / "config.json")
     except (OSError, ValueError, TypeError, KeyError):
-        source = ""
-    if not source:
+        return None, ""
+    written = str(cfg.source or "")
+    return resolve_path(ws, written, cfg), written
+
+
+def relative_source_hint(ws: Path) -> str:
+    """When ``config.json``'s source is a relative path that cannot be found from here, one sentence saying so and what to do; else ""."""
+    found, written = resolve_source(ws)
+    if found is not None or not written or Path(written).expanduser().is_absolute():
+        return ""
+    return (f"config.json names the source footage by the relative path {written!r}, which is resolved from the directory a command runs "
+            f"in, and it is not found from {Path.cwd()}: run from the directory where that path resolves, or set an absolute source in "
+            f"{Path(ws) / 'config.json'}")
+
+
+def rerun_command(ws: Path) -> str:
+    """The exact shell command that re-runs the pipeline's passes on workspace ``ws`` with its own config, unchanged, so the canonical stage
+    applies the pins stored now: ``PYTHONPATH=REPO python -m matchcut.pipeline refine SOURCE -w WS --keep-config`` (``PYTHONPATH`` names
+    this repository, so it runs from any directory; ``--keep-config`` reads ``WS/config.json`` as it is and never rewrites it).  SOURCE and WS are absolute when they can be resolved (``resolve_source``); a
+    relative source that is not found is left as written (``relative_source_hint`` says so).  "" when ``config.json`` names no source (the
+    TUI's R then)."""
+    ws = Path(ws)
+    found, written = resolve_source(ws)
+    if not written:
         return ""
     q = shlex.quote
-    return f"python -m matchcut.pipeline refine {q(str(source))} -w {q(str(ws))} --config {q(str(ws / 'config.json'))}"
+    source = str(found) if found is not None else written
+    return f"PYTHONPATH={q(str(REPO_ROOT))} python -m matchcut.pipeline refine {q(source)} -w {q(str(ws.resolve()))} --keep-config"
 
 
 RERUN_IN_TUI = "press R in the TUI and continue through its checkpoints"
@@ -314,7 +366,26 @@ def unapplied_pins(s: "Session") -> List[Dict[str, Any]]:
 
 def _unapplied(ws: Path, r000: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
     cmd = rerun_command(ws)
-    return rules.unapplied_pins(r000, ctx, f"{cmd}, or {RERUN_IN_TUI}" if cmd else RERUN_IN_TUI, cmd)
+    hint = relative_source_hint(ws)
+    words = f"{cmd}{f' ({hint})' if hint else ''}, or {RERUN_IN_TUI}" if cmd else RERUN_IN_TUI
+    return rules.unapplied_pins(r000, ctx, words, cmd)
+
+
+def baseline_protections(s: "Session") -> Optional[Dict[str, Dict[str, Any]]]:
+    """The pins' transition protections when the session started (r000's ``pin_protections``), or None for a session started before they
+    were recorded."""
+    value = s.revision("r000").get("pin_protections")
+    return value if isinstance(value, dict) else None
+
+
+def protection_changes(s: "Session", tl: Timeline) -> List[Dict[str, Any]]:
+    """``rules.protection_changes`` of ``tl`` against the session's baseline; a session without a baseline is refused (start it again)."""
+    base = baseline_protections(s)
+    if base is None:
+        raise SessionError("this edit session was started before matchcut recorded the pins' transition protections at start, so it cannot "
+                           'tell whether one was released or replaced since: ask the user to restart the session (start {"restart": '
+                           "true}) and redo the edits")
+    return rules.protection_changes(base, tl, s.context())
 
 
 def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
@@ -325,8 +396,8 @@ def publish_blocker(ws: Path, base_stage: str) -> Optional[str]:
         return f"no canonical stage in {ws}: run the pipeline first"
     if base_stage != latest[0]:
         return (f"the session is based on {base_stage}, not on the latest canonical stage {latest[0]}: the edit stage continues the history "
-                f'of {latest[0]}, so only a session started on it can publish (start {{"stage": "{latest[0]}", "restart": true}} and redo '
-                "the edits)")
+                f'of {latest[0]}, so only a session started on it can publish (ask the user to restart it with start {{"stage": '
+                f'"{latest[0]}", "restart": true}}, then redo the edits)')
     return None
 
 
@@ -450,7 +521,7 @@ def normalise(tl: Timeline, ctx: EditContext) -> Tuple[Timeline, List[str]]:
     lost += [f"the match cut {a}|{b}" for a, b in sorted(matches_b - matches_0)]
     if lost:
         raise SessionError(f"putting the cut on whole frames would release {', '.join(lost)}: the session cannot start on it "
-                           "(re-run the pipeline, or move the pin in the Edit view)")
+                           "(ask the user to re-run the pipeline, or to move the pin in the Edit view)")
     if [(r.in_f, r.out_f, r.tr, r.kind) for r in frame_rows(out, rate)] != [(r.in_f, r.out_f, r.tr, r.kind) for r in rows]:
         raise SessionError("putting the cut on whole frames changed its frames: this is a bug, please report it")  # pragma: no cover
     return out, notes
@@ -663,7 +734,9 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     ``can_publish`` and ``publish_blocker`` (a session on an earlier stage or on ``human`` can edit and render, but never publish) and
     ``transition_mismatches`` (``rules.transition_mismatches``: every protected pin r000 holds whose junction's transition is not the one
     the pin holds, with how to resolve it) and ``unapplied_pins`` (``rules.unapplied_pins``: every pin stored now that r000 does not hold,
-    which the session does not protect and fails closed at, with what to do).
+    which the session does not protect and fails closed at, with what to do) and ``pin_protections``: every pin's transition protection
+    now, which r000 records as the session's baseline (``publish`` refuses a protection released, replaced or weakened since, unless the
+    user acknowledges it: ``rules.protection_changes``).
 
     ``r000`` is the stage on whole frames (``normalise``); no workspace file is rewritten.  An existing session is moved aside to
     ``WS/edits.stale-<sha12>/`` when it is stale; a fresh one is refused unless ``restart``, which moves it to
@@ -700,6 +773,7 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
         _write_revision(d, {"schema": REVISION_SCHEMA, "id": "r000", "parent": None, "proposal": None, "ops": [], "guards": None,
                             "details": notes, "touched": [], "changes": [], "timing": None,
                             "base": {"stage": name, "file": path.relative_to(ws).as_posix(), "sha256": sha},
+                            "pin_protections": rules.protections_of(ctx.pins),
                             "timeline_sha256": timeline_sha256(r000), "timeline": r000.to_dict(), "created": created})
         state = {"schema": SESSION_SCHEMA, "session": str(uuid.uuid4()), "base_stage": name, "base_file": path.relative_to(ws).as_posix(),
                  "base_sha256": sha, "rate": str(ctx.rate), "head": "r000", "next": 1, "reserved_ids": sorted({c.id for c in r000.clips}),
@@ -709,7 +783,7 @@ def start(ws: Path, stage: Optional[str] = None, restart: bool = False, ctx: Opt
     return {"session": state["session"], "base_stage": name, "base_sha256": sha, "head": "r000", "normalised": notes,
             "moved_aside": moved.name if moved is not None else None, "can_publish": can, "publish_blocker": blocker,
             "transition_mismatches": rules.transition_mismatches(r000, ctx),
-            "unapplied_pins": _unapplied(ws, r000, ctx)}
+            "unapplied_pins": _unapplied(ws, r000, ctx), "pin_protections": rules.protections_of(ctx.pins)}
 
 
 def _change_decision(line: str, before: Timeline, after: Timeline) -> Decision:

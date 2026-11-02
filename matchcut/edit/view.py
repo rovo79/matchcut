@@ -32,7 +32,7 @@ import time
 import uuid
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from matchcut.interchange.common import junction_ids
 from matchcut.pipeline import render as pipeline_render
@@ -259,27 +259,46 @@ def _same_transition(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -
 
 
 def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str], unapplied: Optional[List[Dict[str, Any]]] = None,
-          acknowledged: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+          acknowledged: Optional[Dict[str, Any]] = None, changes: Optional[Sequence[Dict[str, Any]]] = None,
+          changes_acknowledged: bool = False) -> List[Dict[str, Any]]:
     """Every stored pin and where it stands in ``tl``: held at a junction (with the transition it protects, and whether that differs from
     the junction's transition now), or not held (released by the cut, never placed, or not applied yet) with the reason.
 
-    A held pin whose protected transition differs from the one it holds is never called held: its ``state`` is ``transition_mismatch``
-    (or ``mismatch_acknowledged`` when ``acknowledged``, the pins a publish of this cut carried forward with the user's approval, names it).
-    ``unapplied`` (``rules.unapplied_pins`` of the session) adds, to a pin the session does not protect, ``protected: false`` and the
-    ``action`` that would protect it."""
+    ``held`` is true only for a pin whose clips, cut points and protection are all kept (``state`` ``held``); ``clips_held`` says whether
+    its clips and cut points are.  A pin whose protected transition differs from the one it protects is never called held: its ``state``
+    is ``transition_mismatch`` (or ``mismatch_acknowledged`` when ``acknowledged``, the pins a publish of this cut carried forward with the
+    user's approval, names it).  A pin in ``changes`` (``rules.protection_changes``: its protection was released, replaced or weakened
+    since the session started) is ``protection_changed`` (``protection_change_acknowledged`` when ``changes_acknowledged``); a pin cleared
+    during the session is listed after the stored ones.  ``unapplied`` (``rules.unapplied_pins`` of the session) adds, to a pin the session
+    does not protect, ``protected: false`` and the ``action`` that would protect it."""
     held = {id(p): site for p, site in held_pins(tl, ctx)}
     not_protected = {e["pin"]: e for e in unapplied or []}
     acknowledged = acknowledged or {}
+    changed = {c["pin"]: c for c in changes or []}
     out: List[Dict[str, Any]] = []
+
+    def protection_state(entry: Dict[str, Any], c: Dict[str, Any]) -> None:
+        entry["held"] = False
+        entry["protection_change"] = c["change"]
+        if changes_acknowledged:
+            entry["state"] = "protection_change_acknowledged"
+            entry["reason"] = (f"{c['reason']}; published with the user's acknowledgement (acknowledge_mismatches): the protection the "
+                               "session started with is not kept by this cut")
+        else:
+            entry["state"] = "protection_changed"
+            entry["reason"] = (f"{c['reason']}; publish refuses this until the user restores the protection or explicitly approves carrying "
+                               f'the change forward (publish {{"acknowledge_mismatches": ["{c["pin"]}", ...]}}); an agent never decides '
+                               "either on its own")
+
     for pin in ctx.pins:
         entry: Dict[str, Any] = {"pin": pin_label(pin), "out_shot": pin.out_shot, "in_shot": pin.in_shot, "out_time": pin.out_time,
                                  "in_time": pin.in_time, "origin": pin.origin, "note": pin.note, "hold_transition": pin.hold_transition,
-                                 "held_transition": pin.held_transition}
+                                 "held_transition": pin.held_transition, "protection_change": None}
         site = held.get(id(pin))
         if site is not None:
             now = _label(rows[site + 1].kind, rows[site + 1].tr)
             mismatch = bool(pin.hold_transition and pin.held_transition is not None and not _same_transition(pin.held_transition, now))
-            entry.update(held=True, state="held", reason="", junction=ids[site], n=site + 1,
+            entry.update(held=not mismatch, clips_held=True, state="held", reason="", junction=ids[site], n=site + 1,
                          clips=[tl.clips[site].id, tl.clips[site + 1].id], transition=now, transition_mismatch=mismatch)
             if mismatch:
                 cur = (now["kind"], now["frames"])
@@ -300,11 +319,22 @@ def _pins(tl: Timeline, rows: List[Row], ctx: EditContext, ids: List[str], unapp
                 state, reason = "not_placed", d.detail or "the pipeline could not place it"
             else:
                 state, reason = "released", d.detail or "this cut no longer holds it"
-            entry.update(held=False, state=state, reason=reason, junction=None, n=None, clips=None, transition=None,
+            entry.update(held=False, clips_held=False, state=state, reason=reason, junction=None, n=None, clips=None, transition=None,
                          transition_mismatch=False)
             e = not_protected.get(pin_label(pin))
             if e is not None:  # the session does not protect it at all: say what would
                 entry.update(protected=False, reason=e["reason"], action=e["action"])
+        c = changed.get(pin_label(pin))
+        if c is not None and entry.get("protected") is not False:
+            protection_state(entry, c)
+        out.append(entry)
+    stored = {pin_label(p) for p in ctx.pins}
+    for label, c in changed.items():
+        if label in stored:
+            continue
+        entry = {"pin": label, "hold_transition": False, "held_transition": None, "clips_held": False, "junction": c["junction"],
+                 "n": c["n"], "clips": None, "transition": c["transition"], "transition_mismatch": False}
+        protection_state(entry, c)
         out.append(entry)
     return out
 
@@ -402,11 +432,16 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         ctx = s.context()
         n_revs = len(s.revision_ids())
         unapplied = S.unapplied_pins(s)
+        baseline = S.baseline_protections(s)
     d = rules.describe(tl, ctx)
     rows = frame_rows(tl, ctx.rate)
     ids = [j["id"] for j in d["junctions"]]
-    pins = _pins(tl, rows, ctx, ids, unapplied, acknowledged_in_record(ws, s.session_id, rid))
-    by_site = {p["n"] - 1: p for p in pins if p["held"]}
+    changes = rules.protection_changes(baseline, tl, ctx) if baseline is not None else []
+    acknowledged = acknowledged_in_record(ws, s.session_id, rid)
+    acknowledged_changes = acknowledged_in_record(ws, s.session_id, rid, "acknowledged_protection_changes")
+    changes_ack = bool(changes) and all(c["pin"] in acknowledged_changes for c in changes)
+    pins = _pins(tl, rows, ctx, ids, unapplied, acknowledged, changes, changes_ack)
+    by_site = {p["n"] - 1: p for p in pins if p.get("clips_held") and p.get("n")}
     for c, entry in zip(tl.clips, d["clips"]):
         entry["origin"] = c.origin or None
     protections: List[Dict[str, Any]] = []
@@ -415,13 +450,18 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         p = by_site.get(i)
         j["held_transition"] = None
         j["transition_mismatch"] = False
+        j["protection_change"] = None
         if p is not None:
             prot.append(f"editor pin {p['pin']}: its clips stay adjacent with both cut points")
             if p["hold_transition"] and p["transition_mismatch"]:
                 prot.append(f"editor pin {p['pin']}: its transition stays as it is ({_text(j['transition'])}) or becomes the "
-                            f"{_text(p['held_transition'])} the pin holds")
+                            f"{_text(p['held_transition'])} the pin holds; TRANSITION MISMATCH: publish refuses it until it is repaired "
+                            "or the user acknowledges it")
             elif p["hold_transition"]:
                 prot.append(f"editor pin {p['pin']}: its transition stays as it is ({_text(j['transition'])})")
+            if p.get("protection_change"):
+                j["protection_change"] = p["protection_change"]
+                prot.append(f"editor pin {p['pin']}: PROTECTION CHANGED during this session ({p['protection_change']}): {p['reason']}")
             if p["hold_transition"]:
                 j["held_transition"] = p["held_transition"]
                 j["transition_mismatch"] = p["transition_mismatch"]
@@ -458,13 +498,16 @@ def inspect(ws: Path, rev: Optional[str] = None) -> Dict[str, Any]:
         "pins": pins,
         "protections": protections,
         "transition_mismatches": rules.transition_mismatches(tl, ctx),
+        "protection_changes": changes,
+        "pin_protections_at_start": baseline,
         "unapplied_pins": unapplied,
     }
 
 
-def acknowledged_in_record(ws: Path, session: str, rev: str) -> Dict[str, Any]:
-    """The mismatches (pin label -> entry) that the edit stage's record says were acknowledged when ``rev`` of ``session`` was published;
-    {} when the record is of another session or revision, or unreadable."""
+def acknowledged_in_record(ws: Path, session: str, rev: str, key: str = "acknowledged_mismatches") -> Dict[str, Any]:
+    """The mismatches (pin label -> entry) that the edit stage's record says were acknowledged when ``rev`` of ``session`` was published
+    (``key``: ``acknowledged_protection_changes`` for the protection changes); {} when the record is of another session or revision, or
+    unreadable."""
     from matchcut.pipeline.junctions import EDIT_RECORD
 
     try:
@@ -473,7 +516,7 @@ def acknowledged_in_record(ws: Path, session: str, rev: str) -> Dict[str, Any]:
         return {}
     if not isinstance(record, dict) or record.get("session") != session or record.get("revision") != rev:
         return {}
-    entries = record.get("acknowledged_mismatches") or []
+    entries = record.get(key) or []
     return {str(e["pin"]): e for e in entries if isinstance(e, dict) and "pin" in e}
 
 
@@ -694,7 +737,7 @@ def _frames_arg(frames: Any) -> int:
 
 
 def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, hold: bool = True, kind: Optional[str] = None,
-                   frames: Optional[int] = None) -> Dict[str, Any]:
+                   frames: Optional[int] = None, user_approved: Optional[str] = None) -> Dict[str, Any]:
     """Protect (``hold``) or release the transition at an editor pin's junction: sets or clears the pin's ``hold_transition`` and
     ``held_transition`` ({"kind", "frames"}) in ``editorial.json``.  The pins are read through ``PinStore``; the file is written
     surgically (``_write_pin``), so nothing else in it changes: no other field of the pin, no other pin (a malformed one included) and no
@@ -705,6 +748,12 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
     ``frames`` (``kind`` cut, dissolve or dip_to_black; ``frames`` whole, 0 only for a cut) are for a pin the head does not hold (e.g. one
     the pipeline has not applied yet); at a pin the head holds they must be the head's transition, since the rules keep a protected
     transition as it is and another one could never be reached there.
+
+    **While an edit session exists**, releasing or replacing a protection the pin already has (the editor's choice) is refused unless
+    ``user_approved`` is exactly that pin's label: the user's explicit approval, which an agent never gives itself.  Protecting a pin that
+    has no protection, or stating the same protection again, needs no approval.  Even an approved change counts at ``publish``: a
+    protection released, replaced or weakened since the session started is refused there until the user acknowledges it
+    (``rules.protection_changes``).
 
     The pins are part of the edit context, so a change makes every proposal made before it stale: ``apply`` and ``preview`` refuse them
     until they are proposed again (the result lists them)."""
@@ -729,6 +778,9 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 raise SessionError(f"a cut has no frames (frames {n_frames})")
         elif n_frames is None or n_frames < 1:
             raise SessionError(f"a {kind} needs at least 1 frame" + ("" if n_frames is None else f", not {n_frames}"))
+    if user_approved is not None and (not isinstance(user_approved, str) or not _PIN.fullmatch(user_approved)):
+        raise SessionError(f"user_approved names the pin whose protection the user approved changing, by its label (e.g. s1->s3), not "
+                           f"{str(user_approved)[:40]!r}")
     has_session = (S.edits_dir(ws) / "session.json").exists()
     lock = S._locked(ws) if has_session else contextlib.nullcontext()
     with lock:
@@ -773,7 +825,8 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 held = dict(now)
             else:
                 held = _label(kind, int(n_frames or 0))
-                if now is not None and held != now:
+                restated = target.hold_transition and _same_transition(held, target.held_transition)  # the same protection again
+                if now is not None and held != now and not restated:
                     raise SessionError(
                         f"pin {pin_label(target)} is held at junction {junction_ids(head)[site]} of the head revision {s.head}, where the "
                         f"transition is a {_text(now)}: kind and frames are for a pin the head does not hold.  Omit kind and frames to "
@@ -782,6 +835,20 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
         else:
             new = dataclasses.replace(target, hold_transition=False, held_transition=None)
         changed = new.to_dict() != target.to_dict()
+        label = pin_label(target)
+        if user_approved is not None and user_approved != label:
+            raise SessionError(f"user_approved names {user_approved}, but this changes pin {label}: the approval must name exactly the pin "
+                               "being changed; nothing was written")
+        weakens = target.hold_transition and (not new.hold_transition or not _same_transition(new.held_transition, target.held_transition))
+        approval_needed = has_session and changed and weakens
+        if approval_needed and user_approved != label:
+            what = "release" if not new.hold_transition else f"replace it with a {_text(new.held_transition)}"
+            raise SessionError(
+                f"pin {label} protects a {_text(target.held_transition)}, which the editor chose, and an edit session is open in {ws}: only "
+                f"the user may release or change that protection. Ask the user; with their explicit approval to {what}, run "
+                f"pin_transition again with user_approved: \"{label}\" (an agent must never pass it on its own). Even then, publish "
+                "refuses the change until the user also acknowledges it (acknowledge_mismatches). To keep the protection instead, "
+                f"repair the junction: propose set_transition with the {_text(target.held_transition)}; nothing was written")
         live: List[str] = _live_proposals(s, ctx) if changed and s is not None and ctx is not None else []
         if changed:
             _write_pin(ws, target, new)
@@ -794,11 +861,16 @@ def pin_transition(ws: Path, pin: Optional[str] = None, junction: Any = None, ho
                 "(apply and preview refuse them)")
     if mismatch:  # (a release keeps no transition; a protection set here is the head's: this is only for safety)
         note += (f"; the head revision has a {_text(now)} at this junction, not the {_text(new.held_transition)} held")
+    if changed and weakens and has_session:
+        note += (f"; the user approved changing the protection of pin {label} ({'released' if not new.hold_transition else 'replaced'}): "
+                 "publish refuses it until the user also acknowledges the change (acknowledge_mismatches), and the record then says the "
+                 "protection the session started with was not kept")
     ids = junction_ids(head) if head is not None else []
     return {"pin": pin_label(new), "hold_transition": new.hold_transition, "held_transition": new.held_transition,
             "previous": {"hold_transition": target.hold_transition, "held_transition": target.held_transition}, "changed": changed,
             "junction": None if site is None else {"n": site + 1, "id": ids[site]}, "transition": now, "transition_mismatch": mismatch,
-            "context_changed": changed, "proposals_to_propose_again": stale_proposals, "note": note}
+            "context_changed": changed, "proposals_to_propose_again": stale_proposals, "user_approved": user_approved if changed and weakens
+            else None, "note": note}
 
 
 def _live_proposals(s: S.Session, ctx: EditContext) -> List[str]:

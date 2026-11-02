@@ -154,7 +154,8 @@ def test_inspect_pins_protections_and_released_pins(make_ws):
     pending = pins["s3->s6"]
     assert pending["state"] == "pending" and pending["protected"] is False
     assert pending["reason"].startswith("pin s3->s6 was made or changed after the pipeline's last run, so this edit session does not protect it")
-    assert pending["action"].startswith("to protect it: re-run the pipeline so the canonical stage applies it (python -m matchcut.pipeline refine ")
+    assert pending["action"].startswith("to protect it, ask the user to re-run the pipeline so the canonical stage applies it (PYTHONPATH=")
+    assert "python -m matchcut.pipeline refine " in pending["action"] and "--keep-config" in pending["action"]
     assert released["protected"] is False and "not held by the session's base stage" in released["reason"]
     assert [(e["pin"], e["kind"]) for e in d["unapplied_pins"]] == [("s5->s6", "released"), ("s3->s6", "pending")]
     j = d["junctions"]
@@ -181,13 +182,17 @@ def test_inspect_shows_a_held_transition_that_differs_from_the_junctions(make_ws
     assert '{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 6}' in p["reason"] and "pin_transition" in p["reason"]
     j = d["junctions"][0]
     assert j["hold_transition"] and j["held_transition"] == {"kind": "dissolve", "frames": 6} and j["transition_mismatch"]
-    assert j["protection"][1] == "editor pin s0->s1: its transition stays as it is (cut) or becomes the dissolve of 6 frames the pin holds"
+    assert j["protection"][1] == ("editor pin s0->s1: its transition stays as it is (cut) or becomes the dissolve of 6 frames the pin holds; "
+                                  "TRANSITION MISMATCH: publish refuses it until it is repaired or the user acknowledges it")
+    assert p["held"] is False and p["clips_held"] is True and p["state"] == "transition_mismatch"
     assert [(m["pin"], m["n"], m["held_transition"], m["transition"]) for m in d["transition_mismatches"]] == [
         ("s0->s1", 1, {"kind": "dissolve", "frames": 6}, {"kind": "cut", "frames": 0})]
     assert d["transition_mismatches"][0]["repair"] == p["reason"]
     assert d["protections"][0]["transition"] and d["protections"][0]["transition_mismatch"]
     assert not V.inspect(w, "r001")["junctions"][0]["transition_mismatch"]
-    V.pin_transition(w, pin="s0->s1")  # the head's transition: no mismatch any more
+    with pytest.raises(Refused, match="only the user may release or change that protection"):
+        V.pin_transition(w, pin="s0->s1")  # the head's transition would replace the protection: the user's decision
+    V.pin_transition(w, pin="s0->s1", user_approved="s0->s1")  # (approved) the head's transition: no mismatch any more
     assert not V.inspect(w)["junctions"][0]["transition_mismatch"]
 
 
@@ -237,7 +242,10 @@ def test_pin_transition_sets_and_clears_the_protection_touching_nothing_else(mak
     assert after["pins"][0] == dict(before["pins"][0], hold_transition=True, held_transition={"kind": "cut", "frames": 0})
     again = V.pin_transition(w, pin="s0->s1")  # the same: nothing is written
     assert not again["changed"] and "not written" in again["note"] and editorial(w) == after
-    cleared = V.pin_transition(w, pin="s0->s1", hold=False)
+    with pytest.raises(Refused, match='only the user may release or change that protection.*user_approved: "s0->s1"'):
+        V.pin_transition(w, pin="s0->s1", hold=False)  # a session exists: releasing needs the user's approval
+    assert editorial(w) == after
+    cleared = V.pin_transition(w, pin="s0->s1", hold=False, user_approved="s0->s1")
     assert cleared["changed"] and not cleared["hold_transition"] and cleared["held_transition"] is None
     assert editorial(w) == before  # written as before the fields existed
 
@@ -287,7 +295,7 @@ def test_pin_transition_keeps_what_pinstore_does_not_understand(make_ws):
     assert after["version"] == 3 and after["notes"] == "the editor's note" and after["pins"][1] == {"out_shot": "x", "in_shot": 2}
     assert after["pins"][0] == dict(raw["pins"][0], hold_transition=True, held_transition={"kind": "cut", "frames": 0})
     assert after["pins"][2:] == raw["pins"][2:]
-    V.pin_transition(w, pin="s0->s1", hold=False)
+    V.pin_transition(w, pin="s0->s1", hold=False, user_approved="s0->s1")
     assert editorial(w) == raw
     assert [pin_label_of(p) for p in PinStore(w).load()] == ["s0->s1", "s5->s6", "s3->s6"]
 
@@ -351,7 +359,7 @@ def test_a_protected_transition_refuses_set_transition_naming_the_pin(make_ws):
     V.pin_transition(w, pin="s0->s1")
     with pytest.raises(Refused, match="protected by the editor pin s0->s1"):
         S.propose(w, op)
-    V.pin_transition(w, pin="s0->s1", hold=False)
+    V.pin_transition(w, pin="s0->s1", hold=False, user_approved="s0->s1")
     S.propose(w, op)
 
 

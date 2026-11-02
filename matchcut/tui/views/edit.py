@@ -1,6 +1,7 @@
 """Edit workbench: pick a junction on the track and see why the cut is there."""
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -12,9 +13,10 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
 from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states, protected_transition_note
-from matchcut.pipeline.junctions import Junction, build_junctions, edit_acknowledged_mismatches, scorer_for_workspace, stale_edit, stale_human
+from matchcut.pipeline.junctions import (Junction, build_junctions, edit_acknowledged_mismatches, edit_protection_changes, protection_change_note,
+                                         scorer_for_workspace, stale_edit, stale_human)
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import EDIT_STAGE, HUMAN_STAGE, clip_origin
+from matchcut.pipeline.timeline import EDIT_STAGE, HUMAN_STAGE, Timeline, clip_origin
 from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
@@ -34,6 +36,22 @@ def _transition_text(held: Optional[dict]) -> str:
     if not held or str(held.get("kind", "cut")) == "cut" or not held.get("frames"):
         return "cut"
     return f"{str(held['kind']).replace('_', ' ')} of {held['frames']} frames"
+
+
+def _unchanged_and_applied(ws: Path, old: Optional[Pin], new: Pin) -> bool:
+    """Whether locking again changed nothing an edit session sees: the pin had the same points and clip instances before, and the
+    session's base stage (``WS/edits/session.json``'s ``base_file``) applied it, so the session holds it as before."""
+    if old is None or (old.out_time, old.in_time, old.out_origin, old.in_origin) != (new.out_time, new.in_time, new.out_origin, new.in_origin):
+        return False
+    try:
+        state = json.loads((Path(ws) / "edits" / "session.json").read_text(encoding="utf-8"))
+        name = str(state.get("base_file") or "")
+        if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+            return False
+        base = Timeline.load(Path(ws) / name)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    return any(st.state == "applied" for st in pin_states(base, [new]))
 
 
 class _Busy(Exception):
@@ -252,7 +270,11 @@ class EditView(Vertical):
         tl = self._state.timeline(EDIT_STAGE)
         if tl is None:
             return ""
-        return protected_transition_note(tl, pin, f"s{pin.out_shot}->s{pin.in_shot}" in edit_acknowledged_mismatches(self._state.workspace))
+        label = f"s{pin.out_shot}->s{pin.in_shot}"
+        changed = edit_protection_changes(self._state.workspace).get(label)
+        if changed is not None:  # its protection was released or replaced during the edit session: never shown as kept
+            return protection_change_note(changed)
+        return protected_transition_note(tl, pin, label in edit_acknowledged_mismatches(self._state.workspace))
 
     def _pin_decision(self, pin: Optional[Pin]):
         """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
@@ -383,7 +405,7 @@ class EditView(Vertical):
         if j.baseline.stage != j.first_stage:
             note += (". these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, "
                      "unless that would split or reorder the beats or another pin holds them")
-        if (Path(self._state.workspace) / "edits" / "session.json").exists():
+        if (Path(self._state.workspace) / "edits" / "session.json").exists() and not _unchanged_and_applied(self._state.workspace, old, pin):
             note += f". {EDIT_SESSION_NOTE}"
         self.app.notify(note)
         self._fingerprint = None

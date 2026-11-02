@@ -206,7 +206,8 @@ def _propose(ws: Path, a: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _pin(ws: Path, a: Dict[str, Any]) -> Dict[str, Any]:
-    return V.pin_transition(ws, pin=a.get("pin"), junction=a.get("junction"), hold=a["hold"], kind=a.get("kind"), frames=a.get("frames"))
+    return V.pin_transition(ws, pin=a.get("pin"), junction=a.get("junction"), hold=a["hold"], kind=a.get("kind"), frames=a.get("frames"),
+                            user_approved=a.get("user_approved"))
 
 
 TOOLS: List[Tool] = [
@@ -259,22 +260,29 @@ TOOLS: List[Tool] = [
          lambda ws, a: V.frames(ws, a["junction"], a.get("revision"))),
     Tool("pin_transition", "Protect (hold: true) or release (hold: false) the transition at an editor pin's junction. The transition held is "
                            "the head's at that junction unless kind and frames are given. Changes editorial.json, so earlier proposals must "
-                           "be proposed again.",
+                           "be proposed again. An existing protection is the editor's choice: while a session exists, releasing or "
+                           "replacing it is refused unless user_approved names that pin, never without the user's explicit approval "
+                           "(publish then also needs their acknowledge_mismatches). Protecting an unprotected pin, or restating a "
+                           "protection, needs none.",
          _obj({"pin": {"type": "string", "pattern": PIN_LABEL, "description": "a pin's label (s1->s3)"}, "junction": JUNCTION,
-               "hold": {"type": "boolean"}, "kind": KIND, "frames": _int("the transition's length in whole frames", 0, MAX_FRAMES)},
+               "hold": {"type": "boolean"}, "kind": KIND, "frames": _int("the transition's length in whole frames", 0, MAX_FRAMES),
+               "user_approved": {"type": "string", "pattern": PIN_LABEL,
+                                 "description": "the label of the pin whose existing protection the user explicitly approved releasing or "
+                                                "replacing (never without the user's explicit approval)"}},
               ["hold"]),
          _pin),
     Tool("publish", "Publish a revision (default: the head; not r000) as the edit stage. Refused unless the session is fresh, on the "
                     "latest canonical stage, keeps every held pin and leaves unapplied pins' clips and junctions untouched; over another "
-                    "session's edit stage without replace; while a protected transition differs from the held one (repair it, or "
-                    "acknowledge_mismatches naming every such pin); over a fresh human stage unless supersede_human is its sha12. Never "
-                    "pass acknowledge_mismatches or supersede_human without the user's explicit approval.",
+                    "session's edit stage without replace; while a protected transition differs from the held one or a protection was "
+                    "released, replaced or weakened since start (repair or restore it, or acknowledge_mismatches); over a fresh human stage unless supersede_human is its sha12. Never pass acknowledge_mismatches or "
+                    "supersede_human without the user's explicit approval.",
          _obj({"revision": REVISION, "replace": {"type": "boolean"},
                "supersede_human": {"anyOf": [{"type": "string", "pattern": r"^[0-9a-f]{12}$"}, {"type": "boolean"}],
                                    "description": "the first 12 hex characters of the sha256 of the human.json to supersede (only with "
                                                   "the user's explicit approval)"},
                "acknowledge_mismatches": {"type": "array", "items": {"type": "string", "pattern": PIN_LABEL}, "maxItems": 10000,
-                                          "description": "every pin whose protected transition differs from the held one, carried "
+                                          "description": "every pin whose protected transition differs from the held one, or whose "
+                                                         "protection was released, replaced or weakened during the session, carried "
                                                          "forward (only with the user's explicit approval)"}}),
          lambda ws, a: P.publish(ws, a.get("revision"), bool(a.get("replace", False)), a.get("supersede_human"),
                                  a.get("acknowledge_mismatches"))),

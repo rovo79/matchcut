@@ -44,3 +44,50 @@ def test_cli_music_flags(tmp_path):
     assert cfg.music.gain_db == -12.0
     cfg2 = build_config(parse_args(["run", "clip.mp4", "-w", str(tmp_path), "--backend", "mock"]))
     assert cfg2.music.path is None
+
+
+def test_keep_config_runs_with_the_workspace_config_as_it_is_and_never_rewrites_it(tmp_path, monkeypatch):
+    """``--keep-config``: the edit CLI's re-run command must not change config.json (a plain command turns render.enabled back on, resets
+    render.proxy and force, and stores the source and workspace as given)."""
+    import pytest
+
+    import matchcut.pipeline.cli as cli
+
+    ws = tmp_path / "ws"
+    cfg = PipelineConfig(source="footage.mp4", workspace="ws", brief="keep me")
+    cfg.render.enabled, cfg.render.proxy, cfg.force = False, True, True
+    cfg.save(ws / "config.json")
+    data = (ws / "config.json").read_bytes()
+    kept = build_config(parse_args(["refine", "/abs/footage.mp4", "-w", str(ws), "--keep-config"]))
+    assert (kept.source, kept.workspace, kept.brief) == ("/abs/footage.mp4", str(ws), "keep me")
+    assert (kept.render.enabled, kept.render.proxy, kept.force) == (False, True, True)
+    # the default behaviour is unchanged
+    plain = build_config(parse_args(["refine", "/abs/footage.mp4", "-w", str(ws), "--config", str(ws / "config.json")]))
+    assert (plain.render.enabled, plain.render.proxy, plain.force) == (True, False, False)
+    for extra in (["--brief", "x"], ["--no-render"], ["--config", str(ws / "config.json")], ["--set", "seed=3"], ["--force"]):
+        with pytest.raises(SystemExit, match="--keep-config uses WORKSPACE/config.json as it is"):
+            build_config(parse_args(["refine", "/abs/footage.mp4", "-w", str(ws), "--keep-config", *extra]))
+    with pytest.raises(SystemExit, match="--keep-config needs -w WORKSPACE"):
+        build_config(parse_args(["refine", "/abs/footage.mp4", "--keep-config"]))
+    # main hands Pipeline save_config=False: config.json is never written
+    made = {}
+
+    class FakePipeline:
+        def __init__(self, cfg, save_config=True):
+            made.update(cfg=cfg, save_config=save_config)
+            self.ws = ws
+            if save_config:
+                cfg.save(ws / "config.json")
+
+        def refine(self, start=None):
+            from matchcut.pipeline.timeline import Timeline
+            return Timeline(source="", fps=25.0, name="x")
+
+        def report(self, final=None):
+            return ""
+
+    monkeypatch.setattr(cli, "Pipeline", FakePipeline)
+    assert cli.main(["refine", "/abs/footage.mp4", "-w", str(ws), "--keep-config"]) == 0
+    assert made["save_config"] is False and (ws / "config.json").read_bytes() == data
+    assert cli.main(["refine", "/abs/footage.mp4", "-w", str(ws), "--config", str(ws / "config.json")]) == 0
+    assert made["save_config"] is True and (ws / "config.json").read_bytes() != data  # (what --keep-config avoids)

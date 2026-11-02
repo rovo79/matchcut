@@ -496,7 +496,11 @@ python -m matchcut.pipeline render footage.mp4 --timeline footage_edit/passes/01
 
 `--force` ignores the caches; `--set section.key=value` overrides any config
 value (`--set matchcut.candidate_threshold=0.6 --set pacing.max_clip_seconds=5`).
-The full config is written to `workspace/config.json`.
+The full config is written to `workspace/config.json`. Every command rewrites it from its options (`render.enabled` from `--no-render`,
+`render.proxy` from `--proxy`, `force` from `--force`, `source` and `workspace` as given); `--keep-config -w WORKSPACE` instead runs with
+`WORKSPACE/config.json` exactly as it is and never rewrites it (only the footage path and `-w` given are used, for this run; an option that
+would change the config is refused). The edit CLI's re-run command uses it:
+`python -m matchcut.pipeline refine /abs/footage.mp4 -w /abs/footage_edit --keep-config`.
 
 ## Model usage and cost
 

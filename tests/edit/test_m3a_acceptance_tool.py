@@ -4,6 +4,7 @@ session, the published record and its provenance, and never writes inside the wo
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import subprocess
 import sys
@@ -82,3 +83,115 @@ def test_a_snapshot_is_never_written_inside_the_workspace(make_ws):
     code, out, _ = run("snapshot", str(w))
     default = w.resolve().parent / f"{w.name}.m3a-snapshot.json"
     assert code == 0 and str(default) in out and default.exists() and tree(w) == before
+
+
+# ----------------------------------------------------------------------------------------------- strict mode (the original workspace)
+def strict_snapshot(w: Path, snap: Path, *extra: str) -> None:
+    code, out, err = run("snapshot", str(w), "--all", "-o", str(snap), *extra)
+    assert code == 0 and out.startswith("strict snapshot of "), (out, err)
+
+
+def test_strict_mode_catches_every_kind_of_change_the_canonical_mode_lets_through(make_ws, tmp_path):
+    """The reviewer's probe: a session, a publish, config/probe/shots edits and a new exports/ on the ORIGINAL.  Canonical mode says
+    "unchanged" (it checks only the canonical files); strict mode names every one."""
+    w = make_ws()
+    snap, canon = tmp_path / "strict.json", tmp_path / "canon.json"
+    before = tree(w)
+    strict_snapshot(w, snap)
+    assert run("snapshot", str(w), "-o", str(canon))[0] == 0 and tree(w) == before  # nothing written inside
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 0 and out.startswith("unchanged: all ") and "nothing exempt" in out
+    S.start(w)
+    S.apply(w, S.propose(w, [{"op": "trim", "clip": "c005", "edge": "out", "frames": -3}])["proposal"])
+    P.publish(w)
+    (w / "shots.json").write_text('{"x": 1}')
+    with open(w / "probe.json", "a") as fh:
+        fh.write("tamper\n")
+    cfg = json.loads((w / "config.json").read_text())
+    cfg["brief"] = "tampered"
+    (w / "config.json").write_text(json.dumps(cfg))
+    (w / "exports").mkdir()
+    (w / "exports" / "final.otio").write_text("x")
+    (w / "passes" / "01_tidy.json").unlink()
+    code, out, _ = run("verify", str(w), str(canon))
+    assert code == 1 and "passes/01_tidy.json: missing now" in out and "config.json" not in out  # canonical: only the canonical files
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 1 and out.startswith("CHANGED: ")
+    for line in ("edit.json: new since the snapshot", "edit_publish.json: new since the snapshot", "edits/: new since the snapshot",
+                 "edits/session.json: new since the snapshot", "config.json: changed", "probe.json: changed", "shots.json: changed",
+                 "exports/: new since the snapshot", "exports/final.otio: new since the snapshot",
+                 "passes/01_tidy.json: removed since the snapshot", ".stage.lock: new since the snapshot"):
+        assert f"  {line}" in out, (line, out)
+    code, _, err = run("verify", str(w), str(canon), "--strict")
+    assert code == 2 and "--strict needs one taken with snapshot --all" in err
+
+
+def test_strict_mode_content_change_of_the_same_size_and_mtime_alone(make_ws, tmp_path):
+    w = make_ws()
+    snap = tmp_path / "strict.json"
+    strict_snapshot(w, snap)
+    path = w / "roughcut.json"
+    st = path.stat()
+    data = path.read_bytes()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))  # the modification time alone: a note, never a failure
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 0 and "note: roughcut.json: modification time changed, content identical" in out
+    path.write_bytes(data.replace(b"c001", b"c00X", 1))  # the same size, another content
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 1 and "roughcut.json: changed (content)" in out
+
+
+def test_strict_mode_hashes_large_files_quickly_and_says_so(make_ws, tmp_path):
+    w = make_ws()
+    big = w / "final.mp4"
+    big.write_bytes(b"\0" * (3 << 20))
+    snap = tmp_path / "strict.json"
+    code, out, _ = run("snapshot", str(w), "--all", "-o", str(snap), "--quick-above", "1")
+    assert code == 0 and "1 file(s) above 1 MiB hashed quickly (size, first and last MiB" in out and "final.mp4" in out
+    assert json.loads(snap.read_text())["tree"]["final.mp4"]["hash"] == "quick"
+    with open(big, "r+b") as fh:  # the middle changes, size and both ends do not: only the modification time tells
+        fh.seek(3 << 19)
+        fh.write(b"x")
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 1 and "final.mp4: possibly changed" in out and "1 large file(s) compared by size and first and last MiB only" in out
+    with open(big, "r+b") as fh:
+        fh.write(b"y")  # the first MiB: a change
+    code, out, _ = run("verify", str(w), str(snap), "--strict")
+    assert code == 1 and "final.mp4: changed (content)" in out
+    code, out, _ = run("snapshot", str(w), "--all", "--full", "-o", str(snap))
+    assert code == 0 and "hashed quickly" not in out and json.loads(snap.read_text())["tree"]["final.mp4"]["hash"] == "sha256"
+
+
+def test_a_missing_source_is_an_error_never_a_silent_pass(make_ws, tmp_path):
+    w = make_ws()
+    cfg = json.loads((w / "config.json").read_text())
+    snap = tmp_path / "snap.json"
+    assert run("snapshot", str(w), "-o", str(snap))[0] == 0
+    cfg["source"] = "footage.mp4"  # relative, as `run footage.mp4` stores it, and not found from the repository root
+    (w / "config.json").write_text(json.dumps(cfg))
+    for argv in (("snapshot", str(w), "-o", str(tmp_path / "x.json")), ("snapshot", str(w), "--all", "-o", str(tmp_path / "y.json"))):
+        code, out, err = run(*argv)
+        assert code == 1 and "error: no snapshot written: the source footage 'footage.mp4' that config.json names is not found" in err
+        assert "set an absolute source in the COPY's config.json" in err and not Path(argv[-1]).exists()
+    code, out, err = run("source", str(w))
+    assert code == 1 and "'footage.mp4'" in err and out == ""
+    code, out, _ = run("verify", str(w), str(snap))  # the snapshot named the source; it is not found now
+    assert code == 1 and "now: the source footage 'footage.mp4'" in out
+    # an old snapshot that recorded a missing source can never pass
+    doc = json.loads(snap.read_text())
+    doc["media"]["source"]["stat"] = None
+    snap.write_text(json.dumps(doc))
+    code, out, _ = run("verify", str(w), str(snap))
+    assert code == 1 and "was missing when the snapshot was taken" in out
+
+
+def test_source_resolves_a_relative_path_from_the_directory_the_run_was_made_in(make_ws, tmp_path):
+    w = make_ws()
+    cfg = json.loads((w / "config.json").read_text())
+    real = Path(cfg["source"])
+    os.link(real, w.parent / "footage.mp4")
+    cfg["source"], cfg["workspace"] = "footage.mp4", w.name
+    (w / "config.json").write_text(json.dumps(cfg))
+    code, out, _ = run("source", str(w))  # run from the repository root
+    assert code == 0 and out.strip() == str((w.parent / "footage.mp4").resolve())

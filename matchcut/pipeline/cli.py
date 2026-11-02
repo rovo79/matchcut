@@ -9,8 +9,8 @@ from typing import List, Optional
 
 from .config import DEFAULT_PASSES, PipelineConfig
 from .editorial import PinStore, pin_states, protected_transition_note
-from .junctions import (build_junctions, edit_acknowledged_mismatches, junction_detail, junction_line, load_stage_timelines,
-                        scorer_for_workspace, stale_edit, stale_human)
+from .junctions import (build_junctions, edit_acknowledged_mismatches, edit_protection_changes, junction_detail, junction_line,
+                        load_stage_timelines, protection_change_note, scorer_for_workspace, stale_edit, stale_human)
 from .pipeline import Pipeline
 from .timeline import EDIT_STAGE, HUMAN_STAGE, Timeline
 
@@ -32,10 +32,41 @@ def _common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--music-gain", type=float, default=None, help="music level in dB relative to the source audio (default -8)")
     p.add_argument("--config", default=None, help="JSON config file to start from")
     p.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override any config value, e.g. matchcut.candidate_threshold=0.6")
+    p.add_argument("--keep-config", action="store_true", help="run with WORKSPACE/config.json exactly as it is and never rewrite it: only "
+                   "the footage path and -w given here are used for this run (needs -w; no option that changes the config may be given)")
     p.add_argument("-v", "--verbose", action="store_true")
 
 
+# the options --keep-config refuses: each would change the config the run uses, which config.json would then not record
+_CONFIG_OPTIONS = (("config", "--config"), ("brief", "--brief"), ("target_duration", "--target-duration"), ("backend", "--backend"),
+                   ("model", "--model"), ("effort", "--effort"), ("passes", "--passes"), ("force", "--force"), ("no_render", "--no-render"),
+                   ("proxy", "--proxy"), ("music", "--music"), ("music_start", "--music-start"), ("music_gain", "--music-gain"),
+                   ("set", "--set"))
+
+
+def _kept_config(args: argparse.Namespace) -> PipelineConfig:
+    """``--keep-config``: the workspace's own ``config.json``, as it is, with only the footage path and the workspace of this run set in
+    memory (``Pipeline(save_config=False)`` never writes it back).  A re-run that must not change the workspace's config (the edit CLI's
+    re-run command) uses it; the TUI's R also runs with the workspace's config."""
+    if not args.workspace:
+        raise SystemExit("--keep-config needs -w WORKSPACE (the workspace whose config.json is used as it is)")
+    given = [flag for name, flag in _CONFIG_OPTIONS if getattr(args, name, None) not in (None, False, "", [])]
+    if given:
+        raise SystemExit(f"--keep-config uses WORKSPACE/config.json as it is: {', '.join(given)} would change it; drop "
+                         f"{'them' if len(given) > 1 else 'it'}, or run without --keep-config")
+    path = Path(args.workspace) / "config.json"
+    try:
+        cfg = PipelineConfig.load(path)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        raise SystemExit(f"--keep-config: cannot read {path} ({str(exc).splitlines()[0] if str(exc) else type(exc).__name__})") from None
+    cfg.source = args.source
+    cfg.workspace = args.workspace
+    return cfg
+
+
 def build_config(args: argparse.Namespace) -> PipelineConfig:
+    if getattr(args, "keep_config", False):
+        return _kept_config(args)
     cfg = PipelineConfig.load(Path(args.config)) if args.config else PipelineConfig()
     cfg.source = args.source
     cfg.workspace = args.workspace or f"{Path(args.source).with_suffix('')}_edit"
@@ -167,16 +198,45 @@ def _pin_footer(ws: Path, stages) -> List[str]:
         return []
     edit = stages[-1][0] == EDIT_STAGE
     acknowledged = set(edit_acknowledged_mismatches(ws)) if edit else set()
+    changed = edit_protection_changes(ws) if edit else {}
     lines = []
-    for st in pin_states(stages[-1][1], PinStore(ws).load(), stages[-1][0]):
+    pins = PinStore(ws).load()
+    for st in pin_states(stages[-1][1], pins, stages[-1][0]):
         what = {"applied": "held by this edit" if edit else "applied", "changed": f"changed by the editor: {st.reason}",
                 "not_placed": f"not placed: {st.reason}" + ("; not protected by this edit" if edit else ""),
                 "pending": EDIT_NOT_HELD if edit else "pending (run again to apply)"}[st.state]
         note = protected_transition_note(stages[-1][1], st.pin, st.label in acknowledged) if st.state == "applied" else ""
+        if st.label in changed:  # a protection released or replaced during the session: never "held"
+            note = protection_change_note(changed[st.label])
         if note:  # never "held" while the protected transition is not
-            what = f"clips and cut points held by this edit, but {note}" if edit else f"applied, but {note}"
+            verb = "kept" if st.label in changed else "held"
+            what = f"clips and cut points {verb} by this edit, but {note}" if edit else f"applied, but {note}"
         lines.append(f"pin {st.label}: {what}")
+    stored = {f"s{p.out_shot}->s{p.in_shot}" for p in pins}
+    lines += [f"pin {label}: cleared during the edit session; {protection_change_note(e)}" for label, e in changed.items()
+              if label not in stored]
     return lines
+
+
+def _pin_marks(ws: Path, stages, junctions) -> dict:
+    """On the human or the edit stage, junction index -> a tag for the list line of a pinned junction whose protection is not kept there
+    (``transition-mismatch``, ``protection-changed``), so the list line, not only the footer, says it."""
+    if not stages or stages[-1][0] not in (HUMAN_STAGE, EDIT_STAGE):
+        return {}
+    tl = stages[-1][1]
+    changed = edit_protection_changes(ws) if stages[-1][0] == EDIT_STAGE else {}
+    pins = {p.key: p for p in PinStore(ws).load()}
+    out = {}
+    for j in junctions:
+        pin = pins.get((j.out_shot, j.in_shot))
+        if pin is None or not j.pinned:
+            continue
+        label = f"s{pin.out_shot}->s{pin.in_shot}"
+        if label in changed:
+            out[j.index] = "PROTECTION-CHANGED"
+        elif protected_transition_note(tl, pin):
+            out[j.index] = "TRANSITION-MISMATCH"
+    return out
 
 
 def _junctions(ws: Path, index: Optional[int]) -> int:
@@ -190,10 +250,11 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
     junctions = build_junctions(stages, scorer_for_workspace(ws, cfg), pins=PinStore(ws).load())
     stale = "\n".join(f"note: {r}" for r in (stale_edit(ws), stale_human(ws)) if r)  # a stale edit.json / human.json is left out of the stages above; say so
     footer = _pin_footer(ws, stages)
+    marks = _pin_marks(ws, stages, junctions)
     if index is None:
         print(f"{len(junctions)} junctions in {stages[-1][0]} ({len(stages)} stages)")
         for j in junctions:
-            print(junction_line(j))
+            print(junction_line(j) + (f" {marks[j.index]}" if j.index in marks else ""))
         if stale:
             print(stale)
         for line in footer:
@@ -202,7 +263,11 @@ def _junctions(ws: Path, index: Optional[int]) -> int:
     if not 1 <= index <= len(junctions):
         print(f"junction {index} is out of range 1..{len(junctions)}", file=sys.stderr)
         return 1
-    print(junction_detail(junctions[index - 1]))
+    detail = junction_detail(junctions[index - 1])
+    if index - 1 in marks:
+        first, _, rest = detail.partition("\n")
+        detail = f"{first} {marks[index - 1]}" + (f"\n{rest}" if rest else "")
+    print(detail)
     if stale:
         print(stale)
     for line in footer:
@@ -219,7 +284,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("PIL").setLevel(logging.WARNING)
     cfg = build_config(args)
-    pipe = Pipeline(cfg)
+    pipe = Pipeline(cfg, save_config=not args.keep_config)
 
     if args.command == "run":
         final = pipe.run()

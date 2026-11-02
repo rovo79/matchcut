@@ -96,9 +96,13 @@ def test_a_pending_pin_refuses_every_change_to_its_shots_clips_and_junctions(pen
     line = exc.value.problems[0]
     assert line.startswith(PENDING) and what in line, line
     cmd = S.rerun_command(w)
-    assert cmd == f"python -m matchcut.pipeline refine {shlex.quote(str(PipelineConfig.load(w / 'config.json').source))} -w {w} --config {w / 'config.json'}"
-    assert line.endswith(f"to protect it: re-run the pipeline so the canonical stage applies it ({cmd}, or press R in the TUI and continue "
-                         'through its checkpoints), then restart the edit session (start {"restart": true})')
+    src = Path(PipelineConfig.load(w / 'config.json').source).resolve()
+    assert cmd == (f"PYTHONPATH={shlex.quote(str(REPO))} python -m matchcut.pipeline refine {shlex.quote(str(src))} -w "
+                   f"{shlex.quote(str(w.resolve()))} --keep-config")
+    assert line.endswith(f"to protect it, ask the user to re-run the pipeline so the canonical stage applies it ({cmd}, or press R in the TUI "
+                         'and continue through its checkpoints), then to restart the edit session (start {"restart": true}); a re-run costs '
+                         "model calls and leaves the edit and human stages out as stale, and a restart moves this session aside, so an agent "
+                         "never does either on its own")
     assert sorted(p.name for p in (w / "edits" / "proposals").iterdir()) == before and S.load(w).head == "r000"
 
 
@@ -123,13 +127,13 @@ def test_start_inspect_and_log_list_the_unapplied_pins_and_the_cli_refuses_with_
     d = V.inspect(w)
     assert d["unapplied_pins"] == start_entry == S.log(w)["unapplied_pins"]
     pin = next(p for p in d["pins"] if p["pin"] == "s1->s3")
-    assert pin["state"] == "pending" and pin["protected"] is False and pin["action"].startswith("to protect it: re-run the pipeline")
+    assert pin["state"] == "pending" and pin["protected"] is False and pin["action"].startswith("to protect it, ask the user to re-run the pipeline")
     for command in ("inspect", "log"):
         code, doc, _ = run_cli(str(w), command)
         assert code == 0 and doc["unapplied_pins"] == start_entry
     code, doc, _ = run_cli(str(w), "propose", json.dumps({"ops": [{"op": "trim", "clip": "c003", "edge": "in", "frames": 2}]}))
     assert code == 1 and doc["kind"] == "refused" and doc["command"] == "propose"
-    assert doc["error"].startswith("refused: " + PENDING) and 'then restart the edit session (start {"restart": true})' in doc["error"]
+    assert doc["error"].startswith("refused: " + PENDING) and 'then to restart the edit session (start {"restart": true})' in doc["error"]
     assert doc["problems"][0].startswith(PENDING) and doc["changes"] == ["c003: in +2f"]
 
 
@@ -153,7 +157,7 @@ def test_a_pin_added_after_apply_makes_publish_refuse(make_ws):
         P.publish(w)
     msg = str(exc.value)
     assert msg.startswith(f"{rid} cannot be published: {PENDING}") and "this edit changes c002 (shot 1)" in msg
-    assert 'then restart the edit session (start {"restart": true})' in msg
+    assert 'then to restart the edit session (start {"restart": true})' in msg
     assert not (w / "edit.json").exists() and not (w / "edit_publish.json").exists()
     code, doc, _ = run_cli(str(w), "publish")
     assert code == 1 and doc["kind"] == "refused" and doc["error"] == msg
@@ -188,9 +192,11 @@ def test_a_pin_the_pipeline_could_not_place_fails_closed_with_its_own_wording(ma
     assert (e["pin"], e["kind"], e["junction"], e["affected_clips"]) == ("s2->s4", "not_placed", None, [])
     assert e["reason"] == ("pin s2->s4 could not be placed by the pipeline's last run (shot 2 is not in this cut), so this edit session "
                            "does not protect it")
-    assert e["action"].startswith("a plain re-run will not place it: clear it (x) or make it again (l / v) on a junction it can hold in the "
-                                  "TUI's Edit view, re-run the pipeline (python -m matchcut.pipeline refine ")
-    assert e["action"].endswith('then restart the edit session (start {"restart": true})')
+    assert e["action"].startswith("a plain re-run will not place it: ask the user to clear it (x) or make it again (l / v) on a junction it "
+                                  "can hold in the TUI's Edit view, to re-run the pipeline (PYTHONPATH=")
+    assert e["action"].endswith('then to restart the edit session (start {"restart": true}); a re-run costs model calls and leaves the edit '
+                                "and human stages out as stale, and a restart moves this session aside, so an agent never does either on "
+                                "its own")
     with pytest.raises(S.ProposalRefused, match=r"pin s2->s4 could not be placed .*this edit adds e001 \(shot 4\).*a plain re-run will not"):
         S.propose(w, [{"op": "insert", "shot": 4, "in_frame": 420, "out_frame": 450, "after": "c002"}])
     edit(w, [{"op": "trim", "clip": "c002", "edge": "out", "frames": -5}])  # elsewhere: allowed
@@ -218,10 +224,14 @@ def test_after_the_pipeline_re_run_and_a_restart_the_pin_is_held_and_protects(pi
         S.propose(w, [{"op": "set_transition", "junction": j + 1, "kind": "dissolve", "frames": 2}])
     [e] = S.unapplied_pins(S.load(w))
     argv = shlex.split(e["rerun_command"])
-    assert argv[:4] == ["python", "-m", "matchcut.pipeline", "refine"]
-    proc = subprocess.run([sys.executable, *argv[1:]], capture_output=True, text=True, cwd=str(REPO), timeout=600,
-                          env={**__import__("os").environ, "PYTHONPATH": str(REPO)})
+    assert argv[:5] == [f"PYTHONPATH={REPO}", "python", "-m", "matchcut.pipeline", "refine"] and argv[-1] == "--keep-config"
+    config = (w / "config.json").read_bytes()
+    elsewhere = tmp_path / "elsewhere"  # the command runs from any directory: PYTHONPATH names the repository
+    elsewhere.mkdir()
+    proc = subprocess.run([sys.executable, *argv[2:]], capture_output=True, text=True, cwd=str(elsewhere), timeout=600,
+                          env={**__import__("os").environ, "PYTHONPATH": argv[0].split("=", 1)[1]})
     assert proc.returncode == 0, proc.stderr[-2000:]
+    assert (w / "config.json").read_bytes() == config  # --keep-config: the workspace's config is never rewritten
     code, doc, _ = run_cli(str(w), "start", '{"restart": true}')
     assert code == 0 and doc["unapplied_pins"] == [] and doc["moved_aside"].startswith("edits.stale-")
     held = next(p for p in V.inspect(w)["pins"] if p["pin"] == label)
@@ -305,7 +315,7 @@ def test_an_inherited_mismatch_is_refused_at_publish_then_a_repair_publishes(mis
 def test_a_partial_extra_or_unknown_acknowledgement_is_refused(mismatched, given, why):
     w = mismatched
     edit(w, [{"op": "trim", "clip": "c004", "edge": "in", "frames": 3}])
-    with pytest.raises(Refused, match=(rf"acknowledge_mismatches .* is refused: {why}" if given else "it must name every mismatching pin")):
+    with pytest.raises(Refused, match=(rf"acknowledge_mismatches .* is refused: {why}" if given else "it must name every such pin")):
         P.publish(w, acknowledge_mismatches=given)
     assert not (w / "edit.json").exists()
 
@@ -316,7 +326,7 @@ def test_acknowledging_a_pin_that_is_not_mismatching_is_refused(make_ws):
     PinStore(w).put(pin_at(w, 3))  # s5->s6: stored, but the pipeline never applied it (and it is not mismatching)
     S.start(w)
     edit(w, [{"op": "set_transition", "junction": 1, "kind": "dissolve", "frames": 4}])  # repaired: nothing mismatching now
-    with pytest.raises(Refused, match=r"acknowledge_mismatches \[\"s0->s1\"\] is refused: s0->s1 has no transition mismatch in r001.*publish "
+    with pytest.raises(Refused, match=r"acknowledge_mismatches \[\"s0->s1\"\] is refused: s0->s1 has no transition mismatch and no protection change in r001.*publish "
                                       r"without acknowledge_mismatches"):
         P.publish(w, acknowledge_mismatches=["s0->s1"])
     with pytest.raises(Refused, match=r"s5->s6 has no transition mismatch"):
@@ -335,7 +345,9 @@ def test_the_held_wording_never_appears_for_a_mismatched_pin(mismatched, capsys)
     out = T.call(w, "publish", {"acknowledge_mismatches": ["s0->s1"]})
     assert [x["state"] for x in out["pins"]] == ["mismatch_acknowledged"]
     assert main(["junctions", str(w)]) == 0
-    footer = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("pin ")]
+    printed = capsys.readouterr().out.splitlines()
+    footer = [ln for ln in printed if ln.startswith("pin ")]
+    assert [ln for ln in printed if "c001->c002" in ln][0].endswith("pinned TRANSITION-MISMATCH")  # the list line says it too
     assert footer == ["pin s0->s1: clips and cut points held by this edit, but its protected transition is NOT kept: the pin holds a "
                       "dissolve of 4 frames, this cut has a cut (mismatch acknowledged at publish)"]
     note = protected_transition_note(Timeline.load(w / "edit.json"), PinStore(w).get(0, 1), True)

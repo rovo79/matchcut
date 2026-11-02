@@ -41,6 +41,12 @@ refused with the repair (the exact ``set_transition``) and the alternative: ``ac
 exactly, which only the user may approve (an agent never passes it on its own).  An acknowledged mismatch is recorded and its pin reads
 ``mismatch_acknowledged``, never held.
 
+**Protection changes.**  ``start`` records every pin's protection in r000 (``pin_protections``, the session's baseline).  A protection
+released, replaced or weakened since (or cleared with its pin: ``rules.protection_changes``) is refused the same way, even when the cut
+has the transition the old protection held: the user restores it, or acknowledges it in the same ``acknowledge_mismatches`` list (one list
+naming every pin whose protection the publish does not keep).  The result, the record (``acknowledged_protection_changes``, with
+``pin_protections_at_start``) and the log line say so, and the pin reads ``protection_change_acknowledged``, never held.
+
 **Never a silent overwrite.**  Publishing again from the same session replaces ``edit.json`` (the earlier copy stays in
 ``edits/published/``).  An ``edit.json`` published by another session, or one without a readable record that describes it (a record of
 another file, a hand edit), is refused unless ``replace``: then the old pair (``edit.json``, ``edit_publish.json`` when there is one) is first
@@ -169,16 +175,20 @@ def _pin_problems(base: Timeline, tl: Timeline, ctx: EditContext) -> List[Tuple[
     return [(pin_label(p), line) for p, line in rules.pin_problems(base, tl, ctx)]
 
 
-def _pin_states(ws: Path, tl: Timeline, ctx: EditContext, unapplied: List[Dict[str, Any]],
-                acknowledged: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _pin_states(ws: Path, tl: Timeline, ctx: EditContext, unapplied: List[Dict[str, Any]], acknowledged: Dict[str, Any],
+                changes: Sequence[Dict[str, Any]] = ()) -> List[Dict[str, Any]]:
     """Every stored pin and where it stands in the published cut, worded for the edit stage: ``held``; ``mismatch_acknowledged`` (its clips
-    and cut points held, its protected transition not: carried forward with the user's acknowledgement); ``not_protected`` (a pin the
-    session's base does not hold: ``rules.unapplied_pins``); never held when it is not."""
+    and cut points held, its protected transition not: carried forward with the user's acknowledgement); ``protection_change_acknowledged``
+    (the protection the pin had when the session started was released, replaced or weakened during it, and the user acknowledged that at
+    publish; a pin cleared during the session is listed too); ``not_protected`` (a pin the session's base does not hold:
+    ``rules.unapplied_pins``); never held when it is not."""
     from .view import _pins
 
     out = []
-    for entry in _pins(tl, frame_rows(tl, ctx.rate), ctx, junction_ids(tl), unapplied, acknowledged):
-        e = {k: entry[k] for k in ("pin", "state", "reason", "junction", "hold_transition", "held_transition", "transition_mismatch")}
+    for entry in _pins(tl, frame_rows(tl, ctx.rate), ctx, junction_ids(tl), unapplied, acknowledged, changes,
+                       changes_acknowledged=True):
+        e = {k: entry.get(k) for k in ("pin", "state", "reason", "junction", "hold_transition", "held_transition", "transition_mismatch",
+                                       "protection_change")}
         if entry.get("protected") is False:
             e["state"] = "not_protected"
             e["reason"] = f"not protected by this edit: {entry['reason']}; {entry['action']}"
@@ -186,16 +196,18 @@ def _pin_states(ws: Path, tl: Timeline, ctx: EditContext, unapplied: List[Dict[s
     return out
 
 
-def _check_acknowledged(rid: str, mismatches: List[Dict[str, Any]], acknowledge: Any, labels: List[str]) -> List[Dict[str, Any]]:
-    """The mismatches ``acknowledge`` (the pins the user approved carrying forward) acknowledges: it must name every mismatching pin
-    exactly once, and nothing else.  Raises ``SessionError`` otherwise, saying how to repair each mismatch or acknowledge it."""
+def _check_acknowledged(rid: str, mismatches: List[Dict[str, Any]], changes: List[Dict[str, Any]], acknowledge: Any,
+                        labels: List[str]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """(the mismatches, the protection changes) that ``acknowledge`` (the pins the user approved carrying forward) acknowledges: it must
+    name every pin with a transition mismatch or a protection changed during the session exactly once, and nothing else.  Raises
+    ``SessionError`` otherwise, saying how to repair each one or what the user may acknowledge."""
     if acknowledge is None:
         acknowledge = []
     if not isinstance(acknowledge, (list, tuple)) or not all(isinstance(x, str) for x in acknowledge):
         raise SessionError(f"acknowledge_mismatches must be a list of pin labels (e.g. [\"s1->s3\"]), not {str(acknowledge)[:60]!r}")
-    if not mismatches and not acknowledge:
-        return []
-    wanted = [m["pin"] for m in mismatches]
+    if not mismatches and not changes and not acknowledge:
+        return [], []
+    wanted = list(dict.fromkeys([m["pin"] for m in mismatches] + [c["pin"] for c in changes]))
     issues: List[str] = []
     seen: set = set()
     for x in acknowledge:
@@ -205,25 +217,31 @@ def _check_acknowledged(rid: str, mismatches: List[Dict[str, Any]], acknowledge:
         if x not in labels:
             issues.append(f"{x} is not a stored pin" + (f" (pins: {', '.join(labels)})" if labels else " (there are no pins)"))
         elif x not in wanted:
-            issues.append(f"{x} has no transition mismatch in {rid}")
+            issues.append(f"{x} has no transition mismatch and no protection change in {rid}")
     missing = [x for x in wanted if x not in seen]
     if missing:
         issues.append(f"it does not name {', '.join(missing)}")
     if not issues:
-        return [{"pin": m["pin"], "n": m["n"], "junction": m["junction"], "held_transition": m["held_transition"],
-                 "transition": m["transition"]} for m in mismatches]
+        return ([{"pin": m["pin"], "n": m["n"], "junction": m["junction"], "held_transition": m["held_transition"],
+                  "transition": m["transition"]} for m in mismatches],
+                [{k: c[k] for k in ("pin", "change", "original", "now", "n", "junction", "transition", "reason")} for c in changes])
     lines = []
     for m in mismatches:
         held, now = m["held_transition"], m["transition"]
         op = rules.repair_op(m["n"], (held["kind"], held["frames"]))
-        lines.append(f"pin {m['pin']} holds a {_tr(held)} but junction {m['n']} ({m['junction']}) has a {_tr(now)}: repair it by proposing "
-                     f"{json.dumps(op)}, applying it and publishing again")
-    head = (f"{rid} leaves {len(mismatches)} protected transition{'s' if len(mismatches) != 1 else ''} different from what the pin holds: "
-            + "; ".join(lines)) if mismatches else f"{rid} has no protected transition that differs from what its pin holds"
+        lines.append(f"pin {m['pin']} holds a {_tr(held)} but junction {m['n']} ({m['junction']}) has a {_tr(now)}: repair it by "
+                     f"proposing {json.dumps(op)}, applying it and publishing again")
+    for c in changes:
+        lines.append(f"{c['reason']}: publishing would not keep the protection the session started with; ask the user whether to restore "
+                     "it (only they may change a protection) or to carry the change forward")
+    n = len(mismatches) + len(changes)
+    head = (f"{rid} cannot be published as protected: " + "; ".join(lines)) if n else \
+        f"{rid} has no protected transition that differs from what its pin protects and no protection changed during the session"
     ack = json.dumps({"acknowledge_mismatches": wanted})
-    return_how = (f". Or, only if the user explicitly approves carrying {'these mismatches' if len(wanted) > 1 else 'this mismatch'} "
-                  f"forward, publish {ack} (it must name every mismatching pin, exactly); an agent must never acknowledge a mismatch "
-                  "without the user's explicit approval") if mismatches else ": publish without acknowledge_mismatches"
+    return_how = (f". Only if the user explicitly approves carrying {'these' if len(wanted) > 1 else 'this'} forward, publish {ack} (it "
+                  "must name every such pin, exactly); the record then says the protection was not kept. An agent must never acknowledge "
+                  "a mismatch or a protection change without the user's explicit approval") if n else \
+        ": publish without acknowledge_mismatches"
     given = f"acknowledge_mismatches {json.dumps(list(acknowledge))} is refused: {'; '.join(issues)}. " if acknowledge else ""
     raise SessionError(f"{given}{head}{return_how}")
 
@@ -344,8 +362,10 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
         hits = rules.unapplied_problems(r000, tl, unapplied)
         if hits:
             raise SessionError(f"{rid} cannot be published: " + "; ".join(hits))
-        labels = [pin_label(p) for p in context.pins]
-        acknowledged = _check_acknowledged(rid, mismatches, acknowledge_mismatches, labels)
+        changes = S.protection_changes(s, tl)  # a protection released, replaced or weakened since the session started
+        baseline = S.baseline_protections(s) or {}
+        labels = list(dict.fromkeys([pin_label(p) for p in context.pins] + [c["pin"] for c in changes]))
+        acknowledged, acknowledged_changes = _check_acknowledged(rid, mismatches, changes, acknowledge_mismatches, labels)
         data = _timeline_bytes(tl)
         sha = _sha256(data)
         superseded = _human_superseded(ws, data)
@@ -386,7 +406,8 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
             "base_stage": s.base_stage, "base_file": s.state["base_file"], "base_sha256": s.state["base_sha256"],
             "latest_stage": latest_name, "latest_stage_file": _rel(ws, latest_path), "latest_stage_sha256": latest_sha,
             "published_at": S._now(), "decisions": len(agent), "published": _rel(ws, copy), "transition_mismatches": mismatches,
-            "acknowledged_mismatches": acknowledged,
+            "acknowledged_mismatches": acknowledged, "acknowledged_protection_changes": acknowledged_changes,
+            "pin_protections_at_start": baseline,
             "unapplied_pins": [dict(e, status="not protected by this edit") for e in unapplied],
         }
         if moved is not None:
@@ -408,9 +429,11 @@ def publish(ws: Path, rev: Optional[str] = None, replace: bool = False, supersed
                  "published": record["published"], "replaced": record.get("replaced"), "superseded_human": bool(superseded),
                  "orphan_record": _rel(ws, orphan) if orphan is not None else None, "previous": previous, "recovered": recovered,
                  "transition_mismatches": len(mismatches), "acknowledged_mismatches": acknowledged,
+                 "acknowledged_protection_changes": [{k: c[k] for k in ("pin", "change", "original", "now", "transition")}
+                                                     for c in acknowledged_changes],
                  "superseded_human_sha256": human_sha, "unapplied_pins": [e["pin"] for e in unapplied]})
         S._atomic_write(record_path, text)
         left_out = stale_human(ws) if superseded else None
-        pins = _pin_states(ws, tl, context, unapplied, {m["pin"]: m for m in acknowledged})
+        pins = _pin_states(ws, tl, context, unapplied, {m["pin"]: m for m in acknowledged}, acknowledged_changes)
     return dict(record, replaced=_rel(ws, moved) if moved is not None else None, previous=previous, recovered=recovered,
                 human_left_out=left_out, pins=pins)

@@ -39,6 +39,10 @@ recorded run, `prototypes/editing_api/recorded-run-renderer-fix/proof.json` (90 
 - **Final refinements (2026-11-02):** unapplied pins fail closed, protected-transition mismatches never publish silently,
   `supersede_human` bound to the file, the decided behaviour in EDIT.md, and the acceptance kit split into two gates with a helper script.
   42 new tests in `tests/edit` and 1 in `tests/tui` ([below](#final-refinements-2026-11-02)).
+- **Safety review fixes (2026-11-02, second round):** protection changes during a session need the user's acknowledgement and
+  `pin_transition` needs `user_approved` to release or replace one; strict verification of the original workspace; relative sources;
+  `--keep-config` re-runs. 24 new tests ([below](#safety-review-fixes-2026-11-02-second-round)). Full suite: **1941 passed, 5 skipped,
+  1 deselected**; the 2 collection errors (no `torch`, no `toolz`) are unchanged and are not passes.
 - **Human gates: PENDING.** M3a's two ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md): A. Core Editorial, B. Editor Interoperability), M1, M2b,
   M2a and M2c.
 
@@ -174,6 +178,42 @@ supersede are refused; the record keeps `superseded_human_sha256`.
 | `tests/tui/test_edit.py` (1) | a pin made (`l`) or changed (`v`) while `WS/edits/session.json` exists says `an active edit session will not protect this pin until you re-run the pipeline and restart the session`; without a session it does not |
 | `test_publish.py`, `test_view.py`, `test_tools.py`, `test_edit_interchange.py`, `test_acceptance_proof.py` (changed) | the record's new fields, the pending pin's new wording and `protected: false`, the publish schema's new argument, `supersede_human` as a sha12 |
 
+## Safety review fixes (2026-11-02, second round)
+
+On top of the final refinements, from `2c631ae`, the review's findings were fixed with tests:
+
+**I1. Protection changes need the user's acknowledgement.** `start` records every pin's protection in `r000` (`pin_protections`, under the
+revision's hash; `restart` takes a new baseline). `publish` compares the pins stored now with it: a protection released, replaced,
+weakened or cleared since is refused like a mismatch until the user names the pin in the same `acknowledge_mismatches` list (one list for
+every pin whose protection the publish does not keep). The result, `edit_publish.json` (`acknowledged_protection_changes`,
+`pin_protections_at_start`) and the log record it; the pin reads `protection_changed` / `protection_change_acknowledged`, never held;
+`junctions` marks the line `PROTECTION-CHANGED` and the footer and the TUI say it is NOT kept. While a session exists, `pin_transition`
+refuses to release or replace an existing protection unless `user_approved` names exactly that pin; protecting an unprotected pin or
+restating a protection needs no approval. The mismatch repair offers `set_transition` first and leaves the protection to the user.
+
+**I2. Strict workspace verification.** `tools/m3a_acceptance.py snapshot --all` / `verify --strict` record every file and directory
+(path, size, sha256, mtime; mtime alone never fails), with no exemption; files above 256 MiB are hashed from size and first and last MiB
+and listed. S5, A12 and B7 use it for the original workspace; canonical mode stays for the working copy.
+
+**I3. Relative sources.** `tools/m3a_acceptance.py source WS` resolves a relative source (from the current directory, and from the
+directory the run was made in when `config.json`'s `workspace` says it); S4 writes the absolute path into the **copy's** config.
+`rerun_command` is absolute when it can be (and says so when it cannot); a missing source makes `snapshot`/`verify` exit 1; `start`'s
+refusal names the relative path and the current directory.
+
+**Minor.** The re-run command is `PYTHONPATH=<repo> python -m matchcut.pipeline refine <abs source> -w <abs WS> --keep-config`; the new
+`--keep-config` runs with `WS/config.json` as it is and never rewrites it (the default CLI behaviour is unchanged). Refusal actions that
+re-run the pipeline or restart say "ask the user to"; a `released` pin on a human base offers clearing it (`x`) and says a re-run leaves
+`human.json` stale; `inspect` sets `held: false` (with `clips_held`) on mismatched and changed pins and the `junctions` list line ends
+`TRANSITION-MISMATCH`; the TUI no longer adds the session note when an applied pin is locked again at the same points; the procedure
+stops if `WS` exists, checks ffmpeg (`brew install ffmpeg`), picks B6's snapshot by name, and says to run from the repository root.
+
+| tests | what they prove |
+|---|---|
+| `tests/edit/test_protection_changes.py` (18) | the reviewer's m2 (release) and m3 (re-protect the current cut) through the API and the CLI: `pin_transition` refused without `user_approved`, a wrong label refused, approved; publish refused, an incomplete list refused, acknowledged and recorded in result, record and log; never `held` in inspect, publish, the `junctions` line and footer, the TUI note; a pin cleared during the session; restoring the protection publishes; the baseline under its hash and across `restart`; a session without a baseline refused; protecting an unprotected pin and restating need no approval; the tool's description and schema; the repair's order; the re-run command (absolute, `--keep-config`, runnable from any directory), relative sources found or refused with path and directory; "ask the user to" in the actions; the `released` action on a human base; the TUI note on an unchanged, applied pin |
+| `tests/edit/test_m3a_acceptance_tool.py` (5 more) | strict mode catches each change of the reviewer's probe (a session, a publish, `config.json`, `probe.json`, `shots.json`, a new `exports/`, a removed pass file, `.stage.lock`) that canonical mode lets through; mtime alone is a note, a same-size content change fails; quick hashing of large files and `--full`; a missing (relative) source an error in `snapshot`, `source` and `verify`; a relative source resolved from the run's directory |
+| `tests/pipeline/test_config.py` (1) | `--keep-config` keeps `config.json` byte for byte (render off, proxy, force, relative source kept), refuses options that change the config and needs `-w`; the default behaviour unchanged |
+| `test_pin_safety.py`, `test_publish.py`, `test_publish_review.py`, `test_view.py` (changed) | the new wording ("ask the user to", the `--keep-config` command run as a subprocess from another directory with `config.json` unchanged), the record's new fields, `user_approved` where a test models the user's decision, `held: false` on a mismatched pin, the `TRANSITION-MISMATCH` line |
+
 ## Commands and results
 
 | command | result | time |
@@ -188,6 +228,13 @@ supersede are refused; the record keeps `superseded_human_sha256`.
 | `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | **1917 passed, 5 skipped, 1 deselected** (snapshots: 5 passed); `tests/edit` has 816 tests (811 passed, 5 skipped) | 945 s |
 | `python -m pytest tests -q` | interrupted: 2 errors during collection (`tests/test_data.py`: no `torch`; `tests/test_experiments.py`: no `toolz`), 0 tests run: **collection errors, not passes** | 6 s |
 | `MATCHCUT_PERF=1 python -m pytest tests/pipeline/test_render_perf.py -q -s` | 1 passed: `100 x 0.4 s clips at 1080p: 34.3 s, peak 3020 MB` (budget 60 s) | 46 s |
+
+| **After the safety review fixes (2026-11-02, second round, from `2c631ae`):** | | |
+| `python -m pytest tests/edit/test_protection_changes.py tests/edit/test_m3a_acceptance_tool.py tests/pipeline/test_config.py -q` | 29 passed | 17 s |
+| `python -m pytest tests/edit tests/tui tests/interchange tests/pipeline -q -k "not test_render_perf"` | 1720 passed, 5 skipped, 1 deselected (snapshots: 5 passed) | 881 s |
+| `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | **1941 passed, 5 skipped, 1 deselected** (snapshots: 5 passed); `tests/edit` has 839 tests (834 passed, 5 skipped) | 984 s |
+| `python -m pytest tests -q` | interrupted: 2 errors during collection (`tests/test_data.py`: no `torch`; `tests/test_experiments.py`: no `toolz`), 0 tests run: **collection errors, not passes** | 2 s |
+| the reviewer's probes (`probe4.py` m2/m3, `probe_verify.sh` in strict mode, `probe5.py`) and the new procedure followed on a copy of a workspace with a relative source | m2/m3: the agent's release and re-protect refused; with the user's approval, publish refuses until acknowledged, then records the change and never says held; strict verify names all 21 changes on the tampered original (canonical mode still reads it unchanged, as documented); the relative-source workspace runs S2 to B7 from the repository root, `config.json` unchanged by `--keep-config`, the original untouched (strict) | |
 
 The 5 skipped tests, in `tests/edit` and in the full suite, are the MCP checks. The 1 deselected is the perf case (run on its own, below);
 the 30 `imperfect` property cases run and pass in the full suite.
