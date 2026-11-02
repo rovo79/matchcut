@@ -36,7 +36,11 @@ recorded run, `prototypes/editing_api/recorded-run-renderer-fix/proof.json` (90 
   failures of M3a.
 - **Performance case** (`MATCHCUT_PERF=1`): 100 x 0.4 s clips at 1080p rendered in **34.3 s**, peak 3020 MB, against a budget of 60 s
   (passed; the reviewer's recorded figure was 28.6 s on another machine).
-- **Human gates: PENDING.** M3a ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md)), M1, M2b, M2a and M2c.
+- **Final refinements (2026-11-02):** unapplied pins fail closed, protected-transition mismatches never publish silently,
+  `supersede_human` bound to the file, the decided behaviour in EDIT.md, and the acceptance kit split into two gates with a helper script.
+  42 new tests in `tests/edit` and 1 in `tests/tui` ([below](#final-refinements-2026-11-02)).
+- **Human gates: PENDING.** M3a's two ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md): A. Core Editorial, B. Editor Interoperability), M1, M2b,
+  M2a and M2c.
 
 ## Environment
 
@@ -139,6 +143,37 @@ No other prototype check falls short. In particular every refusal, the transitio
 apply re-validation, the moved head, branches, the renders (exact frame counts, audio within 2 frames of video, exact source frames for
 every decisive clip), staleness and byte-identical determinism hold as the prototype recorded them.
 
+## Final refinements (2026-11-02)
+
+On top of the report above (from `4702242`), these changes were made with their tests (TDD where practical). The prototype mapping is
+unchanged: the P54 refusal now reads `refused: the operations change nothing: the cut would be identical to the head ...` (the test
+checks the new, clearer prefix) and P73/P74 publish with `supersede_human` set to the human.json's sha12.
+
+**1. Pins the session's base does not hold fail closed** (`rules.unapplied_pins`, `rules.unapplied_problems`). A pin stored now that
+`r000` does not hold is `pending` (no pipeline decision for it), `not_placed` (`pin_unplaced`) or `released` (the base no longer holds
+it). `start`, `inspect` and `log` list it in `unapplied_pins` with the exact re-run command. The **affected rule**, judged on the
+proposal's result (so an indirect change counts): a clip of one of the pin's two shots removed, added or changed in any way, or a junction
+with a neighbour of those shots separated, joined or given another transition. A clip of another shot may still change, including the
+edge it shares with such a clip. Proposals, `apply` and `preview` (re-validated) and `publish` (from `r000`, so a pin made after `apply`
+counts) all apply it.
+
+**2. A protected-transition mismatch never publishes silently.** Proposals are unchanged; `publish` refuses with the exact
+`set_transition` repair or `acknowledge_mismatches`, which must name every mismatching pin exactly. Acknowledged mismatches are recorded
+in the result, `edit_publish.json` and the log; the pin reads `mismatch_acknowledged` in `inspect` and the publish result, and the
+`junctions` footer and the TUI say the protected transition is NOT kept.
+
+**3. `supersede_human` is the sha12 of the human.json to supersede**; `true`, a wrong or stale value and a value with nothing to
+supersede are refused; the record keeps `superseded_human_sha256`.
+
+| tests | what they prove |
+|---|---|
+| `tests/edit/test_pin_safety.py` (37) | the 14 refused proposals at a pending pin (every operation type, and 5 indirect changes: a neighbour removed, a transition named by number, a clip moved between, another piece of a pinned shot, an insert before a pinned clip), each refusal naming the pin, what the edit changes and the exact command; 5 edits elsewhere allowed; `start`/`inspect`/`log` and the CLI (exit 0 lists, exit 1 refuses with the JSON); a pin stored after a proposal (apply refuses, re-proposing fails closed); a pin added after apply makes publish refuse (API and CLI exit 1); an untouched revision publishes with the pin `not_protected` in the result, record and log; the not-placed variant and its own wording; **the route the refusal names, end to end**: the mock pipeline's workspace, a pin made after the run refused, the exact `rerun_command` run as a subprocess, `start {"restart": true}` through the CLI, the pin held, protecting, and published `held`; a mismatch refused at publish (API and CLI), repaired and published, acknowledged and recorded, unrelated proposals accepted; 4 refused acknowledgement lists (empty, a duplicate, an unknown pin beside the right one, an unknown pin instead of it) and the acknowledgement of a pin that is not mismatching (a repaired one, an unapplied one); the held wording never used for a mismatched pin (inspect, publish, `junctions`, the TUI's note and badge); `supersede_human` bound to the file (refusal shows the sha12, `true` refused with the new form through the API and the CLI, a wrong value, a malformed one as a usage error, a stale one, one with nothing to supersede); the no-op refusal's wording |
+| `tests/edit/test_publish_review.py` (changed) | the mismatch tests rewritten: an inherited mismatch refused with both ways out; an acknowledged one recorded in result, record and log, `mismatch_acknowledged` in publish and inspect; the human-stage refusals with the sha12 |
+| `tests/edit/test_m3a_acceptance_tool.py` (2) | `tools/m3a_acceptance.py` around a session and a publish (verify exit 0 with the edit files listed apart; report with provenance, unapplied pins, mismatches); a changed and a new canonical file named (exit 1); a snapshot refused inside the workspace; the workspace's files byte- and mtime-identical after every command |
+| `tests/edit/test_docs.py` (changed, 3 more) | the two gates each PENDING with their own pass/fail and results; every numbered step marked [auto] or [human]; the B-is-not-A and never-pass-a-human-gate statements; EDIT.md and the kit say an agent never passes `acknowledge_mismatches` or `supersede_human` without explicit approval; EDIT.md states the six decided behaviours |
+| `tests/tui/test_edit.py` (1) | a pin made (`l`) or changed (`v`) while `WS/edits/session.json` exists says `an active edit session will not protect this pin until you re-run the pipeline and restart the session`; without a session it does not |
+| `test_publish.py`, `test_view.py`, `test_tools.py`, `test_edit_interchange.py`, `test_acceptance_proof.py` (changed) | the record's new fields, the pending pin's new wording and `protected: false`, the publish schema's new argument, `supersede_human` as a sha12 |
+
 ## Commands and results
 
 | command | result | time |
@@ -147,6 +182,11 @@ every decisive clip), staleness and byte-identical determinism hold as the proto
 | `python -m pytest tests/edit -q` | 769 passed, 5 skipped | 245 s |
 | `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | 1874 passed, 5 skipped, 1 deselected (snapshots: 5 passed) | 833 s |
 | `python -m pytest tests -q` | interrupted: 2 errors during collection, 0 tests run | 2 s |
+| **After the final refinements (2026-11-02):** | | |
+| `python -m pytest tests/edit/test_pin_safety.py tests/edit/test_m3a_acceptance_tool.py -q` | 39 passed | 25 s |
+| `python -m pytest tests/edit tests/tui tests/interchange tests/pipeline/test_editorial.py tests/pipeline/test_junctions.py -q` | 1512 passed, 5 skipped (run before `test_m3a_acceptance_tool.py` and the 3 new `test_docs.py` cases were added; those 5 pass on their own and in the full suite) | 641 s |
+| `python -m pytest tests -q -p no:cacheprovider --ignore=tests/test_data.py --ignore=tests/test_experiments.py --deselect tests/pipeline/test_render_perf.py` | **1917 passed, 5 skipped, 1 deselected** (snapshots: 5 passed); `tests/edit` has 816 tests (811 passed, 5 skipped) | 945 s |
+| `python -m pytest tests -q` | interrupted: 2 errors during collection (`tests/test_data.py`: no `torch`; `tests/test_experiments.py`: no `toolz`), 0 tests run: **collection errors, not passes** | 6 s |
 | `MATCHCUT_PERF=1 python -m pytest tests/pipeline/test_render_perf.py -q -s` | 1 passed: `100 x 0.4 s clips at 1080p: 34.3 s, peak 3020 MB` (budget 60 s) | 46 s |
 
 The 5 skipped tests, in `tests/edit` and in the full suite, are the MCP checks. The 1 deselected is the perf case (run on its own, below);
@@ -172,6 +212,7 @@ neither passed nor failed.
 
 ## Human acceptance
 
-Automated verification and human acceptance are separate. The **M3a human acceptance gate ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md)) is
-PENDING**: no agent session has yet edited a real workspace through the CLI only with a person watching its previews, and no `edit` export
-has been opened in an editor. The **M1, M2b, M2a and M2c human gates are also PENDING**.
+Automated verification and human acceptance are separate. M3a has **two human gates, both PENDING** ([M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md)):
+**A. Core Editorial Acceptance** (no agent session has yet edited a real workspace through the CLI only to a real brief, with the user
+watching the original and revised films) and **B. Editor Interoperability Acceptance** (no `edit` export has been opened in an editor
+and brought back). Neither passes on these automated results. The **M1, M2b, M2a and M2c human gates are also PENDING**.

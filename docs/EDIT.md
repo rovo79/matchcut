@@ -5,8 +5,8 @@ every change is proposed, checked against every rule, previewed if you like, and
 finished revision is **published** as the workspace's `edit` stage, which the junction tools, the TUI and the editor exports
 (`matchcut.interchange`) all treat like any other stage.
 
-Design: [superpowers/specs/2026-11-01-m3a-edit-core.md](superpowers/specs/2026-11-01-m3a-edit-core.md). The human gate is in
-[M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md) and is **PENDING**.
+Design: [superpowers/specs/2026-11-01-m3a-edit-core.md](superpowers/specs/2026-11-01-m3a-edit-core.md). The two human gates are in
+[M3A-ACCEPTANCE.md](M3A-ACCEPTANCE.md): **A. Core Editorial Acceptance** and **B. Editor Interoperability Acceptance**, both **PENDING**.
 
 - [The model](#the-model)
 - [The CLI](#the-cli): [commands](#commands), [operations](#operations), [guards](#guards), [exit codes](#exit-codes-and-errors)
