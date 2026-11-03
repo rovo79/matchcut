@@ -1,0 +1,132 @@
+{
+ "env": {
+  "app": "$FILMCRAFT_TARGET/filmcraft",
+  "display": ":97",
+  "port": 9876
+ },
+ "timings": {
+  "app_start_to_control_port": 0.2518,
+  "control_import_otio": 0.3732
+ },
+ "steps": [
+  {
+   "step": "C control channel",
+   "check": "app starts and opens the control port",
+   "outcome": "Passed",
+   "detail": "exit None; see app.log",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "a wrong token is refused",
+   "outcome": "Passed",
+   "detail": "control authentication failed; closing the connection",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "engine.commands",
+   "outcome": "Passed",
+   "detail": "711 commands",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "engine.execute file.import final.otio",
+   "outcome": "Passed",
+   "detail": "{\"documents\": [{\"format\": \"OpenTimelineIO\", \"linkedMedia\": 2, \"offlineMedia\": [], \"report\": [], \"sequences\": [900011]}], \"errors\": [], \"items\": [], \"sequences\": [900011]}",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "sequence.inspect (same engine as headless)",
+   "outcome": "Passed",
+   "detail": "V1 starts [0, 50, 67, 110, 151], markers ['J1 s0->s1', 'J2 s1->s3', 'J3 s3->s6', 'J4 s6->s7']",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "playhead.set to marker J2",
+   "outcome": "Passed",
+   "detail": "playhead frame 67; ui.inspect keys ['activeSequence', 'dialog', 'elements', 'fps', 'input', 'keyboardFocus', 'pixelsPerPoint', 'playback', 'playhead', 'selection', 'sourcePlayback', 'ui']",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "ui.timeline.locate c003's In edge",
+   "outcome": "Passed",
+   "detail": "{\"x\": 1094.827880859375, \"y\": 765.520263671875}",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "ui.screenshot (window, Timeline, Program)",
+   "outcome": "Passed",
+   "detail": "{\"window\": [true, 0.76, 7363474], \"timeline\": [true, 0.49, 1608737], \"program\": [true, 0.56, 1322188]}",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "engine.execute timeline.trim (ripple, c003 in +5f)",
+   "outcome": "Passed",
+   "detail": "{\"delta\": 50803200000}",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "engine.execute file.exportInterchange otio",
+   "outcome": "Passed",
+   "detail": "app_trimmed.otio",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "matchcut import of the app's OTIO",
+   "outcome": "Passed",
+   "detail": "['human trimmed c003: in +5f']",
+   "data": null
+  },
+  {
+   "step": "B MCP bridge",
+   "check": "tools/list over the bridge",
+   "outcome": "Passed",
+   "detail": "17 tools",
+   "data": null
+  },
+  {
+   "step": "B MCP bridge",
+   "check": "sequence_inspect sees the app's trimmed sequence",
+   "outcome": "Passed",
+   "detail": "[0, 50, 67, 105, 146]",
+   "data": null
+  },
+  {
+   "step": "B MCP bridge",
+   "check": "render_frame (bridge: a Program monitor screenshot)",
+   "outcome": "Passed",
+   "detail": "bridge_render_frame.png",
+   "data": null
+  },
+  {
+   "step": "B MCP bridge",
+   "check": "ui_screenshot Timeline",
+   "outcome": "Passed",
+   "detail": "bridge_timeline.png",
+   "data": null
+  },
+  {
+   "step": "B MCP bridge",
+   "check": "command_run edit.undo through the bridge",
+   "outcome": "Passed",
+   "detail": "{\"undone\": \"Ripple Trim\"}",
+   "data": null
+  },
+  {
+   "step": "C control channel",
+   "check": "app.quit closes the app",
+   "outcome": "Passed",
+   "detail": "exit status 0",
+   "data": null
+  }
+ ]
+}
