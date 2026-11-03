@@ -709,3 +709,137 @@ def test_the_identity_of_the_selection_ignores_a_stage_file_rewritten_since_the_
             assert ident.pair == (j.out_shot, j.in_shot)
 
     run_async(body())
+
+
+def test_a_published_edit_stage_is_listed_after_final_and_a_stale_one_is_left_out_with_why(mock_workspace, tmp_path):
+    """M3a: an agent's published edit session is the stage after final; once stale it is left out (never deleted) and the header says why."""
+    from matchcut.edit import publish, session
+    from matchcut.pipeline.junctions import stale_edit
+
+    ws = own_copy(mock_workspace, tmp_path)
+    session.start(ws)
+    longest = max(Timeline.load(ws / "final.json").clips, key=lambda c: c.duration).id
+    for ops in ([{"op": "trim", "clip": longest, "edge": "out", "frames": -1}], [{"op": "trim", "clip": longest, "edge": "in", "frames": 1}],
+                [{"op": "slip", "clip": longest, "frames": -1}], [{"op": "slip", "clip": longest, "frames": 1}]):
+        try:
+            p = session.propose(ws, ops)
+            break
+        except session.Refused:
+            continue
+    session.apply(ws, p["proposal"])
+    publish.publish(ws)
+    assert [s for s, _ in load_stage_timelines(ws)][-2:] == ["final", "edit"]
+
+    async def listed():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert view.stages[-2:] == ["final", "edit"] and view.current_stage() == "edit"
+            assert "stage edit" in str(app.query_one("#edit-header").content)
+
+    run_async(listed())
+    (ws / "edit_publish.json").write_text("{}")
+    message = stale_edit(ws)
+    assert message and message.startswith("edit.json is stale: ") and (ws / "edit.json").exists()
+
+    async def left_out():
+        app = app_for(ws)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            assert "edit" not in view.stages and view.current_stage() == "final"
+            assert message in str(app.query_one("#edit-header").content)
+
+    run_async(left_out())
+
+
+def test_the_tui_watches_the_edit_stage_files_even_while_it_is_not_listed(mock_workspace):
+    from matchcut.tui.state import RunState
+    cfg = PipelineConfig.load(mock_workspace / "config.json")
+    cfg.workspace = str(mock_workspace)
+    files = RunState(cfg).timeline_files()
+    assert mock_workspace / "edit.json" in files and mock_workspace / "edit_publish.json" in files
+
+
+# -- a transition protection survives the TUI's l / v ---------------------------------------------
+def test_locking_or_reverting_again_keeps_the_transition_protection_and_clearing_says_it_is_released(mock_workspace, tmp_path, monkeypatch):
+    """Review fix: l (lock) and v (revert) replace the pin's cut points but keep the protection the edit CLI's pin_transition set (it is about the
+    junction's transition, not its cut points: a revert that moves them keeps it too); x removes the pin and says the protection goes with it."""
+    from matchcut.edit.view import pin_transition
+
+    ws = own_copy(mock_workspace, tmp_path)
+    notes = []
+
+    async def body():
+        app = app_for(ws)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            j = view.current_junction()
+            label = f"s{j.out_shot}->s{j.in_shot}"
+            await pilot.press("l")
+            assert "protected" not in notes[-1]
+            held = {"kind": "dissolve", "frames": 6}
+            assert pin_transition(ws, pin=label, hold=True, kind="dissolve", frames=6)["held_transition"] == held
+
+            await pilot.press("l")  # lock again
+            await pilot.pause()
+            pin = PinStore(ws).get(j.out_shot, j.in_shot)
+            assert (pin.origin, pin.hold_transition, pin.held_transition) == ("locked", True, held)
+            assert "its transition stays protected (dissolve of 6 frames)" in notes[-1]
+
+            await pilot.press("v")  # revert: back to the first cut's points, the protection kept
+            await pilot.pause()
+            j = view.current_junction()
+            pin = PinStore(ws).get(j.out_shot, j.in_shot)
+            assert (pin.origin, pin.hold_transition, pin.held_transition) == ("reverted", True, held)
+            assert (pin.out_time, pin.in_time) == (round(j.baseline.out_time, 3), round(j.baseline.in_time, 3))
+            assert "(reverted)" in notes[-1] and "its transition stays protected (dissolve of 6 frames)" in notes[-1]
+
+            await pilot.press("x")  # clearing the pin releases the protection, and says so
+            await pilot.pause()
+            assert PinStore(ws).get(j.out_shot, j.in_shot) is None
+            assert notes[-1].startswith("pin cleared and its transition protection (dissolve of 6 frames) is released")
+
+            await pilot.press("l")  # a new pin is unprotected
+            await pilot.pause()
+            assert not PinStore(ws).get(j.out_shot, j.in_shot).hold_transition and "protected" not in notes[-1]
+
+    run_async(body())
+
+
+# -- a pin made while an edit session exists -------------------------------------------------------
+def test_a_pin_made_while_an_edit_session_exists_says_the_session_will_not_protect_it_yet(mock_workspace, tmp_path, monkeypatch):
+    """Requirement A: the session holds only the pins its base stage holds, so a pin made or changed in the TUI while WS/edits/session.json
+    exists says the session will not protect it until the pipeline is re-run and the session restarted; without a session it does not."""
+    from matchcut.edit import session
+    from matchcut.tui.views.edit import EDIT_SESSION_NOTE
+
+    ws = own_copy(mock_workspace, tmp_path)
+    notes = []
+    assert EDIT_SESSION_NOTE == ("an active edit session will not protect this pin until you re-run the pipeline and restart the session (it "
+                                 "refuses edits to these shots until then)")
+
+    async def body():
+        app = app_for(ws)
+        monkeypatch.setattr(app, "notify", lambda message, **kw: notes.append(message))
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.press("4")
+            view = app.query_one(EditView)
+            await wait_for(pilot, lambda: bool(view.junctions))
+            await pilot.press("l")
+            await pilot.pause()
+            assert "edit session" not in notes[-1]  # no session yet
+            session.start(ws)
+            for key in ("l", "v"):  # made again, or changed (reverted)
+                await pilot.press(key)
+                await pilot.pause()
+                assert notes[-1].endswith(EDIT_SESSION_NOTE), notes[-1]
+                assert "an active edit session will not protect this pin until you re-run the pipeline and restart the session" in notes[-1]
+
+    run_async(body())

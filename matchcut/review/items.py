@@ -20,7 +20,7 @@ from ..pipeline.media import MediaError, MediaInfo, probe
 from ..pipeline.render import snap_to_frames
 from ..pipeline.shots import load_shots
 from ..pipeline.timeline import Timeline
-from .render import _discard, _ffmpeg_error, _tmp, render_ab, render_window
+from .render import _discard, _ffmpeg_error, _tmp, held, render_ab, render_window
 from .window import ReviewError, Window, needs_render, review_window, sub_timeline, window_edl
 
 REVIEW_VERSION = 2  # 2: rendered windows come from the frame-snapped timeline and their music fades only at the cut's end
@@ -162,12 +162,13 @@ def _item(
 
 
 def _sweep_tmp(tmp_dir: Path, max_age: float = 3600.0) -> None:
-    """Remove what a killed render left in ``<review>/.tmp`` more than ``max_age`` seconds ago (best effort)."""
+    """Remove what a killed render left in ``<review>/.tmp`` more than ``max_age`` seconds ago (best effort); a file a writer still holds
+    locked (``render.held``) is never removed."""
     try:
         now = time.time()
         for f in tmp_dir.iterdir():
             try:
-                if f.is_file() and now - f.stat().st_mtime > max_age:
+                if f.is_file() and now - f.stat().st_mtime > max_age and not held(f):
                     f.unlink()
             except OSError:
                 pass

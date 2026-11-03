@@ -23,11 +23,13 @@ python -m matchcut.pipeline.cli export WORKSPACE --stage final --format otio --f
 python -m matchcut.pipeline.cli export WORKSPACE --resolve-script      # also open_in_resolve.py (Resolve Studio, see below)
 python -m matchcut.pipeline.cli import WORKSPACE FILE                  # FILE: the .otio, .fcpxml or .edl an editor saved
 python -m matchcut.pipeline.cli import WORKSPACE FILE --format edl --stage roughcut
-python -m matchcut.pipeline.cli junctions WORKSPACE                    # the human stage is listed after final
+python -m matchcut.pipeline.cli export WORKSPACE --stage edit         # an agent's published edit (docs/EDIT.md): edit.otio, edit.edl, ...
+python -m matchcut.pipeline.cli import WORKSPACE FILE --stage edit --base edit-0123456789ab   # name the exact base (see "The edit stage")
+python -m matchcut.pipeline.cli junctions WORKSPACE                    # stages: the canonical ones, then edit (when fresh), then human
 ```
 
 `--stage` is repeatable and names any canonical stage (`roughcut`, a pass such as
-`polish`, `final`); `--format` is `otio`, `fcpxml` or `edl`. Both commands print one
+`polish`, `final`) or `edit` (an agent's published edit session, never exported by default); `--format` is `otio`, `fcpxml` or `edl`. Both commands print one
 line per file or decision and exit 1 with a one-line message on stderr for any
 failure (`no stage X in WS`, `unknown format aaf: use otio, fcpxml or edl`,
 `source footage not found: ...`). Example outputs are in
@@ -274,10 +276,10 @@ import with one line (`invalid EDL: event 001 is shorter than its transitions`).
   The snapshot is looked up in `WORKSPACE/exports/.stages/`, then in `.stages/` next to the imported file (an export made with `--out DIR` keeps it in `DIR/.stages/`; save the editor's file there or copy the folder into `WORKSPACE/exports/`). A copy
   that does not hash to the fingerprint is not used; a good copy in the second place is found even if the first holds a damaged one.
 
-The result is the **human stage**: `human.json` (a stage timeline, listed after `final`
+The result is the **human stage**: `human.json` (a stage timeline, listed after `final`, and after `edit` when there is a fresh one,
 in `junctions`, the TUI's Edit view and the review package) and `human_import.json` (what was read and
-the hashes it was compared with). Its history is the latest canonical stage's history plus one `human`
-decision per change:
+the hashes it was compared with). Its history is the latest canonical stage's history (the edit stage's, when one is listed: see
+[The edit stage](#the-edit-stage)) plus one `human` decision per change:
 
 | decision | meaning |
 |---|---|
@@ -332,6 +334,66 @@ The canonical stage files and `provenance.json` are only read. Rules worth knowi
   report lists, and not a change by the editor.
 - **Round trip, not authority.** The editor's file is a proposal read back as decisions; the next
   pipeline run does not use it. Applying human decisions to a new cut is not implemented.
+
+## The edit stage
+
+An agent's published edit session (`python -m matchcut.edit WS publish`, see [EDIT.md](EDIT.md)) is the stage `edit`: `edit.json`, with its
+record `edit_publish.json`. The stage order is the canonical stages, then `edit` while it is fresh, then `human` while it is fresh
+(`junctions.stale_edit`: the edit stage is stale once its record is missing or describes another file, or its base stage file or the latest
+canonical stage file changed; a stale `edit.json` is left out, never deleted).
+
+**Export.** `export --stage edit` writes `edit.otio`, the `edit` project of `matchcut.fcpxml` and `edit.edl` like any stage, each with the
+stage fingerprint (the sha256 of `edit.json`), and keeps the snapshot `exports/.stages/edit-<12 hex>.json`; the fidelity report and
+`provenance.json` cover it like any stage (its earlier records are kept while `edit.json` is unchanged). It is not in the default stages
+(`roughcut` and `final`), just as `human` is never exported. A stale or missing edit stage is refused with its reason.
+
+**Import.** Once a workspace has an edit stage (an `edit.json`, or an `edit-*.json` snapshot), matchcut never assumes which stage an
+editor's file came from:
+
+- **A fingerprint** names the exact version: the file is diffed against the stage file when it still has that sha256, else against that
+  snapshot, even after `edit.json` was published again (note: `<file> was exported from an earlier edit (edit.json was published again
+  since): ...`).
+- **An unresolvable fingerprint** (no stage file and no snapshot has it) is refused, never guessed:
+  `<file> was exported from an edit stage (sha <12 hex>) that matches no snapshot (edit-<12 hex>.json is not in exports/.stages or <dir>/.stages)
+  and is not edit.json now: matchcut does not guess the base; restore the snapshot, or name the base with --stage and --base SNAPSHOT (a file in
+  exports/.stages)`. For a canonical stage the existing missing/damaged-snapshot messages apply.
+- **No fingerprint** (an EDL whose `* MATCHCUT` comment lines were deleted, as an editor that drops comments does; an application that
+  dropped the metadata) is refused. An EDL's stage and fingerprint are its `* MATCHCUT STAGE` and `* MATCHCUT STAGE_SHA256` comments, not
+  its title: renaming the title alone still imports. EDL re-exports from real editors usually drop the comments, so once a workspace has an
+  edit stage they will usually need `--stage` and `--base`:
+  `<file> carries no stage fingerprint, and this workspace has an edit stage as well as final: the base is ambiguous; name the base with
+  --stage and --base SNAPSHOT (a file in exports/.stages)`.
+- **An ambiguous base** (the file names `edit` but its fingerprint is a `final` file's, or the reverse) is refused:
+  `<file> names stage edit, but its fingerprint (sha <12 hex>) is that of stage final: the base is ambiguous; ...`. `--stage` alone does not
+  override a fingerprint.
+- **`--stage S --base SNAPSHOT`** names the base explicitly: `SNAPSHOT` is a path, or a snapshot's name in `exports/.stages` (with or without
+  `.json`, e.g. `edit-0123456789ab`); it must be a stage timeline of stage `S`. The file's own word and fingerprint are then only noted.
+  `--base` needs `--stage`.
+
+In a workspace that has never had an edit stage (no `edit.json`, no `edit-*.json` in its `exports/.stages`), imports behave exactly as
+before: no `--base` is needed, and a title such as `Interview - edit` names no stage. Once any edit stage or edit snapshot exists, a
+fingerprint-less file needs `--stage` and `--base`. `--base NAME` (a snapshot's name, `<stage>-<12 hex>[.json]`) is looked up in
+`exports/.stages` first; the path recorded in `human_import.json` is absolute; a snapshot whose content does not hash to the 12 hex digits in
+its name is refused as damaged. Any other relative `--base` is looked for in the current directory, then in `exports/.stages`. When the
+workspace's only edit stage is stale, the refusal of a fingerprint-less file says so and gives a working example
+(`--stage final --base WS/final.json`, with the workspace's real path). `import` holds the workspace's stage lock (`WS/.stage.lock`)
+exclusively while it reads `edit.json` and writes the human stage, a publish holds it exclusively while it writes the edit stage, and an
+export holds it shared while it reads the stages; each waits at most 30 seconds (`STAGE_LOCK_TIMEOUT`), then refuses: `another import or
+publish (or an export) is running`. Export never takes an edit session's lock, so none of them can deadlock. `WS/.stage.lock` is an empty
+file the first of them makes and nothing removes. When it cannot be made or opened (a read-only workspace exported with `--out`
+elsewhere), an export or import of a workspace with no `edit.json` and no `edits/` goes ahead without the lock, since no publish can race
+it; one with an edit stage or an edit session is refused (`cannot open the stage lock ...: make the workspace writable and try again`).
+
+**The human stage made from an edit import** records `stage: "edit"`, `stage_file: "edit.json"` and its sha256 now, the snapshot used
+(`base_snapshot`, `base_snapshot_sha256`), the latest canonical stage and its sha256, and `history_stage: "edit"` with the sha256 of
+`edit.json`: the human stage is listed after the edit stage and **its history continues the edit stage's** (the canonical history, then
+the `agent` decisions, then the `human` ones). It is stale when `edit.json` changes (a new publish), when the latest canonical stage changes,
+or when the edit stage is stale. The same holds for a file imported against a canonical stage while a fresh edit stage exists (its history
+continues the edit stage's; a note says the agent's changes show as differences). Conversely, a `human.json` imported before an `edit.json`
+was published does not continue the edit stage's history, so publishing would make it stale: `publish` refuses unless it is given
+`supersede_human` set to the sha12 of that very `human.json` (given only with the user's explicit approval; `true` is refused), and then
+reports `human_left_out` (the human stage is left out, never deleted or rewritten; re-import the editor's
+file to bring it back).
 
 ## DaVinci Resolve
 

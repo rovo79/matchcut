@@ -12,6 +12,11 @@ badge ask the editor to check it. Selection reads the rough cut's ranges as they
 them), one clip is moved next to the other, never splitting or reordering the
 beats and never moving a clip another pin holds; pins already in place are
 applied before any pin that needs a move.
+
+A pin may also protect its junction's transition (``hold_transition`` with the ``held_transition`` it holds, optional fields set and
+cleared by the edit CLI's ``pin_transition``; older pins read as unprotected; the TUI's lock and revert keep them).  **The pipeline
+engine ignores these fields**: applying pins, the passes and the renderer treat a protected pin exactly like any other, so a pipeline run may still change the transition at a
+protected junction.  Only an edit session (``matchcut.edit``) refuses a proposal that changes a protected transition.
 """
 from __future__ import annotations
 
@@ -38,18 +43,35 @@ class Pin:
     note: str = ""
     out_origin: str = ""  # clip_origin of the outgoing / incoming clip when the pin was taken; "" for pins that predate it
     in_origin: str = ""
+    # The junction's transition is protected too (set by the edit CLI): ``held_transition`` is {"kind", "frames"}.  Only the edit
+    # package (``matchcut.edit``) honours it; the pipeline engine ignores it (see the module docstring).  Pins without it are unprotected.
+    hold_transition: bool = False
+    held_transition: Optional[dict] = None
 
     @property
     def key(self) -> Tuple[int, int]:
         return (self.out_shot, self.in_shot)
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not self.hold_transition and self.held_transition is None:  # an unprotected pin is written as before the fields existed
+            del d["hold_transition"], d["held_transition"]
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "Pin":
         return cls(int(d["out_shot"]), int(d["in_shot"]), float(d["out_time"]), float(d["in_time"]), str(d.get("origin", "locked")), str(d.get("note", "")),
-                   str(d.get("out_origin", "")), str(d.get("in_origin", "")))
+                   str(d.get("out_origin", "")), str(d.get("in_origin", "")), d.get("hold_transition") is True, _held(d.get("held_transition")))
+
+
+def _held(value: object) -> Optional[dict]:
+    """A stored ``held_transition`` as {"kind": str, "frames": int}; None when absent or malformed (the pin itself is kept)."""
+    if not isinstance(value, dict):
+        return None
+    frames = value.get("frames", 0)
+    if isinstance(frames, bool) or not isinstance(frames, int):
+        return None
+    return {"kind": str(value.get("kind", "cut")), "frames": frames}
 
 
 class PinStore:
@@ -378,6 +400,31 @@ def pin_states(tl: Optional[Timeline], pins: Sequence[Pin], stage: str = "") -> 
         else:
             out.append(PinState(pin, "applied"))
     return out
+
+
+def _transition_words(kind: str, frames: int) -> str:
+    return "cut" if kind == "cut" or frames <= 0 else f"{kind.replace('_', ' ')} of {frames} frames"
+
+
+def protected_transition_note(tl: Timeline, pin: Pin, acknowledged: bool = False) -> str:
+    """When ``pin`` protects its junction's transition (``hold_transition`` with a ``held_transition``) and ``tl`` holds the pin's two clips
+    together with another transition there, one phrase saying the protection is not kept (and whether that mismatch was acknowledged at
+    publish); "" otherwise.  The edit stage's views use it so a mismatched pin is never shown as if its protection were satisfied."""
+    held = pin.held_transition
+    if not pin.hold_transition or not isinstance(held, dict):
+        return ""
+    site = pin_site(tl, pin)
+    if site is None or (tl.clips[site].shot_index, tl.clips[site + 1].shot_index) != pin.key:
+        return ""
+    t = tl.clips[site + 1].transition_in
+    frames = 0 if t.is_cut else int(round(t.duration * tl.fps)) if tl.fps > 0 else 0
+    now = ("cut", 0) if frames <= 0 else (t.kind, frames)
+    want = ("cut", 0) if str(held.get("kind", "cut")) == "cut" or not held.get("frames") else (str(held["kind"]), int(held["frames"]))
+    if now == want:
+        return ""
+    why = "mismatch acknowledged at publish" if acknowledged else "mismatch not acknowledged"
+    return (f"its protected transition is NOT kept: the pin holds a {_transition_words(*want)}, this cut has a {_transition_words(*now)} "
+            f"({why})")
 
 
 def pin_constraints(pins: Sequence[Pin]) -> List[str]:

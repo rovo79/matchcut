@@ -1,0 +1,616 @@
+"""Proposal-wide rules, the timing report, the change report and ``describe``: pure functions of timelines and an ``EditContext``.
+
+The rules look at the whole result of a proposal, whichever operation caused a change, and count only what the ``before`` timeline did not
+already have (a problem the pipeline left is reported by ``describe``, never refused; a proposal may not add one or make one worse):
+
+- shot bounds and the minimum clip length, in frames; ``Timeline.validate`` (duplicate ids, unknown shots and transition kinds);
+- transitions: whole frames, at most ``max_fraction_of_clip`` of the shorter of their two clips, and a cut M2a's ``layout`` accepts (every
+  clip longer than its transitions);
+- every editor pin ``before`` holds is still held (clip instances, adjacency, both cut points), and a transition it protects
+  (``hold_transition``) is unchanged or becomes exactly the one the pin holds (``ops.protected_transition_change``);
+- every match cut of ``before`` keeps its two clips adjacent, its cut points and its hard cut;
+- clips no operation touched are identical, and so is every junction between two of them, in frames;
+- the proposal's guards (``max_duration_change_frames``, ``keep_record_frames``, ``keep_on_beat``).
+
+Transitions overlap their two clips (a new dissolve moves every later record position earlier); ``timing`` reports it, nothing absorbs it.
+"""
+from __future__ import annotations
+
+import json
+from collections import Counter
+from fractions import Fraction
+from typing import AbstractSet, Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from matchcut.interchange import InterchangeError
+from matchcut.interchange.common import junction_ids, layout
+from matchcut.pipeline.editorial import Pin, pin_outcome
+from matchcut.pipeline.passes import is_match_cut
+from matchcut.pipeline.timeline import HUMAN_STAGE, TRANSITION_KINDS, Clip, Timeline, clip_origin
+
+from .model import EditContext, Refused, Row, frame_rows, running_frames
+from .ops import (MAX_FRAMES, as_transition, beat_frame, find_junction, held_pins, held_transition, lock_reason, pin_label,
+                  protected_transition_change, transition_limit)
+
+GUARDS = ("max_duration_change_frames", "keep_record_frames", "keep_on_beat")
+
+Pair = Tuple[str, str]
+
+
+# ----------------------------------------------------------------------------------------------- helpers
+def _label(kind: str, frames: int) -> str:
+    return "cut" if not frames else f"{kind} {frames}f"
+
+
+def _junctions(tl: Timeline) -> Dict[Pair, int]:
+    """(outgoing id, incoming id) -> junction index."""
+    return {(tl.clips[i].id, tl.clips[i + 1].id): i for i in range(len(tl.clips) - 1)}
+
+
+def _cut(rows: Sequence[Row], i: int) -> Tuple[int, int, str, int]:
+    """Junction i in frames: (outgoing out-point, incoming in-point, transition kind, transition frames)."""
+    return rows[i].out_f, rows[i + 1].in_f, rows[i + 1].kind, rows[i + 1].tr
+
+
+def _shot_excess(ctx: EditContext, c: Clip, r: Row) -> Optional[Tuple[int, int, int]]:
+    """(frames outside the shot, lo, hi), or None for an unknown shot."""
+    if not ctx.has_shot(c.shot_index):
+        return None
+    lo, hi = ctx.shot_frames(c.shot_index)
+    return max(0, lo - r.in_f) + max(0, r.out_f - hi), lo, hi
+
+
+def _off_whole(ctx: EditContext, seconds: float) -> bool:
+    x = Fraction(float(seconds)) * ctx.rate
+    return abs(x - round(x)) > Fraction(1, 1000)
+
+
+def beat_offset(tl: Timeline, rows: Sequence[Row], j: int, ctx: EditContext) -> Optional[int]:
+    """How many frames junction ``j`` is after (+) or before (-) the nearest music beat, on the frame grid (0: its record frame is the beat's
+    frame, ``ops.beat_frame``); None without music."""
+    if ctx.music is None:
+        return None
+    rec = rows[j + 1].rec
+    beat = ctx.music.nearest_beat(float(Fraction(rec) / ctx.rate) + ctx.music_start)
+    return None if beat is None else rec - beat_frame(beat, ctx)
+
+
+def _dedupe(items: Iterable[str]) -> List[str]:
+    seen: set = set()
+    return [x for x in items if not (x in seen or seen.add(x))]
+
+
+# ----------------------------------------------------------------------------------------------- the rules
+def pin_problems(before: Timeline, after: Timeline, ctx: EditContext) -> List[Tuple[Pin, str]]:
+    """(pin, one line) for every editor pin of ``ctx`` that ``before`` holds and ``after`` no longer holds as it was: its two clips (within
+    a session clip ids are stable, so the very two clips the pin holds in ``before``), their adjacency and both cut points, and the
+    transition the pin protects (``hold_transition``): it may stay, or become exactly the one the pin holds, nothing else
+    (``ops.protected_transition_change``; ``publish`` checks a revision against r000 with this same function). ``pin_outcome`` alone would
+    accept another clip of the same shot at the same point for a pin taken without clip instances."""
+    out: List[Tuple[Pin, str]] = []
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    ja = _junctions(after)
+    present = {c.id for c in after.clips}
+    for pin, site in held_pins(before, ctx):
+        a, b = before.clips[site].id, before.clips[site + 1].id
+        k = ja.get((a, b))
+        if k is None:
+            gone = [x for x in (a, b) if x not in present]
+            why = f"{' and '.join(gone)} removed" if gone else f"its clips {a}|{b} are no longer adjacent"
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: {why}"))
+            continue
+        if _cut(ra, k)[:2] != _cut(rb, site)[:2]:
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: the cut {a}|{b} moved"))
+            continue
+        d = pin_outcome(after, pin, HUMAN_STAGE)
+        if d is None or d.action != "pinned":
+            out.append((pin, f"breaks the editor pin {pin_label(pin)}: {d.detail if d is not None and d.detail else 'the pin is lost'}"))
+            continue
+        line = protected_transition_change(pin, (rb[site + 1].kind, rb[site + 1].tr), (ra[k + 1].kind, ra[k + 1].tr))
+        if line is not None:
+            out.append((pin, line))
+    return out
+
+
+def transition_mismatches(tl: Timeline, ctx: EditContext) -> List[Dict[str, Any]]:
+    """Every protected editor pin ``tl`` holds whose junction's transition is not the one the pin holds (a protection set with an explicit
+    transition, or a session on a stage the pipeline built ignoring the protection), with how to resolve it: a proposal setting the held
+    transition (the only other change the rules allow there); re-protecting the junction's transition with ``pin_transition`` instead
+    replaces the protection the editor chose, so the repair offers it only as the editor's decision."""
+    rows = frame_rows(tl, ctx.rate)
+    ids = junction_ids(tl)
+    out: List[Dict[str, Any]] = []
+    for pin, site in held_pins(tl, ctx):
+        now = as_transition(rows[site + 1].kind, rows[site + 1].tr)
+        if not pin.hold_transition or pin.held_transition is None or held_transition(pin, now) == now:
+            continue
+        held = held_transition(pin, now)
+        out.append({"pin": pin_label(pin), "n": site + 1, "junction": ids[site], "transition": {"kind": now[0], "frames": now[1]},
+                    "held_transition": {"kind": held[0], "frames": held[1]}, "repair": mismatch_repair(pin, site + 1, now, held)})
+    return out
+
+
+def repair_op(n: int, held: Tuple[str, int]) -> Dict[str, Any]:
+    """The ``set_transition`` operation that gives junction ``n`` the ``held`` transition."""
+    op: Dict[str, Any] = {"op": "set_transition", "junction": n, "kind": held[0]}
+    if held[1]:
+        op["frames"] = held[1]
+    return op
+
+
+def mismatch_repair(pin: Pin, n: int, now: Tuple[str, int], held: Tuple[str, int]) -> str:
+    """How to resolve a protected pin whose junction ``n`` has ``now`` rather than the ``held`` transition, in one line: the repair first;
+    releasing or changing the protection, or carrying the mismatch forward, only as the user's decision."""
+    label = pin_label(pin)
+    return (f"the editor pin {label} holds a {_label(*held)} but junction {n} has a {_label(*now)}: repair it by proposing "
+            f"{json.dumps(repair_op(n, held))} (the only change allowed there), applying it and publishing. Otherwise ask the user: only "
+            f"they may release or change the protection (pin_transition with user_approved: \"{label}\", given only with their explicit "
+            "approval), and left as it is, publish refuses it unless the user explicitly approves carrying the mismatch forward (publish "
+            f'{{"acknowledge_mismatches": ["{label}", ...]}})')
+
+
+# ----------------------------------------------------------------------------------------------- protections changed during a session
+def protection_of(pin: Pin) -> Dict[str, Any]:
+    """A pin's transition protection as plain JSON: ``hold_transition`` and ``held_transition`` ({"kind", "frames"} or None)."""
+    held = pin.held_transition
+    return {"hold_transition": bool(pin.hold_transition),
+            "held_transition": None if not isinstance(held, dict) else {"kind": as_transition(held.get("kind"), held.get("frames"))[0],
+                                                                        "frames": as_transition(held.get("kind"), held.get("frames"))[1]}}
+
+
+def protections_of(pins: Sequence[Pin]) -> Dict[str, Dict[str, Any]]:
+    """Every pin's protection (``protection_of``) by label: what ``start`` records in r000 as the session's baseline."""
+    return {pin_label(p): protection_of(p) for p in pins}
+
+
+def recorded_protection(value: Any) -> Optional[Dict[str, Any]]:
+    """A protection read from a record (an earlier session's r000) as ``protection_of`` gives it, when it protects; None when it does not
+    protect or is malformed."""
+    if not isinstance(value, dict) or value.get("hold_transition") is not True:
+        return None
+    try:
+        return protection_of(Pin.from_dict({"out_shot": 0, "in_shot": 0, "out_time": 0, "in_time": 0, "hold_transition": True,
+                                            "held_transition": value.get("held_transition")}))
+    except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+        return None
+
+
+def _words(t: Optional[Dict[str, Any]]) -> str:
+    """A transition in words, with its article: "a cut", "a dissolve of 4 frames"."""
+    if not t:
+        return "whatever transition its junction had"
+    kind, frames = as_transition(t.get("kind"), t.get("frames"))
+    return "a cut" if not frames else f"a {kind.replace('_', ' ')} of {frames} frames"
+
+
+def _origin_words(origin: Dict[str, Any]) -> str:
+    """Where a baseline protection the pins no longer had when the session started comes from (``session.start``), in words."""
+    src = origin.get("from")
+    if src == "session":
+        who = origin.get("session") or origin.get("dir") or "?"
+        return f"had when the edit session {who} on this same base started (a restart keeps that baseline)"
+    return "had before this edit session started"
+
+
+def protection_changes(baseline: Dict[str, Dict[str, Any]], tl: Timeline, ctx: EditContext,
+                       origins: Optional[Dict[str, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Every transition protection recorded when the session started (``baseline``, r000's ``pin_protections``) that the pins stored now
+    no longer give: **released** (``hold_transition`` cleared), **replaced** (another ``held_transition``), **weakened** (still protected,
+    but no transition named) or **cleared** (the pin itself is gone).  Each entry names the pin, the change, the ``original`` and the
+    current (``now``, None for a cleared pin) protection, where the pin sits in ``tl`` (``n``, ``junction``) and the ``transition`` ``tl``
+    has there.  ``publish`` refuses while one is not acknowledged; a protection added or restated is not a change.
+
+    ``origins`` (r000's ``pin_protections_source["pins"]``) names, for a baseline protection the pins no longer had when the session
+    started, the earlier session on the same base it was inherited from; the reason then says so rather than "during the session"."""
+    origins = origins if isinstance(origins, dict) else {}
+    rows = frame_rows(tl, ctx.rate)
+    ids = junction_ids(tl)
+    sites = {pin_label(p): site for p, site in held_pins(tl, ctx)}
+    current = {pin_label(p): p for p in ctx.pins}
+    out: List[Dict[str, Any]] = []
+    for label in sorted(baseline):
+        was = baseline[label] or {}
+        if not was.get("hold_transition"):
+            continue
+        pin = current.get(label)
+        now = protection_of(pin) if pin is not None else None
+        if now is None:
+            change = "cleared"
+        elif not now["hold_transition"]:
+            change = "released"
+        elif was.get("held_transition") is not None and now["held_transition"] is None:
+            change = "weakened"
+        elif now["held_transition"] != was.get("held_transition"):
+            change = "replaced"
+        else:
+            continue
+        site = sites.get(label)
+        tr = None if site is None else {"kind": as_transition(rows[site + 1].kind, rows[site + 1].tr)[0],
+                                        "frames": as_transition(rows[site + 1].kind, rows[site + 1].tr)[1]}
+        orig = _words(was.get("held_transition"))
+        origin = origins.get(label) if isinstance(origins.get(label), dict) else None
+        had = "had when this edit session started" if origin is None else _origin_words(origin)
+        during = "during the session" if origin is None else "since then"
+        what = {"cleared": f"was cleared with the pin itself {during} (x in the TUI)",
+                "released": f"was released {during} (pin_transition hold: false)",
+                "weakened": f"was weakened {during}: the pin no longer names the transition it protects",
+                "replaced": f"was replaced {during}: the pin protects {_words((now or {}).get('held_transition'))} now"}[change]
+        where = (f"this cut has {_words(tr)} at junction {site + 1} ({ids[site]})" if site is not None
+                 else "the pin's clips are not together in this cut")
+        out.append({"pin": label, "change": change, "original": dict(was), "now": now,
+                    "n": None if site is None else site + 1, "junction": None if site is None else ids[site], "transition": tr,
+                    "reason": f"the transition protection pin {label} {had} ({orig}) {what}; {where}"})
+    return out
+
+
+# ----------------------------------------------------------------------------------------------- pins the session does not protect
+PENDING, NOT_PLACED, RELEASED = "pending", "not_placed", "released"  # the kinds of an unapplied pin
+RESTART = 'start {"restart": true}'
+USER_ONLY = ("a re-run costs model calls and leaves the edit and human stages out as stale, and a restart moves this session aside, so an "
+             "agent never does either on its own")
+
+
+def unapplied_pins(base: Timeline, ctx: EditContext, rerun: str = "re-run the pipeline", command: str = "") -> List[Dict[str, Any]]:
+    """Every editor pin of ``ctx`` (the pins stored now) that ``base`` (the session's r000) does not hold, so the session cannot protect it
+    the way it protects a held pin.  ``kind`` says why, and so what to do:
+
+    - ``pending``: the base's history has no pipeline decision for it (the pin was made or changed after the pipeline's last run); a run
+      applies it;
+    - ``not_placed``: the pipeline recorded that it could not place it (``pin_unplaced``); a plain re-run will not help;
+    - ``released``: the pipeline applied it, but the base no longer holds it (a ``human`` base whose editor changed it).
+
+    Each entry names the pin's two ``shots``, the ``junction`` where they are adjacent in ``base`` (or None), the ``affected_clips`` (every
+    clip of those shots) and ``affected_junctions`` (every junction with a neighbour of those shots): ``unapplied_problems`` refuses any
+    change to them.  ``rerun`` says how to re-run the pipeline on this workspace, in words; ``command`` is the bare shell command
+    (``rerun_command`` in each entry).  Every ``action`` that re-runs the pipeline or restarts the session asks the user to: an agent never
+    does either on its own (``USER_ONLY``)."""
+    held = {id(p) for p, _ in held_pins(base, ctx)}
+    ids = junction_ids(base)
+    out: List[Dict[str, Any]] = []
+    for pin in ctx.pins:
+        if id(pin) in held:
+            continue
+        label = pin_label(pin)
+        shots = {pin.out_shot, pin.in_shot}
+        decision = pin_outcome(base, pin, "")  # the base's history, on canonical terms (r000 is never the human stage)
+        if decision is None:
+            kind = PENDING
+            reason = (f"pin {label} was made or changed after the pipeline's last run, so this edit session does not protect it yet (the "
+                      "session's base stage has no pipeline decision for it)")
+            action = (f"to protect it, ask the user to re-run the pipeline so the canonical stage applies it ({rerun}), then to restart the "
+                      f"edit session ({RESTART}); {USER_ONLY}")
+        elif decision.action == "pin_unplaced":
+            kind = NOT_PLACED
+            reason = (f"pin {label} could not be placed by the pipeline's last run ({decision.detail or 'no reason recorded'}), so this edit "
+                      "session does not protect it")
+            action = ("a plain re-run will not place it: ask the user to clear it (x) or make it again (l / v) on a junction it can hold in "
+                      f"the TUI's Edit view, to re-run the pipeline ({rerun}), then to restart the edit session ({RESTART}); {USER_ONLY}")
+        else:
+            kind = RELEASED
+            now = pin_outcome(base, pin, HUMAN_STAGE)
+            why = now.detail if now is not None and now.detail else "its clips or cut points differ"
+            reason = f"pin {label} is not held by the session's base stage ({why}), so this edit session does not protect it"
+            action = ("ask the user: either clear the pin in the TUI's Edit view (x), if the editor's change is what they want, or make it "
+                      f"again (l / v) there, re-run the pipeline ({rerun}) and restart the edit session on the latest canonical stage "
+                      f"({RESTART}); a re-run also leaves human.json (the editor's cut) out as stale until it is imported again; {USER_ONLY}")
+        site = next((i for i in range(len(base.clips) - 1)
+                     if (base.clips[i].shot_index, base.clips[i + 1].shot_index) == (pin.out_shot, pin.in_shot)), None)
+        out.append({"pin": label, "kind": kind, "shots": [pin.out_shot, pin.in_shot], "junction": None if site is None else ids[site],
+                    "affected_clips": [c.id for c in base.clips if c.shot_index in shots],
+                    "affected_junctions": [ids[i] for i in range(len(base.clips) - 1)
+                                           if base.clips[i].shot_index in shots or base.clips[i + 1].shot_index in shots],
+                    "protected": False, "reason": reason, "action": action, "rerun_command": command or None})
+    return out
+
+
+def _pairs(tl: Timeline, shots: AbstractSet[int]) -> Dict[Pair, Dict[str, Any]]:
+    """(outgoing id, incoming id) -> the incoming transition, for every junction of ``tl`` with a neighbour of ``shots``."""
+    return {(a.id, b.id): b.transition_in.to_dict() for a, b in zip(tl.clips, tl.clips[1:])
+            if a.shot_index in shots or b.shot_index in shots}
+
+
+def unapplied_changes(before: Timeline, after: Timeline, entry: Dict[str, Any]) -> List[str]:
+    """What ``after`` changes, relative to ``before``, of what an unapplied pin (``unapplied_pins``) covers; [] when nothing.
+
+    Judged on the result, whatever operation caused it (so an indirect change counts): a clip of one of the pin's two shots removed, added
+    or changed in any way (points, transition, shot), and a junction with a neighbour of those shots that is no longer a junction, becomes
+    one, or changes its transition.  A clip of another shot may change (an edge, or a ripple that moves record positions)."""
+    shots = set(entry["shots"])
+    b = {c.id: c for c in before.clips}
+    a = {c.id: c for c in after.clips}
+    out: List[str] = []
+    for cid, c in b.items():
+        if c.shot_index in shots and cid not in a:
+            out.append(f"removes {cid} (shot {c.shot_index})")
+    for cid, c in a.items():
+        old = b.get(cid)
+        if old is None:
+            if c.shot_index in shots:
+                out.append(f"adds {cid} (shot {c.shot_index})")
+        elif (c.shot_index in shots or old.shot_index in shots) and c.to_dict() != old.to_dict():
+            out.append(f"changes {cid} (shot {old.shot_index})")
+    pb, pa = _pairs(before, shots), _pairs(after, shots)
+    for (x, y) in pb:
+        if (x, y) not in pa:
+            out.append(f"separates {x}|{y}")
+    for (x, y), tr in pa.items():
+        if (x, y) not in pb:
+            out.append(f"joins {x}|{y}")
+        elif tr != pb[(x, y)] and not any(line.startswith(f"changes {y} ") for line in out):
+            out.append(f"changes the transition at {x}|{y}")
+    return _dedupe(out)
+
+
+def unapplied_problems(before: Timeline, after: Timeline, unapplied: Sequence[Dict[str, Any]]) -> List[str]:
+    """One line per unapplied pin (``unapplied_pins``) whose clips or junctions ``after`` changes (``unapplied_changes``): the session fails
+    closed there, since it cannot tell whether the change keeps the pin.  Each line says what to do."""
+    out: List[str] = []
+    for e in unapplied:
+        hits = unapplied_changes(before, after, e)
+        if hits:
+            shown = ", ".join(hits[:6]) + (f" and {len(hits) - 6} more" if len(hits) > 6 else "")
+            out.append(f"{e['reason']}, and this edit {shown} (the clips and junctions of shots {e['shots'][0]} and {e['shots'][1]} "
+                       f"cannot change until it does): {e['action']}")
+    return out
+
+
+def problems(before: Timeline, after: Timeline, touched: Iterable[str], ctx: EditContext, guards: Optional[Dict[str, Any]] = None) -> List[str]:
+    """What ``after`` (the result of a proposal on ``before``) breaks, one line each; [] when it may be applied.  ``touched`` are the ids of
+    the clips the operations changed (``OpResult.touched``, united over the proposal)."""
+    touched = set(touched)
+    out: List[str] = []
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    old = {c.id: (c, r) for c, r in zip(before.clips, rb)}
+
+    # what Timeline.validate checks, compared clip by clip: duplicate ids, unknown shots, unknown transition kinds, shot bounds (in frames)
+    # and the minimum length; only a problem the clip did not have before, or a worse one, counts
+    count_b, count_a = Counter(c.id for c in before.clips), Counter(c.id for c in after.clips)
+    out += [f"duplicate clip id {cid}" for cid, n in count_a.items() if n > 1 and n > count_b.get(cid, 0)]
+    for c, r in zip(after.clips, ra):
+        prev = old.get(c.id)
+        if not ctx.has_shot(c.shot_index) and (prev is None or prev[0].shot_index != c.shot_index):
+            out.append(f"{c.id}: unknown shot {c.shot_index}")
+        kind = c.transition_in.kind
+        if kind not in TRANSITION_KINDS and (prev is None or prev[0].transition_in.kind != kind):
+            out.append(f"{c.id}: unknown transition {kind}")
+        ex = _shot_excess(ctx, c, r)
+        if ex is not None and ex[0]:
+            was = _shot_excess(ctx, prev[0], prev[1]) if prev is not None and prev[0].shot_index == c.shot_index else None
+            if was is None or ex[0] > was[0]:
+                out.append(f"{c.id} lies outside shot {c.shot_index} (frames {r.in_f}-{r.out_f}; the shot is frames {ex[1]}-{ex[2]})")
+        if r.length < ctx.min_frames and (prev is None or r.length < prev[1].length):
+            out.append(f"{c.id} is {r.length} frames, below the minimum clip length ({ctx.min_frames} frames)")
+
+    # transitions: the first clip has none; whole frames; at most max_fraction_of_clip of the shorter clip; the layout accepts the cut
+    if after.clips and not after.clips[0].transition_in.is_cut and not (before.clips and before.clips[0].id == after.clips[0].id
+                                                                         and not before.clips[0].transition_in.is_cut):
+        out.append(f"the first clip {after.clips[0].id} has an incoming {after.clips[0].transition_in.kind}")
+    for c in after.clips[1:]:
+        t = c.transition_in
+        if not t.is_cut and _off_whole(ctx, t.duration):
+            prev = old.get(c.id)
+            if prev is None or prev[0].transition_in != t:
+                out.append(f"the {t.kind} into {c.id} is not a whole number of frames ({t.duration}s)")
+    jb, ja = _junctions(before), _junctions(after)
+    for (a, b), i in ja.items():
+        tr = ra[i + 1].tr
+        if not tr:
+            continue
+        limit = transition_limit(ctx, ra[i].length, ra[i + 1].length)
+        excess = tr - limit
+        if excess <= 0:
+            continue
+        k = jb.get((a, b))
+        was = (rb[k + 1].tr - transition_limit(ctx, rb[k].length, rb[k + 1].length)) if k is not None else Fraction(0)
+        if excess > max(was, Fraction(0)):
+            out.append(f"the {tr}-frame {ra[i + 1].kind} at {a}|{b} is longer than {float(ctx.max_fraction):.0%} of the shorter clip "
+                       f"({int(limit)} frames)")
+    short = False
+    for c, r in zip(after.clips, ra):
+        if r.visible >= 1:
+            continue
+        prev = old.get(c.id)
+        if prev is None or prev[1].visible >= 1 or r.visible < prev[1].visible:
+            short = True
+            out.append(f"{c.id} is no longer than its transitions ({r.length} frames, {r.head + r.tail} of them in transitions): "
+                       "the cut cannot be laid out")
+    if not short:
+        try:
+            layout(after, ctx.rate)
+        except InterchangeError as exc:
+            try:
+                layout(before, ctx.rate)
+                out.append(f"the cut cannot be laid out: {exc}")
+            except InterchangeError:
+                pass
+
+    out += [line for _, line in pin_problems(before, after, ctx)]
+
+    # match cuts
+    for i in range(len(before.clips) - 1):
+        a, b = before.clips[i], before.clips[i + 1]
+        if not is_match_cut(a, b):
+            continue
+        k = ja.get((a.id, b.id))
+        was = _cut(rb, i)
+        ok = k is not None and _cut(ra, k)[:2] == was[:2] and (ra[k + 1].tr == 0 or _cut(ra, k)[2:] == was[2:])
+        if not ok:
+            out.append(f"breaks the match cut {a.id}|{b.id}: its clips must stay adjacent, with the same cut points and a hard cut")
+
+    # untouched clips and the junctions between them
+    for c in after.clips:
+        prev = old.get(c.id)
+        if prev is not None and c.id not in touched and c.to_dict() != prev[0].to_dict():
+            out.append(f"{c.id} changed but no operation touched it")
+    for (a, b), k in ja.items():
+        i = jb.get((a, b))
+        if i is not None and a not in touched and b not in touched and _cut(ra, k) != _cut(rb, i):
+            out.append(f"junction {a}|{b} changed in frames but no operation touched it")
+
+    out += guard_problems(before, after, ctx, guards)
+    return _dedupe(out)
+
+
+def guard_problems(before: Timeline, after: Timeline, ctx: EditContext, guards: Optional[Dict[str, Any]]) -> List[str]:
+    """The guards a proposal carries (decision 3), each violation naming the guard and the junction.  Junctions are named as in ``before``
+    (number or id) and followed to ``after`` by their two clips."""
+    if guards is None:
+        return []
+    if not isinstance(guards, dict):
+        return [f"guards must be an object with any of {', '.join(GUARDS)}, not {guards!r}"]
+    out: List[str] = [f"unknown guard {k!r} (guards: {', '.join(GUARDS)})" for k in guards if k not in GUARDS]
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    ja = _junctions(after)
+    ids_a = junction_ids(after)
+
+    if "max_duration_change_frames" in guards:
+        limit = guards["max_duration_change_frames"]
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= MAX_FRAMES:
+            shown = repr(limit) if len(repr(limit)) <= 24 else repr(limit)[:20] + "..."
+            out.append(f"guard max_duration_change_frames must be a whole number of frames from 0 to {MAX_FRAMES}, not {shown}")
+        else:
+            d = running_frames(ra) - running_frames(rb)
+            if abs(d) > limit:
+                out.append(f"guard max_duration_change_frames: the running time changes by {d:+d} frames (at most {limit} allowed)")
+
+    def followed(name: str) -> List[Tuple[Any, str, Optional[int]]]:
+        """(the reference, its id in before, its index in after or None) for each junction a guard names."""
+        refs = guards[name]
+        if isinstance(refs, (str, int)) and not isinstance(refs, bool):
+            refs = [refs]
+        if not isinstance(refs, list):
+            out.append(f"guard {name} must be a list of junctions, not {refs!r}")
+            return []
+        ids_b = junction_ids(before)
+        found = []
+        for ref in refs:
+            try:
+                i = find_junction(before, ref)
+            except Refused as exc:
+                out.append(f"guard {name}: {exc}")
+                continue
+            found.append((ref, ids_b[i], ja.get((before.clips[i].id, before.clips[i + 1].id))))
+        return found
+
+    if "keep_record_frames" in guards:
+        for ref, jid, k in followed("keep_record_frames"):
+            i = find_junction(before, ref)
+            a, b = before.clips[i].id, before.clips[i + 1].id
+            if k is None:
+                out.append(f"guard keep_record_frames: junction {jid} ({a}|{b}) is no longer a junction")
+            elif ra[k + 1].rec != rb[i + 1].rec:
+                d = ra[k + 1].rec - rb[i + 1].rec
+                out.append(f"guard keep_record_frames: junction {jid} ({a}|{b}) moves from record frame {rb[i + 1].rec} to {ra[k + 1].rec} ({d:+d}f)")
+    if "keep_on_beat" in guards:
+        if ctx.music is None:
+            out.append("guard keep_on_beat: this workspace has no music track")
+        else:
+            for ref, jid, k in followed("keep_on_beat"):
+                i = find_junction(before, ref)
+                a, b = before.clips[i].id, before.clips[i + 1].id
+                if beat_offset(before, rb, i, ctx) != 0:
+                    continue  # it was off the beat already: the timing report shows it, the guard does not refuse an unrelated edit
+                if k is None:
+                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}) was on the beat and is no longer a junction")
+                    continue
+                off = beat_offset(after, ra, k, ctx)
+                if off != 0:
+                    where = f"{abs(off)} frame{'s' if abs(off) != 1 else ''} {'after' if off > 0 else 'before'} the beat" if off is not None else "with no beat"
+                    out.append(f"guard keep_on_beat: junction {jid} ({a}|{b}, {ids_a[k]} after the edit) was on the beat and would be {where}")
+    return out
+
+
+# ----------------------------------------------------------------------------------------------- reports
+def timing(before: Timeline, after: Timeline, ctx: EditContext) -> Dict[str, Any]:
+    """The timing of a proposal (decision 3), in frames: the running time before and after; every junction (by its two clip ids, named by
+    its id in ``after``) whose record frame changed; junctions added and removed; with music, every junction's beat offset before and after
+    and the junctions that left or reached a beat."""
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    jb, ja = _junctions(before), _junctions(after)
+    ids_b, ids_a = junction_ids(before), junction_ids(after)
+    db, da = running_frames(rb), running_frames(ra)
+    moved, added, offsets, left, reached = [], [], [], [], []
+    for (a, b), k in ja.items():
+        i = jb.get((a, b))
+        if i is None:
+            added.append({"id": ids_a[k], "clips": [a, b], "record_frame": ra[k + 1].rec})
+        elif ra[k + 1].rec != rb[i + 1].rec:
+            moved.append({"id": ids_a[k], "clips": [a, b], "before": rb[i + 1].rec, "after": ra[k + 1].rec, "delta": ra[k + 1].rec - rb[i + 1].rec})
+        if ctx.music is not None:
+            o0 = beat_offset(before, rb, i, ctx) if i is not None else None
+            o1 = beat_offset(after, ra, k, ctx)
+            offsets.append({"id": ids_a[k], "clips": [a, b], "before": o0, "after": o1})
+            if i is not None and o0 == 0 and o1 != 0:
+                left.append(ids_a[k])
+            if i is not None and o0 != 0 and o1 == 0:
+                reached.append(ids_a[k])
+    removed = [{"id": ids_b[i], "clips": [a, b], "record_frame": rb[i + 1].rec} for (a, b), i in jb.items() if (a, b) not in ja]
+    return {"duration_frames": [db, da], "duration_change": da - db, "moved": moved, "added": added, "removed": removed,
+            "beat_offsets": offsets if ctx.music is not None else None, "left_beat": left, "reached_beat": reached}
+
+
+def same_clip(x: Clip, y: Clip) -> bool:
+    """Whether two clips with the same id are the same clip instance: the same shot and the same stamped ``origin`` (an unstamped origin is
+    derived from the clip's range by ``clip_origin``, so it would change with every trim; two unstamped clips of one shot are the same)."""
+    return x.shot_index == y.shot_index and (x.origin == y.origin or not (x.origin or y.origin))
+
+
+def changes(before: Timeline, after: Timeline, ctx: EditContext) -> List[str]:
+    """What ``after`` changes relative to ``before``, by clip id (ids are stable within a session, so nothing is matched): removed and
+    added clips, edge moves in source frames, incoming transitions, and the new order of the clips both have.  A clip whose id is the same
+    but whose shot or instance (``same_clip``) is not is reported as removed and added, never as an edge move."""
+    rb, ra = frame_rows(before, ctx.rate), frame_rows(after, ctx.rate)
+    b = {c.id: (c, r) for c, r in zip(before.clips, rb)}
+    a = {c.id: (c, r) for c, r in zip(after.clips, ra)}
+    kept = {cid for cid in a if cid in b and same_clip(b[cid][0], a[cid][0])}
+    out: List[str] = []
+    for cid, (c, r) in b.items():
+        if cid not in kept:
+            out.append(f"removed {cid} (shot {c.shot_index}, frames {r.in_f}-{r.out_f})")
+    prev_a = {c.id: (after.clips[i - 1].id if i else None) for i, c in enumerate(after.clips)}
+    for cid, (c, r) in a.items():
+        if cid not in kept:
+            tr = f", incoming {_label(r.kind, r.tr)}" if r.tr else ""
+            out.append(f"added {cid} (shot {c.shot_index}, frames {r.in_f}-{r.out_f}{tr})")
+            continue
+        r0 = b[cid][1]
+        d_in, d_out = r.in_f - r0.in_f, r.out_f - r0.out_f
+        if d_in and d_in == d_out:
+            out.append(f"{cid}: slipped {d_in:+d}f")
+        elif d_in or d_out:
+            out.append(f"{cid}: " + ", ".join(([f"in {d_in:+d}f"] if d_in else []) + ([f"out {d_out:+d}f"] if d_out else [])))
+        t0, t1 = (r0.kind, r0.tr), (r.kind, r.tr)
+        if t0 != t1:
+            if prev_a[cid] is not None:
+                out.append(f"{prev_a[cid]}|{cid}: {_label(*t0)} -> {_label(*t1)}")
+            else:
+                out.append(f"{cid}: incoming {_label(*t0)} dropped (it is the first clip now)")
+    common_b = [c.id for c in before.clips if c.id in kept]
+    common_a = [c.id for c in after.clips if c.id in kept]
+    if common_a != common_b:
+        out.append("order: " + " ".join(common_a))
+    return out
+
+
+def describe(tl: Timeline, ctx: EditContext) -> Dict[str, Any]:
+    """The cut for inspection, in frames: its clips (id, key, shot, story beat, source and record frames, incoming transition, locked
+    edges, purpose) and its junctions (number, id, clips, record frame, transition, story-beat change, match cut, editor pin and whether it
+    protects the transition, music-beat offset)."""
+    rows = frame_rows(tl, ctx.rate)
+    ids = junction_ids(tl)
+    pins = {site: pin for pin, site in held_pins(tl, ctx)}
+    clips = []
+    for c, r in zip(tl.clips, rows):
+        locks = {edge: why for edge in ("in", "out") for why in [lock_reason(c, edge)] if why}
+        clips.append({"id": c.id, "key": clip_origin(c), "shot": c.shot_index, "beat": c.beat_id, "source_frames": [r.in_f, r.out_f],
+                      "frames": r.length, "record_frames": [r.rec, r.rec_out], "transition_in": {"kind": r.kind, "frames": r.tr},
+                      "locks": locks, "purpose": c.purpose})
+    junctions = []
+    for i, jid in enumerate(ids):
+        a, b = tl.clips[i], tl.clips[i + 1]
+        pin = pins.get(i)
+        junctions.append({"n": i + 1, "id": jid, "out": a.id, "in": b.id, "record_frame": rows[i + 1].rec,
+                          "transition": {"kind": rows[i + 1].kind, "frames": rows[i + 1].tr}, "beat_change": a.beat_id != b.beat_id,
+                          "match_cut": is_match_cut(a, b), "pinned": pin is not None, "pin": pin_label(pin) if pin is not None else None,
+                          "hold_transition": bool(pin is not None and pin.hold_transition),
+                          "beat_offset_frames": beat_offset(tl, rows, i, ctx)})
+    return {"rate": str(ctx.rate), "fps": round(ctx.fps, 6), "duration_frames": running_frames(rows), "clips": clips, "junctions": junctions}

@@ -1,6 +1,7 @@
 """Edit workbench: pick a junction on the track and see why the cut is there."""
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -11,10 +12,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Static
 
-from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states
-from matchcut.pipeline.junctions import Junction, build_junctions, scorer_for_workspace, stale_human
+from matchcut.pipeline.editorial import Pin, PinStore, pin_outcome, pin_states, protected_transition_note
+from matchcut.pipeline.junctions import (Junction, build_junctions, edit_acknowledged_mismatches, edit_protection_changes, protection_change_note,
+                                         scorer_for_workspace, stale_edit, stale_human)
 from matchcut.pipeline.sampling import FrameCache
-from matchcut.pipeline.timeline import HUMAN_STAGE, clip_origin
+from matchcut.pipeline.timeline import EDIT_STAGE, HUMAN_STAGE, Timeline, clip_origin
 from matchcut.review import controller, items
 from .. import images
 from ..state import RunState, file_fingerprint
@@ -23,6 +25,33 @@ from ..widgets.inspector import render_inspector
 from ..widgets.timeline import TimelineTrack
 
 FRAME_IDS = ("out-frame", "in-frame", "blend-frame")
+# a pin made or changed while an edit session (matchcut.edit, WS/edits/session.json) exists: the session holds only the pins its base stage
+# holds, so it fails closed at this pin's shots until the pipeline applies it and the session is restarted
+EDIT_SESSION_NOTE = ("an active edit session will not protect this pin until you re-run the pipeline and restart the session (it refuses "
+                     "edits to these shots until then)")
+
+
+def _transition_text(held: Optional[dict]) -> str:
+    """A held transition as the edit CLI words it: "cut", "dissolve of 6 frames"."""
+    if not held or str(held.get("kind", "cut")) == "cut" or not held.get("frames"):
+        return "cut"
+    return f"{str(held['kind']).replace('_', ' ')} of {held['frames']} frames"
+
+
+def _unchanged_and_applied(ws: Path, old: Optional[Pin], new: Pin) -> bool:
+    """Whether locking again changed nothing an edit session sees: the pin had the same points and clip instances before, and the
+    session's base stage (``WS/edits/session.json``'s ``base_file``) applied it, so the session holds it as before."""
+    if old is None or (old.out_time, old.in_time, old.out_origin, old.in_origin) != (new.out_time, new.in_time, new.out_origin, new.in_origin):
+        return False
+    try:
+        state = json.loads((Path(ws) / "edits" / "session.json").read_text(encoding="utf-8"))
+        name = str(state.get("base_file") or "")
+        if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+            return False
+        base = Timeline.load(Path(ws) / name)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    return any(st.state == "applied" for st in pin_states(base, [new]))
 
 
 class _Busy(Exception):
@@ -145,7 +174,8 @@ class EditView(Vertical):
             summary += f" · {len(unplaced)} pin(s) not placed"
         for line in self._changed_pins(state, pins):
             summary += f" · {line}"
-        stale = stale_human(state.workspace)  # an imported editor cut that no longer fits is left out of the stages: say why
+        # an agent's published edit or an imported editor cut that no longer fits is left out of the stages: say why
+        stale = "\n".join(r for r in (stale_edit(state.workspace), stale_human(state.workspace)) if r)
         header.update(Text.assemble(("stage ", "dim"), (stage, "bold"), summary, ("   [ ] stage   ←/→ junction", "dim"), *([("\n" + stale, "yellow")] if stale else [])))
         strip.update(self._beat_strip(state, tl))
         self._show_junction()
@@ -215,7 +245,8 @@ class EditView(Vertical):
             store = PinStore(self._state.workspace)
             # where the human stage says a pin changed, the badge is on the junction the pin now sits at (its pair, or its surviving clip), not by shots
             pin = (store.get(*j.pin_key) if j.pin_lost and j.pin_key else None) or store.get(j.out_shot, j.in_shot)
-            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin)))
+            panel.update(render_inspector(j, stage, pin, self.expanded, self._pin_decision(pin), self.stages[-1] if self.stages else "",
+                                          self._pin_note(pin, stage)))
         # The frames depend only on what is cut where, not on every workspace write (a pin changes editorial.json).
         shown = j.state_at(stage) or j.current
         media = self._state.media()
@@ -230,6 +261,20 @@ class EditView(Vertical):
         if not pins or not self.stages or self.stages[-1] != HUMAN_STAGE:
             return []
         return [f"pin {st.label} changed by the editor: {st.reason}" for st in pin_states(state.timeline(HUMAN_STAGE), pins, HUMAN_STAGE) if st.state == "changed"]
+
+    def _pin_note(self, pin: Optional[Pin], stage: str) -> str:
+        """On the edit stage, whether a protected pin's transition is kept there (``protected_transition_note``, with the record's
+        acknowledgement): never shown as satisfied when it is not."""
+        if pin is None or self._state is None or stage != EDIT_STAGE:
+            return ""
+        tl = self._state.timeline(EDIT_STAGE)
+        if tl is None:
+            return ""
+        label = f"s{pin.out_shot}->s{pin.in_shot}"
+        changed = edit_protection_changes(self._state.workspace).get(label)
+        if changed is not None:  # its protection was released or replaced during the edit session: never shown as kept
+            return protection_change_note(changed)
+        return protected_transition_note(tl, pin, label in edit_acknowledged_mismatches(self._state.workspace))
 
     def _pin_decision(self, pin: Optional[Pin]):
         """What the latest stage's history says happened to ``pin``, whichever stage is being inspected."""
@@ -344,13 +389,24 @@ class EditView(Vertical):
                 return ""
             return c.origin or (clip_origin(c) if stage == "roughcut" else "")
 
+        store = PinStore(self._state.workspace)
+        # A transition protection (set by the edit CLI's pin_transition) is about the junction's transition, not its cut points: locking
+        # or reverting the junction again keeps it, even where the cut points move.  Only the edit CLI releases it (or clearing the pin).
+        old = store.get(j.out_shot, j.in_shot)
         pin = Pin(j.out_shot, j.in_shot, round(source.out_time, 3), round(source.in_time, 3), origin,
-                  out_origin=instance(j.out_clip, j.out_shot), in_origin=instance(j.in_clip, j.in_shot))
-        PinStore(self._state.workspace).put(pin)
-        note = self._apply_hint(f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s")
+                  out_origin=instance(j.out_clip, j.out_shot), in_origin=instance(j.in_clip, j.in_shot),
+                  hold_transition=old.hold_transition if old is not None else False,
+                  held_transition=dict(old.held_transition) if old is not None and old.held_transition is not None else None)
+        store.put(pin)
+        message = f"pinned shot {j.out_shot} → shot {j.in_shot} ({origin}) at out {pin.out_time:.2f}s / in {pin.in_time:.2f}s"
+        if pin.hold_transition:
+            message += f"; its transition stays protected ({_transition_text(pin.held_transition)})"
+        note = self._apply_hint(message)
         if j.baseline.stage != j.first_stage:
             note += (". these shots are not adjacent in the rough cut: the next run moves one of these shots next to the other, "
                      "unless that would split or reorder the beats or another pin holds them")
+        if (Path(self._state.workspace) / "edits" / "session.json").exists() and not _unchanged_and_applied(self._state.workspace, old, pin):
+            note += f". {EDIT_SESSION_NOTE}"
         self.app.notify(note)
         self._fingerprint = None
         self.refresh_from_state(self._state)
@@ -366,8 +422,12 @@ class EditView(Vertical):
         if j is None or self._state is None:
             self.app.notify("no junction selected", severity="warning")
             return
-        if PinStore(self._state.workspace).remove(j.out_shot, j.in_shot):
-            self.app.notify("pin cleared: the passes decide this junction again on the next run")
+        store = PinStore(self._state.workspace)
+        old = store.get(j.out_shot, j.in_shot)
+        if store.remove(j.out_shot, j.in_shot):
+            released = (f" and its transition protection ({_transition_text(old.held_transition)}) is released: an edit session may change "
+                        "that transition again" if old is not None and old.hold_transition else "")
+            self.app.notify(f"pin cleared{released}: the passes decide this junction again on the next run")
         else:
             self.app.notify("this junction has no pin", severity="warning")
         self._fingerprint = None

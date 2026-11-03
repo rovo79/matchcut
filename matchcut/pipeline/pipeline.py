@@ -71,13 +71,15 @@ class Pipeline:
         on_event: Optional[EventHandler] = None,
         on_checkpoint: Optional[CheckpointHandler] = None,
         cancel: Optional[threading.Event] = None,
+        save_config: bool = True,
     ):
         if not cfg.source:
             raise ValueError("config.source is required")
         self.cfg = cfg
         self.ws = cfg.workspace_path
         self.ws.mkdir(parents=True, exist_ok=True)
-        cfg.save(self.ws / "config.json")
+        if save_config:  # (False: the workspace's config.json is used as it is and never rewritten, ``--keep-config``)
+            cfg.save(self.ws / "config.json")
         self.on_event = on_event
         self.on_checkpoint = on_checkpoint
         self.cancel = cancel
